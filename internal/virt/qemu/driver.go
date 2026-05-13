@@ -24,6 +24,8 @@ func (d *NoopDriver) Name() string {
 
 // Start validates context cancellation and performs no host operation.
 func (d *NoopDriver) Start(ctx context.Context, vmName string) error {
+	_ = vmName
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -34,6 +36,8 @@ func (d *NoopDriver) Start(ctx context.Context, vmName string) error {
 
 // Stop validates context cancellation and performs no host operation.
 func (d *NoopDriver) Stop(ctx context.Context, vmName string) error {
+	_ = vmName
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

@@ -23,6 +23,8 @@ func (c *NoopClient) Name() string {
 
 // Connect validates context cancellation and performs no socket operation.
 func (c *NoopClient) Connect(ctx context.Context, socketPath string) error {
+	_ = socketPath
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

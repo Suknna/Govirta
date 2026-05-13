@@ -23,6 +23,8 @@ func (m *NoopManager) Name() string {
 
 // Ensure validates context cancellation and performs no host networking operation.
 func (m *NoopManager) Ensure(ctx context.Context, bridgeName string) error {
+	_ = bridgeName
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
