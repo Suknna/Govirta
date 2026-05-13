@@ -1,20 +1,20 @@
 # Govirta
 
-Govirta is a Go-based virtualization infrastructure project that builds from QEMU upward.
+Govirta is a Go-based virtualization infrastructure project. It starts from the QEMU layer and builds upward toward a lightweight virtual machine orchestration platform.
 
-The project targets ESXi and VMware-style infrastructure operations, with the long-term goal of becoming a lightweight alternative to OpenStack for environments that need practical virtualization control without adopting a large cloud platform.
+The project targets ESXi / VMware-style infrastructure capabilities at the virtualization layer. Its long-term goal is to provide a lighter alternative to OpenStack for virtual machine orchestration scenarios where a full OpenStack deployment is too heavy.
 
 ## Architecture Direction
 
-Govirta's architecture direction is inspired by Kubernetes control-plane patterns, but the project does not depend on Kubernetes in the short term. The initial focus is a small, explicit control plane and compute-node model that can iterate quickly while keeping room for future scheduling, reconciliation, and distributed state design.
+Govirta follows a Kubernetes-inspired architecture without depending on Kubernetes in the short term.
 
-Core components:
+The system is split into:
 
-- `govirtad`: control plane daemon.
-- `govirtlet`: compute node agent.
-- `govirtctl`: command-line client.
+- **Control plane (`govirtad`)**: owns resource modeling, API boundaries, scheduling, node coordination, and state management.
+- **Compute node agent (`govirtlet`)**: runs on virtualization hosts and owns local QEMU, QMP, and Linux bridge integration.
+- **CLI (`govirtctl`)**: provides an operator-facing command-line entrypoint.
 
-Process model:
+The intended shape is:
 
 ```text
 govirtctl -> govirtad control plane -> scheduler/store/control loops -> govirtlet -> QEMU/QMP/Linux bridge
@@ -26,12 +26,12 @@ govirtctl -> govirtad control plane -> scheduler/store/control loops -> govirtle
 - QEMU
 - QMP
 - Linux bridge
-- zerolog
+- zerolog for structured logging
 
-## Status
+## Current Status
 
-Govirta is in a fast iteration phase. The repository is intentionally starting with a small foundation so core architecture, package boundaries, and runtime contracts can be shaped as the implementation grows.
+Govirta is in an early, fast-iteration development phase. APIs, configuration, package boundaries, and architecture are expected to change substantially. Backward compatibility is not a goal at this stage.
 
 ## License
 
-Govirta is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+Govirta is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
