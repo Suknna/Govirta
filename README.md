@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="image/govirta_icon.png" alt="Govirta project icon" width="160" />
+</p>
+
 # Govirta
 
 Govirta is a Go-based virtualization infrastructure project. It starts from the QEMU layer and builds upward toward a lightweight virtual machine orchestration platform.

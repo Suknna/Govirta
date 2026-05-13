@@ -8,6 +8,15 @@ Govirta starts from QEMU and builds upward. The compute node wraps QEMU, QMP, an
 
 The architecture is inspired by Kubernetes control plane / node separation, scheduling, and control-loop ideas, but the project does not target Kubernetes or CRD integration in the short term.
 
+## Project Icon and Theme Colors
+
+- Project icon: `image/govirta_icon.png`.
+- The icon should be used as the canonical Govirta visual mark in repository documentation and project-facing materials.
+- Brand colors are derived from the non-white areas of the icon; white is treated as background, not as a brand color:
+  - Primary violet-blue: `#2000C0` for infrastructure, control-plane, and virtualization identity.
+  - Secondary teal: `#00B0B0` for compute-node, runtime, and operational status accents.
+- Keep future visual assets consistent with these colors unless the project explicitly adopts a new design direction.
+
 ## Current Development Phase
 
 Govirta is in a fast-iteration phase.
