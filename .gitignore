@@ -1,11 +1,3 @@
-# Agent/session local state
-.pomelo_mem/
-.tmp/
-
-# Worktrees
-.worktrees/
-worktrees/
-
 # Go build outputs
 /bin/
 /dist/
@@ -22,3 +14,11 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+
+# Agent/session local state
+.pomelo_mem/
+.tmp/
+
+# Worktrees
+.worktrees/
+worktrees/
