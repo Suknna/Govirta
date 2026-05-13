@@ -33,11 +33,15 @@ func TestNoopSchedulerScheduleCanceledContext(t *testing.T) {
 	}
 }
 
-func TestNoopSchedulerScheduleNoNodes(t *testing.T) {
+func TestNoopSchedulerScheduleNoNodesReturnsZeroNodeForSkeleton(t *testing.T) {
 	scheduler := NewNoopScheduler()
 
-	_, err := scheduler.Schedule(context.Background(), types.VirtualMachine{Name: "vm"}, nil)
-	if !errors.Is(err, ErrNoNodes) {
-		t.Fatalf("Schedule() error = %v, want %v", err, ErrNoNodes)
+	got, err := scheduler.Schedule(context.Background(), types.VirtualMachine{Name: "vm"}, nil)
+	if err != nil {
+		t.Fatalf("Schedule() error = %v, want nil", err)
+	}
+
+	if got != (types.Node{}) {
+		t.Fatalf("Schedule() node = %+v, want zero node", got)
 	}
 }

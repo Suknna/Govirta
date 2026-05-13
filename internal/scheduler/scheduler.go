@@ -2,13 +2,9 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 
 	"github.com/suknna/govirta/internal/types"
 )
-
-// ErrNoNodes indicates that no compute nodes are available for scheduling.
-var ErrNoNodes = errors.New("no nodes available")
 
 // Scheduler defines the VM placement boundary.
 type Scheduler interface {
@@ -34,7 +30,7 @@ func (s *NoopScheduler) Schedule(ctx context.Context, vm types.VirtualMachine, n
 	}
 
 	if len(nodes) == 0 {
-		return types.Node{}, ErrNoNodes
+		return types.Node{}, nil
 	}
 
 	return nodes[0], nil
