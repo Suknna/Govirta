@@ -3,9 +3,21 @@ node:
 
 qemu:
   binary: qemu-system-x86_64
+  machine:
+    type: q35
+    accelerator: tcg
+  cpuModel: ""
+  firmware:
+    biosPath: ""
+  runtime:
+    qmpSocket: .tmp/qemu/cirros/qmp.sock
+    pidFile: .tmp/qemu/cirros/qemu.pid
+    qemuLog: .tmp/qemu/cirros/qemu.log
+    serialLog: .tmp/qemu/cirros/serial.log
 
 qmp:
-  socketDir: /var/run/govirta/qmp
+  socketDir: .tmp/qemu
 
 network:
   bridge: govirta0
+  tap: gv-tap0
