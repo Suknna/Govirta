@@ -26,6 +26,26 @@ Govirta is in a fast-iteration phase.
 - If an abstraction is wrong, replace or remove it directly.
 - Keep changes focused on the current task, but prefer clean replacement over compatibility shims.
 
+## Roadmap
+
+Govirta evolves cycle by cycle. Cycle documents live under [`docs/roadmap/`](./docs/roadmap/README.md). Each cycle has a single north-star goal and a checklist; a cycle is only complete when every box is ticked.
+
+- [ ] **Cycle 1 — Single-node single-VM loop.** *In progress.* `docs/roadmap/cycle-1-single-node-single-vm.md`.
+- [ ] **Cycle 2 — Node daemon and multi-VM lifecycle.** `docs/roadmap/cycle-2-node-daemon.md`.
+- [ ] **Cycle 3 — Control plane and scheduling.** `docs/roadmap/cycle-3-control-plane.md`.
+- [ ] **Cycle 4 — Production minimum.** `docs/roadmap/cycle-4-production-minimum.md`.
+- [ ] **Cycle 5 — Operations and resilience.** `docs/roadmap/cycle-5-operations.md`.
+
+Rules for agents working in Govirta:
+
+- The active cycle is the only one tagged *In progress*. Do not start work that belongs to a later cycle without first marking the current one complete.
+- Items listed under a cycle's *范围外* section are explicitly deferred. Do not implement them in the current cycle.
+- When a cycle finishes, update three places together: the cycle document's `状态` field, this section's checkbox, and the README roadmap checkbox.
+
+## Permanent Architecture Constraints
+
+- **No libvirt, ever.** Govirta's virtualization stack is permanently QEMU + QMP + qemu-img + netlink. Do not introduce `libvirt.org/go/libvirt`, `digitalocean/go-libvirt`, libvirtd, or any libvirt-derived abstraction at any cycle. Do not write design notes evaluating libvirt re-entry.
+
 ## Technology Choices
 
 - Language: Go
