@@ -5,13 +5,11 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/suknna/govirta/internal/network/bridge"
-	"github.com/suknna/govirta/internal/virt/qemu"
 	"github.com/suknna/govirta/internal/virt/qmp"
 )
 
 // Agent coordinates compute-node local virtualization dependencies.
 type Agent struct {
-	qemuDriver    qemu.Driver
 	qmpClient     qmp.Client
 	bridgeManager bridge.Manager
 }
@@ -19,7 +17,6 @@ type Agent struct {
 // NewAgent creates a node agent with no-op dependencies.
 func NewAgent() *Agent {
 	return &Agent{
-		qemuDriver:    qemu.NewNoopDriver(),
 		qmpClient:     qmp.NewNoopClient(),
 		bridgeManager: bridge.NewNoopManager(),
 	}
@@ -29,7 +26,6 @@ func NewAgent() *Agent {
 func (a *Agent) Run(ctx context.Context) error {
 	logger := zerolog.Ctx(ctx).With().
 		Str("component", "node").
-		Str("qemu_driver", a.qemuDriver.Name()).
 		Str("qmp_client", a.qmpClient.Name()).
 		Str("bridge_manager", a.bridgeManager.Name()).
 		Logger()
