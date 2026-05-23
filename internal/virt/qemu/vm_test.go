@@ -1,6 +1,7 @@
 package qemu_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,12 +96,85 @@ func TestVMArgvBuildsRequiredQEMUCommand(t *testing.T) {
 	}
 }
 
-func TestBuildRejectsMissingRequiredFields(t *testing.T) {
-	_, err := qemu.NewVM(qemu.ArchX86_64).
-		SMP(qemu.SMP{CPUs: 0, Cores: 4, Threads: 1, Sockets: 1}).
-		Build()
-	if err == nil {
-		t.Fatalf("Build() error = nil, want missing required field error")
+func TestBuildRejectsInvalidConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		make func() (qemu.VM, error)
+	}{
+		{
+			name: "empty_binary",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.Arch("")).Build()
+			},
+		},
+		{
+			name: "smp_cpus_zero",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					SMP(qemu.SMP{CPUs: 0, Cores: 1, Threads: 1, Sockets: 1}).
+					Build()
+			},
+		},
+		{
+			name: "smp_cores_zero",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					SMP(qemu.SMP{CPUs: 1, Cores: 0, Threads: 1, Sockets: 1}).
+					Build()
+			},
+		},
+		{
+			name: "smp_threads_zero",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 0, Sockets: 1}).
+					Build()
+			},
+		},
+		{
+			name: "smp_sockets_zero",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 0}).
+					Build()
+			},
+		},
+		{
+			name: "memory_zero",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Memory(qemu.MiB(0)).
+					Build()
+			},
+		},
+		{
+			name: "memory_negative",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Memory(qemu.MiB(-1)).
+					Build()
+			},
+		},
+		{
+			name: "unsupported_device",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddDevice("not-a-device").
+					Build()
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.make()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+		})
 	}
 }
 
