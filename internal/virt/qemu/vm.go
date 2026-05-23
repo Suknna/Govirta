@@ -186,7 +186,7 @@ func (b *Builder) Build() (VM, error) {
 	return VM{builder: *b}, nil
 }
 
-func (v VM) Argv() ([]string, error) {
+func (v VM) Argv() []string {
 	b := v.builder
 	argv := []string{b.binary}
 	if b.name != nil {
@@ -222,7 +222,7 @@ func (v VM) Argv() ([]string, error) {
 	if b.pidFile != "" {
 		argv = append(argv, "-pidfile", b.pidFile)
 	}
-	return argv, nil
+	return argv
 }
 
 func (c nameConfig) arg() string {

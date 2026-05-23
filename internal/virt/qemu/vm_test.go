@@ -65,10 +65,7 @@ func TestVMArgvBuildsRequiredQEMUCommand(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	argv, err := vm.Argv()
-	if err != nil {
-		t.Fatalf("Argv() error = %v", err)
-	}
+	argv := vm.Argv()
 
 	want := []string{
 		"qemu-system-x86_64",
@@ -191,10 +188,7 @@ func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	argv, err := vm.Argv()
-	if err != nil {
-		t.Fatalf("Argv() error = %v", err)
-	}
+	argv := vm.Argv()
 	if argv[0] != "/usr/libexec/qemu-kvm" {
 		t.Fatalf("argv[0] = %q, want /usr/libexec/qemu-kvm", argv[0])
 	}
