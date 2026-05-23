@@ -16,6 +16,7 @@ coverage.out
 .vscode/
 
 # Agent/session local state
+.opencode/
 .pomelo_mem/
 .tmp/
 
