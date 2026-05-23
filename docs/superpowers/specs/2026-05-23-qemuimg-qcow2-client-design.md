@@ -94,8 +94,8 @@ Go import cycle。共享命令执行接口、命令结果、默认 `os/exec` run
 - `Convert().Source(...).Target(...)`：`qemu-img convert -O qcow2 <src> <dst>`。
 - `Snapshot().Path(...).Name(...)`：`qemu-img snapshot -c <name> <path>`。
 - `Check().Path(...)`：`qemu-img check --output=json <path>`。
-- `Remove().Path(...)`：Go 侧 `os.Remove(path)`；`qemu-img` 没有删除子命令，删除仍归属
-  qcow2 磁盘生命周期入口，便于上层统一调用。
+- `Remove().Path(...)`：Go 侧 `os.Remove(path)`；仅删除 `.qcow2` 文件，拒绝目录，
+  `qemu-img` 没有删除子命令，删除仍归属 qcow2 磁盘生命周期入口，便于上层统一调用。
 
 ## 数据结构
 
@@ -109,15 +109,17 @@ Go import cycle。共享命令执行接口、命令结果、默认 `os/exec` run
 ## 错误处理
 
 - 参数错误统一包装为 `ErrInvalidRequest`，便于调用方用 `errors.Is` 分类。
-- 命令执行错误直接返回底层错误，并保留 runner 捕获到的 stderr 供测试和后续扩展。
+- 命令执行错误包装为 `imgexec.CommandError`，保留底层错误和 runner 捕获到的
+  stdout/stderr；`Error()` 包含 stderr，便于日志直接暴露 QEMU 失败原因。
 - JSON 解析失败直接返回解析错误，说明宿主机输出不符合预期。
-- 删除磁盘文件时返回 `os.Remove` 的错误，不吞掉不存在或权限错误。
+- 删除磁盘文件时仅允许 `.qcow2` 文件并拒绝目录；返回 `os.Remove` 的错误，
+  不吞掉不存在或权限错误。
 
 ## 测试策略
 
 - 每个子命令子包都有自己的单元测试，使用 fake runner 验证 builder 生成的 argv。
 - 单元测试覆盖参数校验、`info.Result` JSON 解析、`check.Result` JSON 解析和删除文件行为。
-- 基线验证命令为 `go test ./internal/virt/qemuimg`；最终可运行 `go test ./...`。
+- 基线验证命令为 `go test ./internal/virt/qemuimg/...`；最终可运行 `go test ./...`。
 
 ## 影响的调用关系
 

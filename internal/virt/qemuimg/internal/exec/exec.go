@@ -21,6 +21,29 @@ type Runner interface {
 
 type OSRunner struct{}
 
+type CommandError struct {
+	Result Result
+	Err    error
+}
+
+func WrapError(result Result, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &CommandError{Result: result, Err: err}
+}
+
+func (e *CommandError) Error() string {
+	if e.Result.Stderr == "" {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("%v: %s", e.Err, e.Result.Stderr)
+}
+
+func (e *CommandError) Unwrap() error {
+	return e.Err
+}
+
 func (r OSRunner) Run(ctx context.Context, binary string, args []string) (Result, error) {
 	cmd := os_exec.CommandContext(ctx, binary, args...)
 	var stdout bytes.Buffer

@@ -25,6 +25,9 @@ type Builder struct {
 }
 
 func New(binary string, runner imgexec.Runner) *Builder {
+	if runner == nil {
+		runner = imgexec.OSRunner{}
+	}
 	return &Builder{binary: binary, runner: runner}
 }
 
@@ -40,7 +43,7 @@ func (b *Builder) Do(ctx context.Context) (Result, error) {
 
 	runResult, err := b.runner.Run(ctx, b.binary, []string{"check", "--output=json", b.path})
 	if err != nil {
-		return Result{}, err
+		return Result{}, imgexec.WrapError(runResult, err)
 	}
 
 	var result Result

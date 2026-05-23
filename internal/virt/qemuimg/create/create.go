@@ -17,6 +17,9 @@ type Builder struct {
 }
 
 func New(binary string, runner imgexec.Runner) *Builder {
+	if runner == nil {
+		runner = imgexec.OSRunner{}
+	}
 	return &Builder{binary: binary, runner: runner}
 }
 
@@ -54,6 +57,6 @@ func (b *Builder) Do(ctx context.Context) error {
 		b.target,
 		strconv.FormatInt(b.size, 10),
 	}
-	_, err := b.runner.Run(ctx, b.binary, args)
-	return err
+	result, err := b.runner.Run(ctx, b.binary, args)
+	return imgexec.WrapError(result, err)
 }

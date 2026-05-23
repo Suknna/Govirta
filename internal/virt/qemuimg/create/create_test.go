@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
@@ -99,6 +100,31 @@ func TestDoReturnsRunnerError(t *testing.T) {
 	}
 }
 
+func TestDoWrapsRunnerErrorWithCapturedResult(t *testing.T) {
+	runnerErr := errors.New("runner failed")
+	runnerResult := imgexec.Result{Stdout: "stdout details", Stderr: "stderr details"}
+
+	err := New("qemu-img", &fakeRunner{result: runnerResult, err: runnerErr}).
+		Target("/var/lib/govirta/vms/vm-1.qcow2").
+		FromBase("/var/lib/govirta/images/base.qcow2").
+		SizeBytes(1).
+		Do(context.Background())
+
+	if !errors.Is(err, runnerErr) {
+		t.Fatalf("Do() error = %v, want runner error", err)
+	}
+	if !strings.Contains(err.Error(), "stderr details") {
+		t.Fatalf("Do() error = %q, want stderr", err.Error())
+	}
+	var commandErr *imgexec.CommandError
+	if !errors.As(err, &commandErr) {
+		t.Fatalf("Do() error type = %T, want CommandError", err)
+	}
+	if commandErr.Result != runnerResult {
+		t.Fatalf("CommandError.Result = %#v, want %#v", commandErr.Result, runnerResult)
+	}
+}
+
 func TestDoReturnsContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -117,6 +143,7 @@ func TestDoReturnsContextCanceled(t *testing.T) {
 type fakeRunner struct {
 	binary           string
 	args             []string
+	result           imgexec.Result
 	err              error
 	returnContextErr bool
 }
@@ -127,5 +154,5 @@ func (r *fakeRunner) Run(ctx context.Context, binary string, args []string) (img
 	if r.returnContextErr {
 		return imgexec.Result{}, ctx.Err()
 	}
-	return imgexec.Result{}, r.err
+	return r.result, r.err
 }

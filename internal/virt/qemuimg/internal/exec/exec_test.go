@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,30 @@ func TestOSRunnerRunReturnsContextCanceled(t *testing.T) {
 	_, err := runHelper(t, ctx, "success")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCommandErrorIncludesStderrAndUnwrapsErr(t *testing.T) {
+	runnerErr := errors.New("runner failed")
+	result := Result{Stdout: "stdout details", Stderr: "stderr details"}
+
+	err := WrapError(result, runnerErr)
+
+	if !errors.Is(err, runnerErr) {
+		t.Fatalf("errors.Is(%v, runnerErr) = false, want true", err)
+	}
+	if !strings.Contains(err.Error(), "runner failed") {
+		t.Fatalf("Error() = %q, want underlying error", err.Error())
+	}
+	if !strings.Contains(err.Error(), "stderr details") {
+		t.Fatalf("Error() = %q, want stderr", err.Error())
+	}
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) {
+		t.Fatalf("errors.As(%T) = false, want true", commandErr)
+	}
+	if commandErr.Result != result {
+		t.Fatalf("CommandError.Result = %#v, want %#v", commandErr.Result, result)
 	}
 }
 
