@@ -99,7 +99,7 @@ Go import cycle。共享命令执行接口、命令结果、默认 `os/exec` run
 
 ## 数据结构
 
-`info.ImageInfo` 表示 `qemu-img info --output=json` 的核心字段：文件名、格式、
+`info.Result` 表示 `qemu-img info --output=json` 的核心字段：文件名、格式、
 虚拟大小、实际大小、backing 文件和 backing 格式。
 
 `check.Result` 表示 `qemu-img check --output=json` 的可用字段，并保留原始输出。
@@ -116,7 +116,7 @@ Go import cycle。共享命令执行接口、命令结果、默认 `os/exec` run
 ## 测试策略
 
 - 每个子命令子包都有自己的单元测试，使用 fake runner 验证 builder 生成的 argv。
-- 单元测试覆盖参数校验、`info.ImageInfo` JSON 解析、`check.Result` JSON 解析和删除文件行为。
+- 单元测试覆盖参数校验、`info.Result` JSON 解析、`check.Result` JSON 解析和删除文件行为。
 - 基线验证命令为 `go test ./internal/virt/qemuimg`；最终可运行 `go test ./...`。
 
 ## 影响的调用关系
