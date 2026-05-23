@@ -44,7 +44,7 @@ cmd/qemucli/main.go                          // small argv printer, no exec.Comm
 cmd/qemucli/main_test.go                     // optional smoke test for printed command
 ```
 
-Delete these obsolete files after new failing tests are in place:
+Delete these obsolete files immediately when implementation begins. Do not keep old production code only to satisfy old tests:
 
 ```text
 internal/virt/qemu/config.go
@@ -178,13 +178,29 @@ git commit -m "refactor(node): drop qemu driver dependency"
 
 ---
 
-### Task 2: Write the typed QEMU golden argv test before implementation
+### Task 2: Remove old QEMU implementation, then write the typed QEMU golden argv test
 
 **Files:**
+- Delete: obsolete `internal/virt/qemu/*.go` production files listed in File Structure
 - Delete: obsolete `internal/virt/qemu/*_test.go` files listed in File Structure
 - Create: `internal/virt/qemu/vm_test.go`
 
-- [ ] **Step 1: Remove old qemu tests that encode the deleted architecture**
+- [ ] **Step 1: Remove old qemu production code first**
+
+Run:
+
+```bash
+rm internal/virt/qemu/config.go \
+   internal/virt/qemu/builder.go \
+   internal/virt/qemu/driver.go \
+   internal/virt/qemu/runner.go \
+   internal/virt/qemu/signal_unix.go \
+   internal/virt/qemu/signal_windows.go
+```
+
+This ordering is intentional. The old QEMU implementation is no longer the desired contract, so do not retain old `Config/Builder/Driver/Runner` production code just to keep legacy tests green.
+
+- [ ] **Step 2: Remove old qemu tests that encode the deleted architecture**
 
 Run:
 
@@ -198,7 +214,7 @@ rm internal/virt/qemu/config_test.go \
 
 These tests describe the old `Config/Builder/Driver/Runner` contract and are no longer valid business behavior.
 
-- [ ] **Step 2: Write the new failing golden argv test**
+- [ ] **Step 3: Write the new failing golden argv test**
 
 Create `internal/virt/qemu/vm_test.go`:
 
@@ -332,7 +348,7 @@ func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run the focused QEMU test and verify it fails for missing packages/types**
+- [ ] **Step 4: Run the focused QEMU test and verify it fails for missing packages/types**
 
 Run:
 
@@ -342,7 +358,7 @@ go test ./internal/virt/qemu -run TestVMArgvBuildsRequiredQEMUCommand -count=1
 
 Expected: FAIL with missing packages such as `internal/virt/qemu/blockdev` or missing symbols such as `NewVM`.
 
-- [ ] **Step 4: Commit the failing test if the team wants red commits, otherwise keep it uncommitted**
+- [ ] **Step 5: Commit the failing test if the team wants red commits, otherwise keep it uncommitted**
 
 Default for this repository: do not commit a known failing state. Keep this test uncommitted until Task 3 makes it pass.
 
@@ -351,23 +367,9 @@ Default for this repository: do not commit a known failing state. Keep this test
 ### Task 3: Implement typed QEMU domain renderers and VM argv builder
 
 **Files:**
-- Delete: obsolete production files listed in File Structure
 - Create: all new `internal/virt/qemu/**.go` files listed in File Structure
 
-- [ ] **Step 1: Delete obsolete production files**
-
-Run:
-
-```bash
-rm internal/virt/qemu/config.go \
-   internal/virt/qemu/builder.go \
-   internal/virt/qemu/driver.go \
-   internal/virt/qemu/runner.go \
-   internal/virt/qemu/signal_unix.go \
-   internal/virt/qemu/signal_windows.go
-```
-
-- [ ] **Step 2: Create `qflag` primitives**
+- [ ] **Step 1: Create `qflag` primitives**
 
 Create `internal/virt/qemu/qflag/qflag.go`:
 
@@ -403,7 +405,7 @@ func (v OptionalInt) IsSet() bool { return v.set }
 func (v OptionalInt) Value() int { return v.value }
 ```
 
-- [ ] **Step 3: Create domain packages**
+- [ ] **Step 2: Create domain packages**
 
 Create the following files with render methods returning only the right-hand flag value; root `qemu` will add the flag names.
 
@@ -630,7 +632,7 @@ type Display string
 const None Display = "none"
 ```
 
-- [ ] **Step 4: Create the root VM builder**
+- [ ] **Step 3: Create the root VM builder**
 
 Create `internal/virt/qemu/vm.go` with root aliases, typed builder methods, validation, and deterministic argv rendering. The implementation must import domain packages but domain packages must not import root `qemu`.
 
@@ -893,7 +895,7 @@ func (m Msg) arg() string {
 
 Use a private ordered option type so `AddBlockdev`, `AddNetdev`, `AddDevice`, and `AddChardev` preserve call ordering exactly where the user placed them.
 
-- [ ] **Step 5: Run QEMU package tests and fix only compile/test failures in scope**
+- [ ] **Step 4: Run QEMU package tests and fix only compile/test failures in scope**
 
 Run:
 
@@ -903,7 +905,7 @@ go test ./internal/virt/qemu -count=1
 
 Expected after implementation: PASS.
 
-- [ ] **Step 6: Commit typed QEMU builder implementation**
+- [ ] **Step 5: Commit typed QEMU builder implementation**
 
 Run:
 
