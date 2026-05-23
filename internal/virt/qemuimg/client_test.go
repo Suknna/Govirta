@@ -1,7 +1,11 @@
 package qemuimg
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
@@ -51,5 +55,139 @@ func TestQCOW2ReturnsCommandBuilders(t *testing.T) {
 	}
 	if qcow2.Remove() == nil {
 		t.Fatalf("Remove() = nil, want builder")
+	}
+}
+
+func TestQCOW2CreateUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().Create().
+		Target("child.qcow2").
+		FromBase("base.qcow2").
+		SizeBytes(117440512).
+		Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"create", "-f", "qcow2", "-F", "qcow2", "-b", "base.qcow2", "child.qcow2", "117440512"})
+}
+
+func TestQCOW2InfoUsesConfiguredRunnerAndParsesResult(t *testing.T) {
+	runner := &recordingRunner{result: imgexec.Result{Stdout: `{
+		"filename": "disk.qcow2",
+		"format": "qcow2",
+		"virtual-size": 117440512,
+		"actual-size": 65536,
+		"backing-filename": "base.qcow2",
+		"backing-filename-format": "qcow2"
+	}`}}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	info, err := client.QCOW2().Info().Path("disk.qcow2").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"info", "--output=json", "disk.qcow2"})
+	if info.Filename != "disk.qcow2" || info.Format != "qcow2" || info.VirtualSize != 117440512 || info.ActualSize != 65536 || info.BackingFilename != "base.qcow2" || info.BackingFilenameFormat != "qcow2" {
+		t.Fatalf("Do() = %#v, want parsed qcow2 info", info)
+	}
+}
+
+func TestQCOW2CheckUsesConfiguredRunnerAndParsesResult(t *testing.T) {
+	stdout := `{
+		"filename": "disk.qcow2",
+		"format": "qcow2",
+		"check-errors": 0,
+		"image-end-offset": 117506048,
+		"corruptions": 1,
+		"leaks": 2
+	}`
+	runner := &recordingRunner{result: imgexec.Result{Stdout: stdout}}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	check, err := client.QCOW2().Check().Path("disk.qcow2").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"check", "--output=json", "disk.qcow2"})
+	if check.Filename != "disk.qcow2" || check.Format != "qcow2" || check.CheckErrors != 0 || check.ImageEndOffset != 117506048 || check.Corruptions != 1 || check.Leaks != 2 || check.RawOutput != stdout {
+		t.Fatalf("Do() = %#v, want parsed qcow2 check result", check)
+	}
+}
+
+func TestQCOW2ConvertUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().Convert().Source("src.qcow2").Target("dst.qcow2").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"convert", "-O", "qcow2", "src.qcow2", "dst.qcow2"})
+}
+
+func TestQCOW2SnapshotUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().Snapshot().Path("disk.qcow2").Name("before-upgrade").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"snapshot", "-c", "before-upgrade", "disk.qcow2"})
+}
+
+func TestQCOW2RemoveDeletesFileWithoutRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	path := filepath.Join(t.TempDir(), "disk.qcow2")
+	if err := os.WriteFile(path, []byte("qcow2"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v, want nil", err)
+	}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().Remove().Path(path).Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat() error = %v, want os.ErrNotExist", err)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("Run() calls = %d, want 0", runner.calls)
+	}
+}
+
+type recordingRunner struct {
+	binary string
+	args   []string
+	calls  int
+	result imgexec.Result
+	err    error
+}
+
+func (r *recordingRunner) Run(_ context.Context, binary string, args []string) (imgexec.Result, error) {
+	r.calls++
+	r.binary = binary
+	r.args = append([]string(nil), args...)
+	return r.result, r.err
+}
+
+func assertRun(t *testing.T, runner *recordingRunner, wantBinary string, wantArgs []string) {
+	t.Helper()
+	if runner.calls != 1 {
+		t.Fatalf("Run() calls = %d, want 1", runner.calls)
+	}
+	if runner.binary != wantBinary {
+		t.Fatalf("Run() binary = %q, want %q", runner.binary, wantBinary)
+	}
+	if !reflect.DeepEqual(runner.args, wantArgs) {
+		t.Fatalf("Run() args = %#v, want %#v", runner.args, wantArgs)
 	}
 }
