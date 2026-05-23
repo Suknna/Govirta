@@ -3,13 +3,13 @@ package qemu
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
 	"github.com/suknna/govirta/internal/virt/qemu/blockdev"
 	"github.com/suknna/govirta/internal/virt/qemu/chardev"
 	"github.com/suknna/govirta/internal/virt/qemu/cpu"
-	"github.com/suknna/govirta/internal/virt/qemu/device"
 	"github.com/suknna/govirta/internal/virt/qemu/display"
 	"github.com/suknna/govirta/internal/virt/qemu/machine"
 	"github.com/suknna/govirta/internal/virt/qemu/monitor"
@@ -64,10 +64,39 @@ func NameDebugThreads(v OnOff) NameOption {
 	return func(c *nameConfig) { c.debugThreads = v }
 }
 
-type argvEntry struct {
+// Argument appends one QEMU command-line argument form to argv. The interface is
+// intentionally sealed; callers should create generic arguments with Arg or Flag.
+type Argument interface {
+	appendArgv([]string) []string
+}
+
+type argvFlag struct{ flag string }
+
+// Flag creates a QEMU flag that has no following value, such as -enable-kvm.
+func Flag(flag string) Argument { return argvFlag{flag: flag} }
+
+func (f argvFlag) appendArgv(argv []string) []string { return append(argv, f.flag) }
+
+func (f argvFlag) valid() bool { return f.flag != "" }
+
+func (f argvFlag) name() string { return f.flag }
+
+type argvArg struct {
 	flag  string
 	value string
 }
+
+// Arg creates a QEMU flag/value pair, such as -rtc base=utc.
+func Arg(flag string, value string) Argument { return argvArg{flag: flag, value: value} }
+
+func (a argvArg) appendArgv(argv []string) []string { return append(argv, a.flag, a.value) }
+
+func (a argvArg) valid() bool { return a.flag != "" && a.value != "" }
+
+func (a argvArg) name() string { return a.flag }
+
+// Device renders a value accepted by QEMU's -device flag.
+type Device interface{ Arg() string }
 
 type Builder struct {
 	binary     string
@@ -76,7 +105,7 @@ type Builder struct {
 	cpu        cpu.Model
 	smp        *SMP
 	memory     *Memory
-	ordered    []argvEntry
+	ordered    []Argument
 	display    display.Display
 	noReboot   bool
 	noShutdown bool
@@ -110,8 +139,8 @@ func (b *Builder) Name(name string, opts ...NameOption) *Builder {
 	return b
 }
 
-func (b *Builder) Machine(t machine.Type, opts ...machine.Option) *Builder {
-	c := machine.New(t, opts...)
+func (b *Builder) Machine(profile machine.Profile) *Builder {
+	c := machine.New(profile)
 	b.machine = &c
 	return b
 }
@@ -123,39 +152,42 @@ func (b *Builder) SMP(v SMP) *Builder { b.smp = &v; return b }
 func (b *Builder) Memory(v Memory) *Builder { b.memory = &v; return b }
 
 func (b *Builder) AddBlockdev(v blockdev.Qcow2) *Builder {
-	b.ordered = append(b.ordered, argvEntry{flag: "-blockdev", value: v.Arg()})
+	b.ordered = append(b.ordered, Arg("-blockdev", v.Arg()))
 	return b
 }
 
-func (b *Builder) AddDevice(v any) *Builder {
-	switch d := v.(type) {
-	case device.VirtioBlkPCI:
-		b.ordered = append(b.ordered, argvEntry{flag: "-device", value: d.Arg()})
-	case device.VirtioNetPCI:
-		b.ordered = append(b.ordered, argvEntry{flag: "-device", value: d.Arg()})
-	default:
-		b.ordered = append(b.ordered, argvEntry{flag: "-device", value: fmt.Sprintf("unsupported-device:%T", v)})
+func (b *Builder) AddDevice(v Device) *Builder {
+	if isNilDevice(v) {
+		b.ordered = append(b.ordered, Arg("-device", ""))
+		return b
 	}
+	b.ordered = append(b.ordered, Arg("-device", v.Arg()))
 	return b
 }
 
 func (b *Builder) AddNetdev(v netdev.Tap) *Builder {
-	b.ordered = append(b.ordered, argvEntry{flag: "-netdev", value: v.Arg()})
+	b.ordered = append(b.ordered, Arg("-netdev", v.Arg()))
 	return b
 }
 
 func (b *Builder) AddChardev(v chardev.Socket) *Builder {
-	b.ordered = append(b.ordered, argvEntry{flag: "-chardev", value: v.Arg()})
+	b.ordered = append(b.ordered, Arg("-chardev", v.Arg()))
 	return b
 }
 
 func (b *Builder) Monitor(v monitor.Monitor) *Builder {
-	b.ordered = append(b.ordered, argvEntry{flag: "-mon", value: v.Arg()})
+	b.ordered = append(b.ordered, Arg("-mon", v.Arg()))
 	return b
 }
 
 func (b *Builder) Serial(v serial.Serial) *Builder {
-	b.ordered = append(b.ordered, argvEntry{flag: "-serial", value: v.Arg()})
+	b.ordered = append(b.ordered, Arg("-serial", v.Arg()))
+	return b
+}
+
+// AddArgument appends a generic QEMU argument without adding a dedicated builder method.
+func (b *Builder) AddArgument(v Argument) *Builder {
+	b.ordered = append(b.ordered, v)
 	return b
 }
 
@@ -175,12 +207,15 @@ func (b *Builder) Build() (VM, error) {
 	if b.memory != nil && b.memory.MiB <= 0 {
 		return VM{}, fmt.Errorf("%w: memory must be positive", ErrInvalidVM)
 	}
+	if b.machine != nil && !b.machine.Profile.IsSupported() {
+		return VM{}, fmt.Errorf("%w: unsupported machine profile", ErrInvalidVM)
+	}
 	for _, entry := range b.ordered {
-		if strings.Contains(entry.value, "unsupported-device:") {
-			return VM{}, fmt.Errorf("%w: %s", ErrInvalidVM, entry.value)
+		if !validArgument(entry) {
+			return VM{}, fmt.Errorf("%w: invalid qemu argument", ErrInvalidVM)
 		}
-		if entry.value == "" {
-			return VM{}, fmt.Errorf("%w: empty value for %s", ErrInvalidVM, entry.flag)
+		if isMachineArgument(argumentName(entry)) {
+			return VM{}, fmt.Errorf("%w: -machine must use a predefined profile", ErrInvalidVM)
 		}
 	}
 	return VM{builder: *b}, nil
@@ -205,7 +240,7 @@ func (v VM) Argv() []string {
 		argv = append(argv, "-m", "size="+strconv.Itoa(b.memory.MiB))
 	}
 	for _, entry := range b.ordered {
-		argv = append(argv, entry.flag, entry.value)
+		argv = entry.appendArgv(argv)
 	}
 	if b.display != "" {
 		argv = append(argv, "-display", string(b.display))
@@ -223,6 +258,37 @@ func (v VM) Argv() []string {
 		argv = append(argv, "-pidfile", b.pidFile)
 	}
 	return argv
+}
+
+func validArgument(v Argument) bool {
+	type validator interface{ valid() bool }
+	if checked, ok := v.(validator); ok {
+		return checked.valid()
+	}
+	return v != nil
+}
+
+func argumentName(v Argument) string {
+	type named interface{ name() string }
+	if checked, ok := v.(named); ok {
+		return checked.name()
+	}
+	return ""
+}
+
+func isMachineArgument(flag string) bool { return flag == "-machine" || flag == "-M" }
+
+func isNilDevice(v Device) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func (c nameConfig) arg() string {

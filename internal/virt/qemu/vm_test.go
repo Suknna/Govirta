@@ -21,10 +21,7 @@ import (
 func TestVMArgvBuildsRequiredQEMUCommand(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchX86_64).
 		Name("prod-vm", qemu.NameDebugThreads(qemu.On)).
-		Machine(machine.TypeQ35,
-			machine.WithAccel(machine.AccelKVM),
-			machine.WithKernelIRQChip(machine.IRQChipSplit),
-		).
+		Machine(machine.ProfileX86_64Q35KVM).
 		CPU(cpu.ModelHost).
 		SMP(qemu.SMP{CPUs: 4, Cores: 4, Threads: 1, Sockets: 1}).
 		Memory(qemu.MiB(8192)).
@@ -153,10 +150,74 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "unsupported_device",
+			name: "nil_device",
 			make: func() (qemu.VM, error) {
 				return qemu.NewVM(qemu.ArchX86_64).
-					AddDevice("not-a-device").
+					AddDevice(nil).
+					Build()
+			},
+		},
+		{
+			name: "nil_argument",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(nil).
+					Build()
+			},
+		},
+		{
+			name: "empty_argument_flag",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(qemu.Arg("", "value")).
+					Build()
+			},
+		},
+		{
+			name: "empty_argument_value",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(qemu.Arg("-rtc", "")).
+					Build()
+			},
+		},
+		{
+			name: "empty_flag",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(qemu.Flag("")).
+					Build()
+			},
+		},
+		{
+			name: "generic_machine_argument",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(qemu.Arg("-machine", "type=q35")).
+					Build()
+			},
+		},
+		{
+			name: "generic_machine_alias_argument",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(qemu.Arg("-M", "type=q35")).
+					Build()
+			},
+		},
+		{
+			name: "generic_machine_alias_flag",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddArgument(qemu.Flag("-M")).
+					Build()
+			},
+		},
+		{
+			name: "unknown_machine_profile",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Machine(machine.Profile("unknown")).
 					Build()
 			},
 		},
@@ -179,7 +240,7 @@ func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchAArch64).
 		Binary("/usr/libexec/qemu-kvm").
 		Name("arm-vm").
-		Machine(machine.TypeVirt).
+		Machine(machine.ProfileAArch64VirtKVM).
 		CPU(cpu.ModelCortexA57).
 		SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 1}).
 		Memory(qemu.MiB(256)).
@@ -191,5 +252,58 @@ func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 	argv := vm.Argv()
 	if argv[0] != "/usr/libexec/qemu-kvm" {
 		t.Fatalf("argv[0] = %q, want /usr/libexec/qemu-kvm", argv[0])
+	}
+}
+
+type customDevice struct{}
+
+func (customDevice) Arg() string { return "custom-pci,id=custom0" }
+
+type typedNilDevice struct{}
+
+func (*typedNilDevice) Arg() string { return "typed-nil-device" }
+
+func TestBuilderAcceptsDeviceImplementationsWithoutCoreSwitchChanges(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddDevice(customDevice{}).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{"qemu-system-x86_64", "-device", "custom-pci,id=custom0"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
+	}
+}
+
+func TestBuildRejectsTypedNilDevice(t *testing.T) {
+	var d *typedNilDevice
+
+	_, err := qemu.NewVM(qemu.ArchX86_64).
+		AddDevice(d).
+		Build()
+	if err == nil {
+		t.Fatalf("Build() error = nil, want error")
+	}
+	if !errors.Is(err, qemu.ErrInvalidVM) {
+		t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+	}
+}
+
+func TestBuilderAcceptsGenericArgumentsWithoutAddingDedicatedMethods(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddArgument(qemu.Arg("-rtc", "base=utc")).
+		AddArgument(qemu.Flag("-enable-kvm")).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{"qemu-system-x86_64", "-rtc", "base=utc", "-enable-kvm"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
 	}
 }

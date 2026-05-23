@@ -35,10 +35,7 @@ func main() {
 func buildDefaultArgv() ([]string, error) {
 	vm, err := qemu.NewVM(qemu.ArchX86_64).
 		Name("prod-vm", qemu.NameDebugThreads(qemu.On)).
-		Machine(machine.TypeQ35,
-			machine.WithAccel(machine.AccelKVM),
-			machine.WithKernelIRQChip(machine.IRQChipSplit),
-		).
+		Machine(machine.ProfileX86_64Q35KVM).
 		CPU(cpu.ModelHost).
 		SMP(qemu.SMP{CPUs: 4, Cores: 4, Threads: 1, Sockets: 1}).
 		Memory(qemu.MiB(8192)).

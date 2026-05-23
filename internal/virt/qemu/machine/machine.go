@@ -1,48 +1,39 @@
 package machine
 
-import "strings"
-
-type Type string
+// Profile identifies a Govirta-supported QEMU machine profile.
+type Profile string
 
 const (
-	TypeQ35  Type = "q35"
-	TypeVirt Type = "virt"
+	// ProfileX86_64Q35KVM is the supported x86_64 KVM profile based on q35.
+	ProfileX86_64Q35KVM Profile = "x86_64-q35-kvm"
+	// ProfileAArch64VirtKVM is the supported aarch64 KVM profile based on virt.
+	ProfileAArch64VirtKVM Profile = "aarch64-virt-kvm"
 )
 
-type Accel string
+// Config renders a supported QEMU -machine profile.
+type Config struct{ Profile Profile }
 
-const AccelKVM Accel = "kvm"
+// New returns a machine config for a predefined Govirta profile.
+func New(profile Profile) Config { return Config{Profile: profile} }
 
-type IRQChip string
-
-const IRQChipSplit IRQChip = "split"
-
-type Config struct {
-	Type          Type
-	Accel         Accel
-	KernelIRQChip IRQChip
-}
-
-type Option func(*Config)
-
-func WithAccel(v Accel) Option           { return func(c *Config) { c.Accel = v } }
-func WithKernelIRQChip(v IRQChip) Option { return func(c *Config) { c.KernelIRQChip = v } }
-
-func New(t Type, opts ...Option) Config {
-	c := Config{Type: t}
-	for _, opt := range opts {
-		opt(&c)
+// IsSupported reports whether the profile is predefined by Govirta.
+func (p Profile) IsSupported() bool {
+	switch p {
+	case ProfileX86_64Q35KVM, ProfileAArch64VirtKVM:
+		return true
+	default:
+		return false
 	}
-	return c
 }
 
+// Arg renders the QEMU -machine value for the profile.
 func (c Config) Arg() string {
-	parts := []string{"type=" + string(c.Type)}
-	if c.Accel != "" {
-		parts = append(parts, "accel="+string(c.Accel))
+	switch c.Profile {
+	case ProfileX86_64Q35KVM:
+		return "type=q35,accel=kvm,kernel-irqchip=split"
+	case ProfileAArch64VirtKVM:
+		return "type=virt,accel=kvm"
+	default:
+		return ""
 	}
-	if c.KernelIRQChip != "" {
-		parts = append(parts, "kernel-irqchip="+string(c.KernelIRQChip))
-	}
-	return strings.Join(parts, ",")
 }
