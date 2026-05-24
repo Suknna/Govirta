@@ -54,6 +54,23 @@ Verified-against:
 
 Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. The current stack is Go + QEMU + QMP + qemu-img + Linux bridge/netlink with zerolog for structured logging.
 
+## CURRENT PHASE
+
+Govirta is currently in the single-node cold-operation closure phase. Prioritize completing the local QEMU/qemu-img/QMP/network path before adding distributed scheduling, API orchestration, Kubernetes integration, migration, hot-plug, or multi-node behavior.
+
+Current implementation priority, in order:
+
+1. qemu-system CLI builder
+2. qemu-img qcow2 management
+3. VM create/start/stop/delete
+4. QMP `query-status` / `system_powerdown` / `quit`
+5. Local TAP/bridge networking
+6. Cold snapshots
+7. Cold disk expansion
+8. Cold CPU/memory/disk/NIC modification
+
+Acceptance target for this phase: on a single compute node, prepare local bridge/TAP, manage qcow2 images, start a CirrOS VM through generated QEMU argv, observe guest TAP attachment, control shutdown/quit through QMP, and perform offline snapshot/resize/config edits while the VM is stopped.
+
 ## AGENTS TREE
 
 ```text
@@ -97,6 +114,7 @@ Govirta/
 | QEMU 配置/参数 | `internal/virt/qemu/` (详见 `internal/virt/qemu/AGENTS.md`) | typed argv builder；黄金测试在 `vm_test.go` |
 | qemu-img | `internal/virt/qemuimg/` (详见 `internal/virt/qemuimg/AGENTS.md`) | runner 边界在 `internal/virt/qemuimg/internal/exec` |
 | 规划文档 | `docs/superpowers/specs`, `docs/superpowers/plans`, `docs/roadmap/README.md` | 设计和执行计划放 superpowers；roadmap 只保留维护说明 |
+| 当前阶段优先级 | `## CURRENT PHASE` in this file + module AGENTS under `internal/virt/` | 单机冷操作闭环优先；不要先扩展分布式/热操作能力 |
 | 本地验证 | `scripts/verify.sh` | gofmt check + tests + main service builds |
 
 ## CODE MAP
@@ -201,11 +219,14 @@ qemucli:   main → qemu.Builder → VM.Argv → stdout (no exec)
 - Do not start fire-and-forget goroutines; every goroutine needs owner, shutdown path, and `ctx.Done()` for long-running work.
 - Do not use `panic` for expected business errors, string-match errors, swallow errors silently, or use `goto` as normal control flow.
 - Do not let QEMU packages create host bridge/TAP resources; host networking belongs under `internal/network/bridge`.
+- Do not spend implementation effort on distributed scheduling, Kubernetes integration, live migration, hot-plug, or multi-node control before the single-node cold-operation closure is complete.
+- Do not implement cold snapshot, cold resize, or cold config modification against a running VM; these operations must require a stopped/offline VM until a later hot-operation phase is explicitly designed.
 
 ## UNIQUE STYLES
 
 - Project icon: `image/govirta_icon.png`; brand colors from non-white icon regions are primary violet-blue `#2000C0` and secondary teal `#00B0B0`.
 - Architecture is Kubernetes-inspired control plane / node separation, but short-term scope explicitly excludes Kubernetes and CRD integration.
+- Current product shape is a single-node cold-operation loop: qemu-system argv, qemu-img qcow2 lifecycle, VM process lifecycle, minimal QMP control, local TAP/bridge, and offline mutation.
 - `docs/superpowers/specs` and `docs/superpowers/plans` hold implementation design and execution plans; root docs stay high-level.
 - Current skeleton/no-op packages are intentional boundary placeholders, not proof that the feature is complete.
 - Every implementation handoff must report affected call relationships, for example `cmd/govirtlet/main.go -> internal/node.Agent.Run -> internal/virt/qemu.Driver`.
