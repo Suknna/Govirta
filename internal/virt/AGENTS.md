@@ -20,7 +20,7 @@ Local virtualization boundary aggregator. Owns three sibling packages: typed QEM
 | --- | --- | --- |
 | Build QEMU argv | `qemu/AGENTS.md` | Full Builder API, profile whitelist, golden test contract |
 | qemu-img subcommands | `qemuimg/AGENTS.md` | Create/Info/Convert/Snapshot/Check/Remove builders + Runner boundary |
-| QMP boundary | `qmp/client.go:6` | `Client` interface (`Name`, `Connect`); only `NoopClient` impl today |
+| QMP boundary | `qmp/AGENTS.md` | Project-owned QMP client; root facade + internal go-qemu direct socket subset |
 | Composition by node agent | `../node/agent.go:18` | `NewAgent` injects `qmp.NewNoopClient()` (composition lives in `internal/node`) |
 
 ## CONVENTIONS
@@ -40,7 +40,9 @@ This directory is a pure aggregator with no symbols of its own. Per-flow chains 
 
 - `qemu/AGENTS.md#flow-argv-build` — typed Builder → `VM.Argv()` argv flatten (consumed by `cmd/qemucli` today; future runtime caller).
 - `qemuimg/AGENTS.md#flow-qcow2-do` — `Client.QCOW2().<sub>().Do(ctx)` → argv → `Runner.Run` → external `qemu-img` process.
-- `qmp/client.go:25` — current `NoopClient.Connect` only checks `ctx.Err()`; no flow yet, will be added when a real implementation arrives.
+- `qmp/AGENTS.md#flow-qmp-ready` — `SocketClient.Connect` -> vendored direct socket monitor -> QMP capabilities handshake.
+- `qmp/AGENTS.md#flow-qmp-commands` — typed status/power methods -> internal command packages -> QMP `Run`.
+- `qmp/AGENTS.md#flow-qmp-events` — single-use event stream -> internal event conversion/filtering.
 
 `[已验证]` 通过直接读取 `qemu/`、`qemuimg/`、`qmp/` 三个子包的 `client.go` / `vm.go`。
 
@@ -49,4 +51,4 @@ This directory is a pure aggregator with no symbols of its own. Per-flow chains 
 - Architecture defaults from project memory: `amd64` → `qemu-system-x86_64` + `q35`; `arm64` → `qemu-system-aarch64` or `/usr/libexec/qemu-kvm` + `virt` + `cortex-a57`.
 - Rocky Linux aarch64 acceptance requires firmware `-bios /usr/share/edk2/aarch64/QEMU_EFI.fd` for ARM cirros boot.
 - For QEMU argv changes, update both `qemu/vm_test.go` and `cmd/qemucli/main_test.go` when the example CLI output should change.
-- `qmp/` only ships `NoopClient` today; when the real client lands, add a `qmp/AGENTS.md` and a flow anchor reachable from root `#flow-govirtlet-boot`.
+- `qmp/` still keeps `NoopClient` for node skeleton composition tests, but the real `SocketClient` is available for future runtime integration.
