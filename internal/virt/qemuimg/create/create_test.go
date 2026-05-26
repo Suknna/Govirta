@@ -50,10 +50,56 @@ func TestDoRejectsMissingTarget(t *testing.T) {
 	}
 }
 
-func TestDoRejectsMissingBase(t *testing.T) {
+func TestDoBuildsQCOW2CreateArgsWithoutBacking(t *testing.T) {
+	// 回归 F7：未设置 FromBase 时应生成无 backing 的 qcow2，
+	// argv 必须省略 -b/-F 而不是报错（用于创建全新的数据盘 / 根盘）。
+	runner := &fakeRunner{}
+
+	err := New("/usr/bin/qemu-img", runner).
+		Target("/var/lib/govirta/vms/data.qcow2").
+		SizeBytes(1073741824).
+		Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	wantArgs := []string{
+		"create",
+		"-f", "qcow2",
+		"/var/lib/govirta/vms/data.qcow2",
+		"1073741824",
+	}
+	if !reflect.DeepEqual(runner.args, wantArgs) {
+		t.Fatalf("Run() args = %#v, want %#v", runner.args, wantArgs)
+	}
+}
+
+func TestDoTreatsWhitespaceBaseAsAbsent(t *testing.T) {
+	// 回归 F7：仅 whitespace 的 base 视同未设置，argv 省略 -b/-F。
+	runner := &fakeRunner{}
+
+	err := New("qemu-img", runner).
+		Target("/var/lib/govirta/vms/data.qcow2").
+		FromBase(" \t\n").
+		SizeBytes(1).
+		Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	for _, arg := range runner.args {
+		if arg == "-b" || arg == "-F" {
+			t.Fatalf("Run() args = %#v, should not contain %q for whitespace base", runner.args, arg)
+		}
+	}
+}
+
+func TestDoRejectsLeadingDashBase(t *testing.T) {
+	// 回归 F7：base 设置但以 '-' 开头时仍应被 PathOperand 拒绝，
+	// 防止 qemu-img 把 caller-controlled 路径当作另一个 CLI 选项解析。
 	err := New("qemu-img", &fakeRunner{}).
 		Target("/var/lib/govirta/vms/vm-1.qcow2").
-		FromBase(" \t\n").
+		FromBase("-rm").
 		SizeBytes(1).
 		Do(context.Background())
 

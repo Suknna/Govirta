@@ -3,6 +3,7 @@ package remove
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,6 +103,47 @@ func TestDoReturnsErrorForMissingFile(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("Do() error = nil, want error")
+	}
+}
+
+func TestDoSurfacesLstatErrorOtherThanNotExist(t *testing.T) {
+	// 回归 F8：Lstat 失败但不是 NotExist（例如父目录无执行权限）时，
+	// 必须显式透出错误，而不是被 os.Remove 的二次错误掩盖真实根因。
+	// 通过把目标文件放到 chmod 000 的目录里来诱发 EACCES。
+	dir := t.TempDir()
+	restricted := filepath.Join(dir, "noaccess")
+	if err := os.Mkdir(restricted, 0o700); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	target := filepath.Join(restricted, "disk.qcow2")
+	if err := os.WriteFile(target, []byte("qcow2"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(restricted, 0o000); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(restricted, 0o700) })
+	// root 用户能绕开权限位，跳过避免误判。
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses permission check")
+	}
+
+	err := New("qemu-img", nil).Path(target).Do(context.Background())
+
+	if err == nil {
+		t.Fatalf("Do() error = nil, want lstat error")
+	}
+	// 不应是 InvalidRequest（那是输入校验类）；不应是 NotExist
+	// （那应该让 os.Remove 处理）。应该携带「stat <path>:」前缀以表明
+	// 是 Lstat 阶段的错误，并保留底层 EACCES 链便于调试。
+	if errors.Is(err, imgexec.ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, should not be InvalidRequest", err)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Do() error = %v, should not be NotExist", err)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Do() error = %v, want errors.Is(err, fs.ErrPermission)", err)
 	}
 }
 

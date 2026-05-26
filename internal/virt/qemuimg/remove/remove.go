@@ -2,6 +2,9 @@ package remove
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -40,7 +43,13 @@ func (b *Builder) Do(ctx context.Context) error {
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return os.Remove(path)
+		// 仅 NotExist 走 Remove 让调用方拿到稳定的 fs.ErrNotExist；
+		// 其它 Lstat 错误（permission denied、I/O error、stale NFS 等）
+		// 必须显式透出，避免被 os.Remove 的二次错误掩盖真实根因。
+		if errors.Is(err, fs.ErrNotExist) {
+			return os.Remove(path)
+		}
+		return fmt.Errorf("stat %s: %w", path, err)
 	}
 	if info.IsDir() {
 		return imgexec.InvalidRequest("path must be a .qcow2 file, not a directory")

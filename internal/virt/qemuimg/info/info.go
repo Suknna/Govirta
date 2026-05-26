@@ -48,7 +48,10 @@ func (b *Builder) Do(ctx context.Context) (Result, error) {
 
 	var info Result
 	if err := json.Unmarshal([]byte(result.Stdout), &info); err != nil {
-		return Result{}, err
+		// 用 WrapError 包裹 JSON 解析错误，让 *CommandError 携带原始
+		// stdout/stderr，调用方排查协议偏移或 qemu-img 版本差异时可以
+		// 通过 errors.As(&CommandError) 拿到完整输出，避免错误根因被吞。
+		return Result{}, imgexec.WrapError(result, err)
 	}
 	return info, nil
 }
