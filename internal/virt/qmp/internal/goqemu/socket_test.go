@@ -57,7 +57,7 @@ func TestSocketMonitorConnectRunAndEvents(t *testing.T) {
 		t.Fatalf("event = %q, want SHUTDOWN", event.Event)
 	}
 
-	if err := monitor.Disconnect(); err != nil {
+	if err := monitor.Disconnect(context.Background()); err != nil {
 		t.Fatalf("Disconnect() error = %v", err)
 	}
 	if err := <-serverErr; err != nil {
@@ -88,7 +88,7 @@ func TestSocketMonitorRunReturnsWhenContextCanceled(t *testing.T) {
 	if err := monitor.Connect(context.Background()); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	defer monitor.Disconnect()
+	defer monitor.Disconnect(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -131,7 +131,7 @@ func TestSocketMonitorRunReturnsTypedResponseError(t *testing.T) {
 	if err := monitor.Connect(context.Background()); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	defer monitor.Disconnect()
+	defer monitor.Disconnect(context.Background())
 
 	_, err = monitor.Run(context.Background(), []byte(`{"execute":"query-status"}`))
 	var responseErr *protocol.ResponseError

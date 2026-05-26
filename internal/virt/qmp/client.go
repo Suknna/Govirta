@@ -27,10 +27,21 @@ type Client interface {
 }
 
 // SocketClient talks to a QEMU QMP unix socket.
+//
+// 并发与生命周期：
+//   - lifecycleMu 串行化 Connect 与 Disconnect 的整个执行周期，避免在
+//     Connect 持有耗时 IO 的窗口里 Disconnect 看到 nil monitor 而提前
+//     return，造成 Connect 写回的 monitor 永远无法释放（F4 修复点）。
+//   - mu 仍然保护 monitor / eventsStarted 字段的并发读写。
 type SocketClient struct {
 	socketPath string
 	timeout    time.Duration
 	factory    monitor.Factory
+
+	// lifecycleMu 串行化 Connect / Disconnect / WaitReady 全程；普通 IO
+	// 操作（QueryStatus / SystemPowerdown / Quit / Events）仍只走 mu，
+	// 不抢 lifecycleMu，避免长时间命令阻塞 Disconnect。
+	lifecycleMu sync.Mutex
 
 	mu            sync.Mutex
 	monitor       monitor.Monitor
@@ -62,10 +73,17 @@ func (c *SocketClient) Name() string {
 }
 
 // Connect dials the configured QMP socket and completes the capabilities handshake.
+//
+// F4：lifecycleMu 串行化整个 Connect 流程，包括 factory.New + mon.Connect 的耗时
+// IO；这样并发的 Disconnect 调用必须等当前 Connect 走完再观察 c.monitor 字段，
+// 不会在 Connect 中段拿到 nil monitor 提前 return 而漏掉新建的 socket。
 func (c *SocketClient) Connect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	if c.monitor != nil {
 		c.mu.Unlock()
@@ -80,7 +98,9 @@ func (c *SocketClient) Connect(ctx context.Context) error {
 	installed := false
 	defer func() {
 		if !installed {
-			_ = mon.Disconnect()
+			// 清理失败的 monitor。这里用 Background 而不是 ctx：ctx 可能已取消，
+			// 但 monitor 资源仍必须释放；底层实现负责自带兜底超时。
+			_ = mon.Disconnect(context.Background())
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -93,6 +113,7 @@ func (c *SocketClient) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.monitor != nil {
+		// 在 lifecycleMu 串行化下不应出现这种情况，留作 defense-in-depth。
 		return ErrAlreadyConnected
 	}
 	c.monitor = mon
@@ -110,7 +131,14 @@ func (c *SocketClient) WaitReady(ctx context.Context) error {
 }
 
 // Disconnect closes the active QMP connection if one exists.
+//
+// F4 + F5：lifecycleMu 与 Connect 串行化，避免 Connect 中段被并发 Disconnect
+// 跳过；ctx 透传给底层 monitor.Disconnect 让上层取消语义生效，不再依赖
+// ctx.Err() 兜底。
 func (c *SocketClient) Disconnect(ctx context.Context) error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	mon := c.monitor
 	c.monitor = nil
@@ -118,12 +146,10 @@ func (c *SocketClient) Disconnect(ctx context.Context) error {
 	c.mu.Unlock()
 
 	if mon == nil {
-		return nil
+		// 即使没有连接也保留 ctx 检查，让调用方能感知到自己传入的 ctx 已取消。
+		return ctx.Err()
 	}
-	if err := mon.Disconnect(); err != nil {
-		return err
-	}
-	return ctx.Err()
+	return mon.Disconnect(ctx)
 }
 
 // QueryStatus returns QEMU's current run-state.

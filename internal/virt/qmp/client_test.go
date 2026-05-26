@@ -418,9 +418,12 @@ func (m *fakeMonitor) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (m *fakeMonitor) Disconnect() error {
+func (m *fakeMonitor) Disconnect(ctx context.Context) error {
 	m.disconnectCalls++
 	m.disconnected = true
+	if ctx != nil {
+		return ctx.Err()
+	}
 	return nil
 }
 

@@ -27,8 +27,8 @@ func (m goQEMUMonitor) Connect(ctx context.Context) error {
 	return m.monitor.Connect(ctx)
 }
 
-func (m goQEMUMonitor) Disconnect() error {
-	return m.monitor.Disconnect()
+func (m goQEMUMonitor) Disconnect(ctx context.Context) error {
+	return m.monitor.Disconnect(ctx)
 }
 
 func (m goQEMUMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {

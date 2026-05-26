@@ -63,7 +63,7 @@ type fakeMonitor struct {
 }
 
 func (m *fakeMonitor) Connect(ctx context.Context) error                        { return nil }
-func (m *fakeMonitor) Disconnect() error                                        { return nil }
+func (m *fakeMonitor) Disconnect(ctx context.Context) error                     { return ctx.Err() }
 func (m *fakeMonitor) Events(ctx context.Context) (<-chan monitor.Event, error) { return nil, nil }
 func (m *fakeMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {
 	m.called = true
