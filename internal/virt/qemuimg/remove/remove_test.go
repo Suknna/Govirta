@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
@@ -38,6 +39,22 @@ func TestDoRequiresPath(t *testing.T) {
 func TestDoRejectsNonQCOW2Path(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "disk.raw")
 	if err := os.WriteFile(path, []byte("raw"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	err := New("qemu-img", nil).Path(path).Do(context.Background())
+
+	if !errors.Is(err, imgexec.ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, want invalid request", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Stat() error = %v, want file to remain", err)
+	}
+}
+
+func TestDoRejectsUppercaseQCOW2Suffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.QCOW2")
+	if err := os.WriteFile(path, []byte("qcow2"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -85,6 +102,26 @@ func TestDoRejectsSymlinkEvenWithQCOW2Suffix(t *testing.T) {
 	}
 	if _, err := os.Lstat(link); err != nil {
 		t.Fatalf("Lstat() error = %v, want symlink to remain", err)
+	}
+}
+
+func TestDoRejectsNonRegularFileEvenWithQCOW2Suffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.qcow2")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("Mkfifo() unsupported: %v", err)
+	}
+
+	err := New("qemu-img", nil).Path(path).Do(context.Background())
+
+	if !errors.Is(err, imgexec.ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, want invalid request", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat() error = %v, want FIFO to remain", err)
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		t.Fatalf("Lstat().Mode() = %v, want FIFO to remain", info.Mode())
 	}
 }
 

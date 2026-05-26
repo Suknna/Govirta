@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,6 +143,136 @@ func TestSocketMonitorRunReturnsTypedResponseError(t *testing.T) {
 	if responseErr.Class != "GenericError" || responseErr.Description != "bad command" {
 		t.Fatalf("ResponseError = %+v, want class and description", responseErr)
 	}
+}
+
+func TestWriteWithContextReturnsContextCanceledWhenWriteBlocks(t *testing.T) {
+	conn := newBlockingWriteConn()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- writeWithContext(ctx, conn, []byte("command\n"))
+	}()
+
+	<-conn.writeStarted
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("writeWithContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("writeWithContext() did not return after context cancellation")
+	}
+
+	select {
+	case <-conn.resetDeadline:
+	case <-time.After(time.Second):
+		t.Fatalf("writeWithContext() did not reset write deadline")
+	}
+}
+
+func TestSocketMonitorRunClosesConnectionWhenCommandWriteCanceled(t *testing.T) {
+	conn := newBlockingWriteConn()
+	monitor := &SocketMonitor{
+		c:         conn,
+		stream:    make(chan streamResponse),
+		listeners: new(int32),
+		done:      make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := monitor.Run(ctx, []byte(`{"execute":"query-status"}`))
+		done <- err
+	}()
+
+	<-conn.writeStarted
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("Run() did not return after command write cancellation")
+	}
+
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatalf("Run() did not close conn after command write cancellation")
+	}
+
+	select {
+	case <-monitor.done:
+	case <-time.After(time.Second):
+		t.Fatalf("Run() did not close done after command write cancellation")
+	}
+}
+
+type blockingWriteConn struct {
+	writeStarted  chan struct{}
+	writeDeadline chan struct{}
+	resetDeadline chan struct{}
+	closed        chan struct{}
+
+	startOnce         sync.Once
+	writeDeadlineOnce sync.Once
+	resetDeadlineOnce sync.Once
+	closeOnce         sync.Once
+}
+
+func newBlockingWriteConn() *blockingWriteConn {
+	return &blockingWriteConn{
+		writeStarted:  make(chan struct{}),
+		writeDeadline: make(chan struct{}),
+		resetDeadline: make(chan struct{}),
+		closed:        make(chan struct{}),
+	}
+}
+
+func (c *blockingWriteConn) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *blockingWriteConn) Write([]byte) (int, error) {
+	c.startOnce.Do(func() { close(c.writeStarted) })
+	<-c.writeDeadline
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *blockingWriteConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *blockingWriteConn) LocalAddr() net.Addr {
+	return nil
+}
+
+func (c *blockingWriteConn) RemoteAddr() net.Addr {
+	return nil
+}
+
+func (c *blockingWriteConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (c *blockingWriteConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (c *blockingWriteConn) SetWriteDeadline(deadline time.Time) error {
+	if deadline.IsZero() {
+		c.resetDeadlineOnce.Do(func() { close(c.resetDeadline) })
+		return nil
+	}
+	c.writeDeadlineOnce.Do(func() { close(c.writeDeadline) })
+	return nil
 }
 
 func serveQMP(t *testing.T, listener net.Listener, serverErr chan<- error) {

@@ -128,7 +128,6 @@ func (m *SocketMonitor) Connect(ctx context.Context) error {
 		_ = m.c.SetReadDeadline(time.Time{})
 	}()
 
-	enc := json.NewEncoder(m.c)
 	dec := json.NewDecoder(m.c)
 
 	var greeting greeting
@@ -146,7 +145,12 @@ func (m *SocketMonitor) Connect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := enc.Encode(Command{Execute: "qmp_capabilities"}); err != nil {
+	handshake, err := json.Marshal(Command{Execute: "qmp_capabilities"})
+	if err != nil {
+		return err
+	}
+	handshake = append(handshake, '\n')
+	if err := writeWithContext(ctx, m.c, handshake); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -214,18 +218,16 @@ func (m *SocketMonitor) Run(ctx context.Context, command []byte) ([]byte, error)
 	}
 
 	command = append(append([]byte(nil), command...), '\n')
-	if _, err := m.c.Write(command); err != nil {
+	if err := writeWithContext(ctx, m.c, command); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			m.closeAfterCommandCancel()
+		}
 		return nil, err
 	}
 
 	select {
 	case <-ctx.Done():
-		// 关闭 conn → scanner.Scan() 返回 false → listen 退出 → stream 关闭。
-		// 同时 closeOnce 保证 done 也 close，与 Disconnect 路径汇合。
-		m.closeOnce.Do(func() {
-			close(m.done)
-		})
-		_ = m.c.Close()
+		m.closeAfterCommandCancel()
 		return nil, ctx.Err()
 	case result, ok := <-m.stream:
 		if !ok {
@@ -244,6 +246,49 @@ func (m *SocketMonitor) Run(ctx context.Context, command []byte) ([]byte, error)
 		}
 		return result.buf, nil
 	}
+}
+
+func (m *SocketMonitor) closeAfterCommandCancel() {
+	// 关闭 conn → scanner.Scan() 返回 false → listen 退出 → stream 关闭。
+	// 同时 closeOnce 保证 done 也 close，与 Disconnect 路径汇合。
+	m.closeOnce.Do(func() {
+		close(m.done)
+	})
+	_ = m.c.Close()
+}
+
+func writeWithContext(ctx context.Context, conn net.Conn, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	writeDone := make(chan struct{})
+	var watchdogWG sync.WaitGroup
+	watchdogWG.Add(1)
+	go func() {
+		defer watchdogWG.Done()
+		select {
+		case <-ctx.Done():
+			_ = conn.SetWriteDeadline(time.Now())
+		case <-writeDone:
+		}
+	}()
+
+	written, err := conn.Write(payload)
+	close(writeDone)
+	watchdogWG.Wait()
+	_ = conn.SetWriteDeadline(time.Time{})
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		return err
+	}
+	if written != len(payload) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 // Events streams asynchronous QMP events.

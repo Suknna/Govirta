@@ -30,6 +30,13 @@ func (b *Builder) Path(path string) *Builder {
 	return b
 }
 
+// Do removes a Govirta-owned qcow2 image path from a trusted storage
+// directory. Callers must pass a path resolved by the Govirta trusted storage
+// layer, or otherwise ensure the parent directory cannot be written by
+// untrusted users. The Lstat checks below are guardrails against accidental
+// directory, symlink, or non-regular-file deletion; they do not prove the inode
+// is unchanged when the parent directory is hostile and can race pathname
+// replacement between Lstat and Remove.
 func (b *Builder) Do(ctx context.Context) error {
 	path, err := imgargv.PathOperand("path", b.path)
 	if err != nil {

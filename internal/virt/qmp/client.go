@@ -46,6 +46,7 @@ type SocketClient struct {
 	mu            sync.Mutex
 	monitor       monitor.Monitor
 	eventsStarted bool
+	eventsCancel  context.CancelFunc
 }
 
 // NewSocketClient creates a QMP client for a unix monitor socket.
@@ -118,6 +119,7 @@ func (c *SocketClient) Connect(ctx context.Context) error {
 	}
 	c.monitor = mon
 	c.eventsStarted = false
+	c.eventsCancel = nil
 	installed = true
 	return nil
 }
@@ -141,9 +143,14 @@ func (c *SocketClient) Disconnect(ctx context.Context) error {
 
 	c.mu.Lock()
 	mon := c.monitor
+	eventsCancel := c.eventsCancel
 	c.monitor = nil
 	c.eventsStarted = false
+	c.eventsCancel = nil
 	c.mu.Unlock()
+	if eventsCancel != nil {
+		eventsCancel()
+	}
 
 	if mon == nil {
 		// 即使没有连接也保留 ctx 检查，让调用方能感知到自己传入的 ctx 已取消。
@@ -194,18 +201,30 @@ func (c *SocketClient) Events(ctx context.Context, names ...EventName) (<-chan E
 		c.mu.Unlock()
 		return nil, ErrEventsAlreadyStarted
 	}
+	eventCtx, cancel := context.WithCancel(ctx)
 	c.eventsStarted = true
 	mon := c.monitor
 	c.mu.Unlock()
 
-	stream, err := mon.Events(ctx)
+	stream, err := mon.Events(eventCtx)
 	if err != nil {
+		cancel()
 		c.mu.Lock()
-		c.eventsStarted = false
+		if c.monitor == mon {
+			c.eventsStarted = false
+			c.eventsCancel = nil
+		}
 		c.mu.Unlock()
 		return nil, err
 	}
-	return convertEvents(ctx, qevents.Stream(ctx, stream, eventNameStrings(names)...)), nil
+	c.mu.Lock()
+	if c.monitor == mon {
+		c.eventsCancel = cancel
+	} else {
+		cancel()
+	}
+	c.mu.Unlock()
+	return convertEvents(eventCtx, qevents.Stream(eventCtx, stream, eventNameStrings(names)...)), nil
 }
 
 func (c *SocketClient) connectedMonitor() (monitor.Monitor, error) {

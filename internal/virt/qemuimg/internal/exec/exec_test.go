@@ -71,6 +71,40 @@ func TestCommandErrorIncludesStderrAndUnwrapsErr(t *testing.T) {
 	}
 }
 
+func TestDecodeErrorIncludesStderrAndUnwrapsErr(t *testing.T) {
+	decodeErr := errors.New("invalid json")
+	result := Result{Stdout: "stdout details", Stderr: "stderr details"}
+
+	err := WrapDecodeError(result, decodeErr)
+
+	if !errors.Is(err, decodeErr) {
+		t.Fatalf("errors.Is(%v, decodeErr) = false, want true", err)
+	}
+	if !strings.Contains(err.Error(), "decode qemu-img output") {
+		t.Fatalf("Error() = %q, want decode context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "stderr details") {
+		t.Fatalf("Error() = %q, want stderr", err.Error())
+	}
+	var wrapped *DecodeError
+	if !errors.As(err, &wrapped) {
+		t.Fatalf("errors.As(%T) = false, want true", wrapped)
+	}
+	if wrapped.Result != result {
+		t.Fatalf("DecodeError.Result = %#v, want %#v", wrapped.Result, result)
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) {
+		t.Fatalf("errors.As(%T) = true, want false", commandErr)
+	}
+}
+
+func TestWrapDecodeErrorReturnsNilForNilErr(t *testing.T) {
+	if err := WrapDecodeError(Result{}, nil); err != nil {
+		t.Fatalf("WrapDecodeError(_, nil) = %v, want nil", err)
+	}
+}
+
 func runHelper(t *testing.T, ctx context.Context, mode string) (Result, error) {
 	t.Helper()
 	return OSRunner{}.Run(ctx, os.Args[0], []string{"-test.run=TestOSRunnerHelperProcess", "--", mode})

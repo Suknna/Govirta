@@ -194,6 +194,24 @@ func TestSocketClientQueryStatus(t *testing.T) {
 	}
 }
 
+func TestSocketClientQueryStatusPreservesResponseError(t *testing.T) {
+	mon := newFakeMonitor()
+	mon.runErr = &ResponseError{Class: "CommandNotFound", Description: "unknown command query-status"}
+	client, err := connectedTestClient(mon)
+	if err != nil {
+		t.Fatalf("connectedTestClient() error = %v", err)
+	}
+
+	_, err = client.QueryStatus(context.Background())
+	var responseErr *ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Fatalf("QueryStatus() error = %v, want ResponseError", err)
+	}
+	if responseErr.Class != "CommandNotFound" || responseErr.Description != "unknown command query-status" {
+		t.Fatalf("ResponseError = %+v, want class and description preserved", responseErr)
+	}
+}
+
 func TestSocketClientPowerCommands(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -234,6 +252,7 @@ func TestSocketClientEventsCanStartOnlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Events() error = %v", err)
 	}
+	defer client.Disconnect(context.Background())
 	if first == nil {
 		t.Fatalf("Events() returned nil channel")
 	}
@@ -241,6 +260,31 @@ func TestSocketClientEventsCanStartOnlyOnce(t *testing.T) {
 	_, err = client.Events(context.Background())
 	if !errors.Is(err, ErrEventsAlreadyStarted) {
 		t.Fatalf("second Events() error = %v, want %v", err, ErrEventsAlreadyStarted)
+	}
+}
+
+func TestSocketClientEventsFailureCanRetry(t *testing.T) {
+	mon := newFakeMonitor()
+	eventsErr := errors.New("event stream unavailable")
+	mon.eventsErrs = []error{eventsErr}
+	client, err := connectedTestClient(mon)
+	if err != nil {
+		t.Fatalf("connectedTestClient() error = %v", err)
+	}
+
+	if _, err := client.Events(context.Background()); !errors.Is(err, eventsErr) {
+		t.Fatalf("first Events() error = %v, want %v", err, eventsErr)
+	}
+	stream, err := client.Events(context.Background())
+	if err != nil {
+		t.Fatalf("second Events() error = %v", err)
+	}
+	defer client.Disconnect(context.Background())
+	if stream == nil {
+		t.Fatalf("second Events() returned nil channel")
+	}
+	if _, err := client.Events(context.Background()); !errors.Is(err, ErrEventsAlreadyStarted) {
+		t.Fatalf("third Events() error = %v, want %v", err, ErrEventsAlreadyStarted)
 	}
 }
 
@@ -295,6 +339,26 @@ func TestSocketClientDisconnectIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSocketClientDisconnectReleasesUnconsumedEvents(t *testing.T) {
+	mon := newFakeMonitor()
+	client, err := connectedTestClient(mon)
+	if err != nil {
+		t.Fatalf("connectedTestClient() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := client.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	mon.events <- monitor.Event{Name: "SHUTDOWN", Seconds: 1}
+
+	if err := client.Disconnect(context.Background()); err != nil {
+		t.Fatalf("Disconnect() error = %v", err)
+	}
+	expectEventChannelClosed(t, events)
+}
+
 func TestSocketClientDisconnectCanceledContextStillClosesMonitor(t *testing.T) {
 	mon := newFakeMonitor()
 	client, err := connectedTestClient(mon)
@@ -327,11 +391,21 @@ func TestSocketClientEventsCancelWithoutConsumer(t *testing.T) {
 	mon.events <- monitor.Event{Name: "SHUTDOWN", Seconds: 1}
 	cancel()
 	close(mon.events)
+	expectEventChannelClosed(t, events)
+}
 
-	select {
-	case <-events:
-	case <-time.After(time.Second):
-		t.Fatalf("events channel did not close after cancellation")
+func expectEventChannelClosed(t *testing.T, events <-chan Event) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("events channel did not close")
+		}
 	}
 }
 
@@ -401,6 +475,7 @@ type fakeMonitor struct {
 	runErr          error
 	lastCommand     []byte
 	events          chan monitor.Event
+	eventsErrs      []error
 }
 
 func newFakeMonitor() *fakeMonitor {
@@ -433,6 +508,29 @@ func (m *fakeMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {
 }
 
 func (m *fakeMonitor) Events(ctx context.Context) (<-chan monitor.Event, error) {
-	_ = ctx
-	return m.events, nil
+	if len(m.eventsErrs) > 0 {
+		err := m.eventsErrs[0]
+		m.eventsErrs = m.eventsErrs[1:]
+		return nil, err
+	}
+	out := make(chan monitor.Event)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-m.events:
+				if !ok {
+					return
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
 }

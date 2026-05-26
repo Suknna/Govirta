@@ -66,10 +66,21 @@ func NameDebugThreads(v OnOff) NameOption {
 }
 
 // Argument appends one QEMU command-line argument form to argv. The interface is
-// intentionally sealed; callers should create generic arguments with Arg or Flag.
+// intentionally sealed; callers should create generic arguments with Arg, Flag,
+// or TypedArg. Build validates all generic arguments with an allowlist and an
+// arity policy before exposing argv.
 type Argument interface {
 	appendArgv([]string) []string
 }
+
+type argumentShape string
+
+const (
+	argumentShapeFlag       argumentShape = "flag"
+	argumentShapeValue      argumentShape = "value"
+	argumentShapeTypedValue argumentShape = "typed-value"
+	argumentShapeUnknown    argumentShape = "unknown"
+)
 
 type argvFlag struct{ flag string }
 
@@ -97,14 +108,19 @@ func (a argvArg) valid() bool { return a.flag != "" && a.value != "" }
 func (a argvArg) name() string { return a.flag }
 
 type typedArgument struct {
-	flag   string
-	render func() (string, error)
-	value  string
-	err    error
+	flag     string
+	render   func() (string, error)
+	value    string
+	err      error
+	internal bool
 }
 
 func TypedArg(flag string, render func() (string, error)) Argument {
 	return &typedArgument{flag: flag, render: render}
+}
+
+func typedArg(flag string, render func() (string, error)) Argument {
+	return &typedArgument{flag: flag, render: render, internal: true}
 }
 
 func (a *typedArgument) appendArgv(argv []string) []string { return append(argv, a.flag, a.value) }
@@ -218,40 +234,40 @@ func (b *Builder) SMP(v SMP) *Builder { b.smp = &v; return b }
 func (b *Builder) Memory(v Memory) *Builder { b.memory = &v; return b }
 
 func (b *Builder) AddBlockdev(v blockdev.Qcow2) *Builder {
-	b.ordered = append(b.ordered, TypedArg("-blockdev", v.Arg))
+	b.ordered = append(b.ordered, typedArg("-blockdev", v.Arg))
 	return b
 }
 
 func (b *Builder) AddDevice(v Device) *Builder {
 	if isNilDevice(v) {
-		b.ordered = append(b.ordered, TypedArg("-device", func() (string, error) { return "", errors.New("device is required") }))
+		b.ordered = append(b.ordered, typedArg("-device", func() (string, error) { return "", errors.New("device is required") }))
 		return b
 	}
-	b.ordered = append(b.ordered, TypedArg("-device", v.Arg))
+	b.ordered = append(b.ordered, typedArg("-device", v.Arg))
 	return b
 }
 
 func (b *Builder) AddNetdev(v netdev.Tap) *Builder {
-	b.ordered = append(b.ordered, TypedArg("-netdev", v.Arg))
+	b.ordered = append(b.ordered, typedArg("-netdev", v.Arg))
 	return b
 }
 
 func (b *Builder) AddChardev(v chardev.Socket) *Builder {
-	b.ordered = append(b.ordered, TypedArg("-chardev", v.Arg))
+	b.ordered = append(b.ordered, typedArg("-chardev", v.Arg))
 	return b
 }
 
 func (b *Builder) Monitor(v monitor.Monitor) *Builder {
-	b.ordered = append(b.ordered, TypedArg("-mon", v.Arg))
+	b.ordered = append(b.ordered, typedArg("-mon", v.Arg))
 	return b
 }
 
 func (b *Builder) Serial(v serial.Serial) *Builder {
-	b.ordered = append(b.ordered, TypedArg("-serial", v.Arg))
+	b.ordered = append(b.ordered, typedArg("-serial", v.Arg))
 	return b
 }
 
-// AddArgument appends a generic QEMU argument without adding a dedicated builder method.
+// AddArgument appends an allowlisted generic QEMU argument without adding a dedicated builder method.
 func (b *Builder) AddArgument(v Argument) *Builder {
 	b.ordered = append(b.ordered, v)
 	return b
@@ -282,8 +298,14 @@ func (b *Builder) Build() (VM, error) {
 	if b.smp != nil && (b.smp.CPUs <= 0 || b.smp.Cores <= 0 || b.smp.Threads <= 0 || b.smp.Sockets <= 0) {
 		return VM{}, fmt.Errorf("%w: smp values must be positive", ErrInvalidVM)
 	}
+	if !b.cpu.Valid() {
+		return VM{}, fmt.Errorf("%w: unsupported cpu model %q", ErrInvalidVM, b.cpu)
+	}
 	if b.memory != nil && b.memory.MiB <= 0 {
 		return VM{}, fmt.Errorf("%w: memory must be positive", ErrInvalidVM)
+	}
+	if !b.display.Valid() {
+		return VM{}, fmt.Errorf("%w: unsupported display %q", ErrInvalidVM, b.display)
 	}
 	if b.msg != nil {
 		if err := b.msg.validate(); err != nil {
@@ -300,8 +322,8 @@ func (b *Builder) Build() (VM, error) {
 			}
 			return VM{}, fmt.Errorf("%w: invalid qemu argument", ErrInvalidVM)
 		}
-		if isMachineArgument(argumentName(entry)) {
-			return VM{}, fmt.Errorf("%w: -machine must use a predefined profile", ErrInvalidVM)
+		if err := validateGenericArgumentPolicy(entry); err != nil {
+			return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, err)
 		}
 	}
 	built := *b
@@ -364,15 +386,72 @@ func argumentError(v Argument) error {
 	return nil
 }
 
-func argumentName(v Argument) string {
-	type named interface{ name() string }
-	if checked, ok := v.(named); ok {
-		return checked.name()
+func validateGenericArgumentPolicy(v Argument) error {
+	if isInternalTypedArgument(v) {
+		return nil
 	}
-	return ""
+	flag, shape, ok := genericArgumentShape(v)
+	if !ok {
+		return nil
+	}
+	if isRejectedTypedArgument(flag) {
+		return fmt.Errorf("%s must use a typed builder", flag)
+	}
+	if err := validateAllowedGenericArgumentShape(flag, shape); err != nil {
+		return err
+	}
+	return nil
 }
 
-func isMachineArgument(flag string) bool { return flag == "-machine" || flag == "-M" }
+func validateAllowedGenericArgumentShape(flag string, shape argumentShape) error {
+	switch flag {
+	case "-enable-kvm":
+		if shape == argumentShapeFlag {
+			return nil
+		}
+		return fmt.Errorf("%s must be added with Flag", flag)
+	case "-bios", "-rtc":
+		if shape == argumentShapeValue || shape == argumentShapeTypedValue {
+			return nil
+		}
+		return fmt.Errorf("%s must be added with a value", flag)
+	}
+	return fmt.Errorf("generic qemu argument %s is not allowlisted", flag)
+}
+
+func isInternalTypedArgument(v Argument) bool {
+	a, ok := v.(*typedArgument)
+	return ok && a != nil && a.internal
+}
+
+func genericArgumentShape(v Argument) (string, argumentShape, bool) {
+	switch a := v.(type) {
+	case argvArg:
+		return a.name(), argumentShapeValue, true
+	case argvFlag:
+		return a.name(), argumentShapeFlag, true
+	case *typedArgument:
+		if a == nil {
+			return "", argumentShapeUnknown, false
+		}
+		return a.name(), argumentShapeTypedValue, true
+	}
+
+	type named interface{ name() string }
+	if checked, ok := v.(named); ok {
+		return checked.name(), argumentShapeUnknown, true
+	}
+	return "", argumentShapeUnknown, false
+}
+
+func isRejectedTypedArgument(flag string) bool {
+	switch flag {
+	case "-machine", "-M", "-name", "-cpu", "-smp", "-m", "-blockdev", "-device", "-netdev", "-chardev", "-mon", "-serial", "-display", "-msg", "-pidfile", "-no-reboot", "-no-shutdown":
+		return true
+	default:
+		return false
+	}
+}
 
 func isNilDevice(v Device) bool {
 	if v == nil {

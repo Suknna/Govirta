@@ -27,10 +27,11 @@ The direct socket monitor is vendored under `internal/goqemu` from `github.com/d
 
 - Upper layers must depend on the root `qmp.Client` interface, not internal subpackages.
 - `SocketClient.Connect(ctx)` means the QMP unix socket was dialed and the capabilities handshake completed. Duplicate connects return `ErrAlreadyConnected`; failed connects close the created monitor before returning.
-- `Disconnect(ctx)` always attempts to release the monitor before returning context cancellation.
+- `Disconnect(ctx)` always attempts to release the monitor before returning context cancellation, and cancels any event stream created by the connection.
 - `WaitReady(ctx)` confirms QMP monitor readiness, not guest OS boot completion.
 - `Events(ctx, ...)` is single-use per connected socket because the underlying go-qemu socket monitor documents event streams as single-use.
 - Internal monitor `Run(ctx, command)` is context-aware; command callers must pass caller context rather than blocking indefinitely on a live socket.
+- Direct socket monitor handshake and command writes apply context-aware temporary write deadlines so caller cancellation can unblock a stuck socket write and return the context error.
 - QMP command names are typed constants; do not expose a raw `RunCommand` API to callers.
 - Preserve unknown `query-status` states as `State(raw)` instead of rejecting future QEMU values.
 
@@ -65,6 +66,7 @@ The direct socket monitor is vendored under `internal/goqemu` from `github.com/d
 - `SocketClient.Events(ctx, names...)` checks connection and duplicate-start state.
 - `monitor.Events(ctx)` starts the underlying event stream.
 - `internal/events.Stream` converts timestamps, applies optional filters, and returns root `qmp.Event` values.
+- `SocketClient.Disconnect(ctx)` cancels the per-connection event context so unconsumed conversion goroutines can exit even if the caller keeps the original `Events` context alive.
 
 ## NOTES
 

@@ -190,6 +190,22 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "invalid_cpu_model",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					CPU(cpu.Model("bad-cpu")).
+					Build()
+			},
+		},
+		{
+			name: "invalid_display",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Display(display.Display("gtk")).
+					Build()
+			},
+		},
+		{
 			name: "generic_machine_argument",
 			make: func() (qemu.VM, error) {
 				return qemu.NewVM(qemu.ArchX86_64).
@@ -423,6 +439,7 @@ func TestBuildRejectsTypedNilDevice(t *testing.T) {
 
 func TestBuilderAcceptsGenericArgumentsWithoutAddingDedicatedMethods(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddArgument(qemu.Arg("-bios", "/usr/share/OVMF/OVMF_CODE.fd")).
 		AddArgument(qemu.Arg("-rtc", "base=utc")).
 		AddArgument(qemu.Flag("-enable-kvm")).
 		Build()
@@ -431,7 +448,74 @@ func TestBuilderAcceptsGenericArgumentsWithoutAddingDedicatedMethods(t *testing.
 	}
 
 	argv := vm.Argv()
-	want := []string{"qemu-system-x86_64", "-rtc", "base=utc", "-enable-kvm"}
+	want := []string{"qemu-system-x86_64", "-bios", "/usr/share/OVMF/OVMF_CODE.fd", "-rtc", "base=utc", "-enable-kvm"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
+	}
+}
+
+func TestBuildRejectsGenericTypedArgumentBypass(t *testing.T) {
+	cases := []struct {
+		name string
+		arg  qemu.Argument
+	}{
+		{name: "machine", arg: qemu.Arg("-machine", "type=q35")},
+		{name: "machine_alias", arg: qemu.Arg("-M", "type=q35")},
+		{name: "name", arg: qemu.Arg("-name", "vm")},
+		{name: "cpu", arg: qemu.Arg("-cpu", "host")},
+		{name: "smp", arg: qemu.Arg("-smp", "cpus=1")},
+		{name: "memory", arg: qemu.Arg("-m", "size=256")},
+		{name: "blockdev", arg: qemu.Arg("-blockdev", "driver=qcow2")},
+		{name: "device", arg: qemu.Arg("-device", "virtio-net-pci")},
+		{name: "netdev", arg: qemu.Arg("-netdev", "tap,id=net0,ifname=tap0")},
+		{name: "chardev", arg: qemu.Arg("-chardev", "socket,id=qmp0")},
+		{name: "monitor", arg: qemu.Arg("-mon", "chardev=qmp0,mode=control")},
+		{name: "serial", arg: qemu.Arg("-serial", "chardev:serial0")},
+		{name: "display", arg: qemu.Arg("-display", "none")},
+		{name: "msg", arg: qemu.Arg("-msg", "timestamp=on")},
+		{name: "pidfile", arg: qemu.Arg("-pidfile", "/run/vm.pid")},
+		{name: "no_reboot", arg: qemu.Flag("-no-reboot")},
+		{name: "no_shutdown", arg: qemu.Flag("-no-shutdown")},
+		{name: "typedarg_cpu", arg: qemu.TypedArg("-cpu", func() (string, error) { return "max", nil })},
+		{name: "typedarg_display", arg: qemu.TypedArg("-display", func() (string, error) { return "gtk", nil })},
+		{name: "typedarg_machine", arg: qemu.TypedArg("-machine", func() (string, error) { return "type=q35", nil })},
+		{name: "typedarg_netdev", arg: qemu.TypedArg("-netdev", func() (string, error) { return "tap,id=net0,ifname=tap0", nil })},
+		{name: "enable_kvm_with_value", arg: qemu.Arg("-enable-kvm", "-no-reboot")},
+		{name: "typedarg_enable_kvm", arg: qemu.TypedArg("-enable-kvm", func() (string, error) { return "-no-reboot", nil })},
+		{name: "bios_without_value", arg: qemu.Flag("-bios")},
+		{name: "rtc_without_value", arg: qemu.Flag("-rtc")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := qemu.NewVM(qemu.ArchX86_64).
+				AddArgument(tc.arg).
+				Build()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+		})
+	}
+}
+
+func TestBuilderAllowsExternalTypedArgForAllowlistedGenericArgument(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddArgument(qemu.TypedArg("-bios", func() (string, error) {
+			return "/usr/share/OVMF/OVMF_CODE.fd", nil
+		})).
+		AddArgument(qemu.TypedArg("-rtc", func() (string, error) {
+			return "base=utc", nil
+		})).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{"qemu-system-x86_64", "-bios", "/usr/share/OVMF/OVMF_CODE.fd", "-rtc", "base=utc"}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("Argv() = %#v, want %#v", argv, want)
 	}

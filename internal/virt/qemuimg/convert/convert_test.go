@@ -38,7 +38,7 @@ func TestDoBuildsConvertArgv(t *testing.T) {
 	if runner.binary != "qemu-img" {
 		t.Fatalf("binary = %q, want qemu-img", runner.binary)
 	}
-	wantArgs := []string{"convert", "-O", "qcow2", "src.qcow2", "dst.qcow2"}
+	wantArgs := []string{"convert", "-f", "qcow2", "-O", "qcow2", "src.qcow2", "dst.qcow2"}
 	if !reflect.DeepEqual(runner.args, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", runner.args, wantArgs)
 	}

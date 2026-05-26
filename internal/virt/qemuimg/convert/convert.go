@@ -41,6 +41,6 @@ func (b *Builder) Do(ctx context.Context) error {
 		return err
 	}
 
-	result, err := b.runner.Run(ctx, b.binary, []string{"convert", "-O", "qcow2", source, target})
+	result, err := b.runner.Run(ctx, b.binary, []string{"convert", "-f", "qcow2", "-O", "qcow2", source, target})
 	return imgexec.WrapError(result, err)
 }

@@ -26,11 +26,23 @@ type CommandError struct {
 	Err    error
 }
 
+type DecodeError struct {
+	Result Result
+	Err    error
+}
+
 func WrapError(result Result, err error) error {
 	if err == nil {
 		return nil
 	}
 	return &CommandError{Result: result, Err: err}
+}
+
+func WrapDecodeError(result Result, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &DecodeError{Result: result, Err: err}
 }
 
 func (e *CommandError) Error() string {
@@ -41,6 +53,17 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error {
+	return e.Err
+}
+
+func (e *DecodeError) Error() string {
+	if e.Result.Stderr == "" {
+		return fmt.Sprintf("decode qemu-img output: %v", e.Err)
+	}
+	return fmt.Sprintf("decode qemu-img output: %v: %s", e.Err, e.Result.Stderr)
+}
+
+func (e *DecodeError) Unwrap() error {
 	return e.Err
 }
 

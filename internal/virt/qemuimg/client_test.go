@@ -51,6 +51,26 @@ func TestCommandErrorAliasesExecBoundary(t *testing.T) {
 	}
 }
 
+func TestDecodeErrorAliasesExecBoundary(t *testing.T) {
+	runResult := imgexec.Result{Stdout: `{"filename":`, Stderr: "decode stderr"}
+	runner := &recordingRunner{result: runResult}
+	client := NewClient(Config{Runner: runner})
+
+	_, err := client.QCOW2().Info().Path("disk.qcow2").Do(context.Background())
+
+	var decodeErr *DecodeError
+	if !errors.As(err, &decodeErr) {
+		t.Fatalf("errors.As(... DecodeError) = false, err = %v", err)
+	}
+	if decodeErr.Result != runResult {
+		t.Fatalf("DecodeError.Result = %#v, want %#v", decodeErr.Result, runResult)
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) {
+		t.Fatalf("errors.As(... CommandError) = true, want false")
+	}
+}
+
 func TestQCOW2InfoRejectsLeadingDashPath(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(Config{Runner: runner})
@@ -120,7 +140,7 @@ func TestQCOW2InfoUsesConfiguredRunnerAndParsesResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
-	assertRun(t, runner, "/custom/qemu-img", []string{"info", "--output=json", "disk.qcow2"})
+	assertRun(t, runner, "/custom/qemu-img", []string{"info", "-f", "qcow2", "--output=json", "disk.qcow2"})
 	if info.Filename != "disk.qcow2" || info.Format != "qcow2" || info.VirtualSize != 117440512 || info.ActualSize != 65536 || info.BackingFilename != "base.qcow2" || info.BackingFilenameFormat != "qcow2" {
 		t.Fatalf("Do() = %#v, want parsed qcow2 info", info)
 	}
@@ -143,7 +163,7 @@ func TestQCOW2CheckUsesConfiguredRunnerAndParsesResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
-	assertRun(t, runner, "/custom/qemu-img", []string{"check", "--output=json", "disk.qcow2"})
+	assertRun(t, runner, "/custom/qemu-img", []string{"check", "-f", "qcow2", "--output=json", "disk.qcow2"})
 	if check.Filename != "disk.qcow2" || check.Format != "qcow2" || check.CheckErrors != 0 || check.ImageEndOffset != 117506048 || check.Corruptions != 1 || check.Leaks != 2 || check.RawOutput != stdout {
 		t.Fatalf("Do() = %#v, want parsed qcow2 check result", check)
 	}
@@ -158,7 +178,7 @@ func TestQCOW2ConvertUsesConfiguredRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
-	assertRun(t, runner, "/custom/qemu-img", []string{"convert", "-O", "qcow2", "src.qcow2", "dst.qcow2"})
+	assertRun(t, runner, "/custom/qemu-img", []string{"convert", "-f", "qcow2", "-O", "qcow2", "src.qcow2", "dst.qcow2"})
 }
 
 func TestQCOW2SnapshotUsesConfiguredRunner(t *testing.T) {

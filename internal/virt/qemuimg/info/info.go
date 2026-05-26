@@ -41,17 +41,14 @@ func (b *Builder) Do(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 
-	result, err := b.runner.Run(ctx, b.binary, []string{"info", "--output=json", path})
+	result, err := b.runner.Run(ctx, b.binary, []string{"info", "-f", "qcow2", "--output=json", path})
 	if err != nil {
 		return Result{}, imgexec.WrapError(result, err)
 	}
 
 	var info Result
 	if err := json.Unmarshal([]byte(result.Stdout), &info); err != nil {
-		// 用 WrapError 包裹 JSON 解析错误，让 *CommandError 携带原始
-		// stdout/stderr，调用方排查协议偏移或 qemu-img 版本差异时可以
-		// 通过 errors.As(&CommandError) 拿到完整输出，避免错误根因被吞。
-		return Result{}, imgexec.WrapError(result, err)
+		return Result{}, imgexec.WrapDecodeError(result, err)
 	}
 	return info, nil
 }

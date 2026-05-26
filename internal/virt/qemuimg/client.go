@@ -18,6 +18,10 @@ var ErrInvalidRequest = imgexec.ErrInvalidRequest
 // 调用方通过 errors.As(err, &*CommandError) 提取原始输出。
 type CommandError = imgexec.CommandError
 
+// DecodeError 包装 qemu-img JSON 输出解码失败，保留 stdout/stderr 便于诊断。
+// 调用方通过 errors.As(err, &*DecodeError) 提取原始输出。
+type DecodeError = imgexec.DecodeError
+
 // Config 配置 qemu-img 客户端。
 //
 // Binary 为空时回退到 PATH 中的 "qemu-img"。Runner 为空时使用默认的
