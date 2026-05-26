@@ -58,6 +58,8 @@ Govirta is a Go virtualization infrastructure platform that starts at the QEMU l
 
 Govirta is currently in the single-node cold-operation closure phase. Prioritize completing the local QEMU/qemu-img/QMP/network path before adding distributed scheduling, API orchestration, Kubernetes integration, migration, hot-plug, or multi-node behavior.
 
+Core project goal for this phase: complete the full single-node VM cold-operation loop. A compute node must be able to create and inspect local qcow2 images, render and start a QEMU process for a stopped VM, attach a pre-existing TAP device to the guest, observe/control VM state through QMP, shut the VM down or quit it safely, and perform snapshot/resize/config changes only while the VM is offline.
+
 Current implementation priority, in order:
 
 1. qemu-system CLI builder
