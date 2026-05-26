@@ -52,9 +52,9 @@ func TestDoRejectsNonQCOW2Path(t *testing.T) {
 	}
 }
 
-func TestDoRejectsUppercaseQCOW2Suffix(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "disk.QCOW2")
-	if err := os.WriteFile(path, []byte("qcow2"), 0o600); err != nil {
+func TestDoRejectsQCOW2BackupSuffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.qcow2.bak")
+	if err := os.WriteFile(path, []byte("backup"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -65,6 +65,26 @@ func TestDoRejectsUppercaseQCOW2Suffix(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Stat() error = %v, want file to remain", err)
+	}
+}
+
+func TestDoRemovesPathWithCaseInsensitiveQCOW2Suffix(t *testing.T) {
+	for _, name := range []string{"disk.QCOW2", "disk.QcOw2"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, []byte("qcow2"), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			err := New("qemu-img", nil).Path(path).Do(context.Background())
+
+			if err != nil {
+				t.Fatalf("Do() error = %v", err)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Stat() error = %v, want not exist", err)
+			}
+		})
 	}
 }
 

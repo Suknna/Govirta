@@ -12,6 +12,7 @@ import (
 	"github.com/suknna/govirta/internal/virt/qemu/cpu"
 	"github.com/suknna/govirta/internal/virt/qemu/device"
 	"github.com/suknna/govirta/internal/virt/qemu/display"
+	"github.com/suknna/govirta/internal/virt/qemu/firmware"
 	"github.com/suknna/govirta/internal/virt/qemu/machine"
 	"github.com/suknna/govirta/internal/virt/qemu/monitor"
 	"github.com/suknna/govirta/internal/virt/qemu/netdev"
@@ -379,7 +380,7 @@ func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 		CPU(cpu.ModelCortexA57).
 		SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 1}).
 		Memory(qemu.MiB(256)).
-		AddArgument(qemu.Arg("-bios", "/usr/share/edk2/aarch64/QEMU_EFI.fd")).
+		BIOS(firmware.BIOS{Path: "/usr/share/edk2/aarch64/QEMU_EFI.fd"}).
 		Build()
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -439,7 +440,6 @@ func TestBuildRejectsTypedNilDevice(t *testing.T) {
 
 func TestBuilderAcceptsGenericArgumentsWithoutAddingDedicatedMethods(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchX86_64).
-		AddArgument(qemu.Arg("-bios", "/usr/share/OVMF/OVMF_CODE.fd")).
 		AddArgument(qemu.Arg("-rtc", "base=utc")).
 		AddArgument(qemu.Flag("-enable-kvm")).
 		Build()
@@ -448,7 +448,7 @@ func TestBuilderAcceptsGenericArgumentsWithoutAddingDedicatedMethods(t *testing.
 	}
 
 	argv := vm.Argv()
-	want := []string{"qemu-system-x86_64", "-bios", "/usr/share/OVMF/OVMF_CODE.fd", "-rtc", "base=utc", "-enable-kvm"}
+	want := []string{"qemu-system-x86_64", "-rtc", "base=utc", "-enable-kvm"}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("Argv() = %#v, want %#v", argv, want)
 	}
@@ -465,6 +465,7 @@ func TestBuildRejectsGenericTypedArgumentBypass(t *testing.T) {
 		{name: "cpu", arg: qemu.Arg("-cpu", "host")},
 		{name: "smp", arg: qemu.Arg("-smp", "cpus=1")},
 		{name: "memory", arg: qemu.Arg("-m", "size=256")},
+		{name: "bios", arg: qemu.Arg("-bios", "/usr/share/OVMF/OVMF_CODE.fd")},
 		{name: "blockdev", arg: qemu.Arg("-blockdev", "driver=qcow2")},
 		{name: "device", arg: qemu.Arg("-device", "virtio-net-pci")},
 		{name: "netdev", arg: qemu.Arg("-netdev", "tap,id=net0,ifname=tap0")},
@@ -479,6 +480,7 @@ func TestBuildRejectsGenericTypedArgumentBypass(t *testing.T) {
 		{name: "typedarg_cpu", arg: qemu.TypedArg("-cpu", func() (string, error) { return "max", nil })},
 		{name: "typedarg_display", arg: qemu.TypedArg("-display", func() (string, error) { return "gtk", nil })},
 		{name: "typedarg_machine", arg: qemu.TypedArg("-machine", func() (string, error) { return "type=q35", nil })},
+		{name: "typedarg_bios", arg: qemu.TypedArg("-bios", func() (string, error) { return "/usr/share/OVMF/OVMF_CODE.fd", nil })},
 		{name: "typedarg_netdev", arg: qemu.TypedArg("-netdev", func() (string, error) { return "tap,id=net0,ifname=tap0", nil })},
 		{name: "enable_kvm_with_value", arg: qemu.Arg("-enable-kvm", "-no-reboot")},
 		{name: "typedarg_enable_kvm", arg: qemu.TypedArg("-enable-kvm", func() (string, error) { return "-no-reboot", nil })},
@@ -503,9 +505,6 @@ func TestBuildRejectsGenericTypedArgumentBypass(t *testing.T) {
 
 func TestBuilderAllowsExternalTypedArgForAllowlistedGenericArgument(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchX86_64).
-		AddArgument(qemu.TypedArg("-bios", func() (string, error) {
-			return "/usr/share/OVMF/OVMF_CODE.fd", nil
-		})).
 		AddArgument(qemu.TypedArg("-rtc", func() (string, error) {
 			return "base=utc", nil
 		})).
@@ -515,7 +514,7 @@ func TestBuilderAllowsExternalTypedArgForAllowlistedGenericArgument(t *testing.T
 	}
 
 	argv := vm.Argv()
-	want := []string{"qemu-system-x86_64", "-bios", "/usr/share/OVMF/OVMF_CODE.fd", "-rtc", "base=utc"}
+	want := []string{"qemu-system-x86_64", "-rtc", "base=utc"}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("Argv() = %#v, want %#v", argv, want)
 	}

@@ -81,7 +81,7 @@ This is the canonical execution path for every subcommand exposed via `QCOW2Clie
      - Process / failure path: caller wraps via `imgexec.WrapError(result, err)` → `*CommandError` with `Unwrap()` exposing original error; external callers classify it through `qemuimg.CommandError` (success case returns `nil` because `WrapError(_, nil) == nil`)
   7. For `info`/`check`: `json.Unmarshal(result.Stdout, &Result)` after success; parse error wraps via `imgexec.WrapDecodeError(result, err)` → `*DecodeError` — `info/info.go:49`, `check/check.go:50`
 - Data (within module): `Config` → `Builder` fields (typed: `path`, `target`, `base`, `size int64`, `name`) → `[]string` argv (subcommand-specific) → `imgexec.Result{Stdout, Stderr}` → typed `Result` (info/check) or `error`
-- Side effects (within module): spawns `qemu-img` subprocess via `OSRunner` (default); `remove.Builder.Do` is the **exception** — it calls `os.Remove` directly without invoking the runner for trusted Govirta-owned image paths, enforcing `.qcow2` extension, checking `ctx.Err()` before file inspection and before deletion, rejecting directories/symlinks/non-regular files, and using `os.Lstat` for file-type guardrails. These guardrails do not make an untrusted parent directory safe against pathname replacement between `Lstat` and `Remove`.
+- Side effects (within module): spawns `qemu-img` subprocess via `OSRunner` (default); `remove.Builder.Do` is the **exception** — it calls `os.Remove` directly without invoking the runner for trusted Govirta-owned image paths, enforcing a case-insensitive `.qcow2` extension, checking `ctx.Err()` before file inspection and before deletion, rejecting directories/symlinks/non-regular files, and using `os.Lstat` for file-type guardrails. These guardrails do not make an untrusted parent directory safe against pathname replacement between `Lstat` and `Remove`.
 - Exit / next hop:
   - Filesystem: qcow2 file at `b.target` (create/convert), snapshot inside qcow2 (snapshot), file deletion (remove)
   - Process: external `qemu-img` exit code, captured stderr in `*CommandError.Result.Stderr`
@@ -96,13 +96,13 @@ Argv catalog (verified by `client_test.go`):
 | convert | `["convert", "-f", "qcow2", "-O", "qcow2", source, target]` (`convert/convert.go:42`) | `error` |
 | snapshot | `["snapshot", "-c", name, path]` (`snapshot/snapshot.go:42`) | `error` |
 | check | `["check", "-f", "qcow2", "--output=json", path]` (`check/check.go:44`) | `(Result, error)` with `RawOutput` |
-| remove | (no argv; calls `os.Remove(path)` after `.qcow2` suffix and file-type guardrails; caller must supply a trusted storage path) | `error` |
+| remove | (no argv; calls `os.Remove(path)` after case-insensitive `.qcow2` suffix and file-type guardrails; caller must supply a trusted storage path) | `error` |
 
 `[已验证]` 数据流证据来源：直接读取 6 个 builder 的 `Do(ctx)` 实现 + `client_test.go` 端到端 argv 断言 + `internal/exec/exec_test.go` 的 helper-process 子进程测试。
 
 ## NOTES
 
-- `remove.Builder` keeps `binary` + `runner` fields purely for constructor parity with siblings; they are unused. Remove is local deletion for Govirta trusted storage paths, not a qemu-img command. Its `Lstat` checks prevent accidental directory/symlink/non-regular deletion but do not prove safety when untrusted users can write the parent directory. If qemu-img-native delete arrives, choose between two paths explicitly rather than silently switching.
+- `remove.Builder` keeps `binary` + `runner` fields purely for constructor parity with siblings; they are unused. Remove is local deletion for Govirta trusted storage paths, not a qemu-img command. Its suffix check accepts `.qcow2` case-insensitively, and its `Lstat` checks prevent accidental directory/symlink/non-regular deletion but do not prove safety when untrusted users can write the parent directory. If qemu-img-native delete arrives, choose between two paths explicitly rather than silently switching.
 - `info.Result` discards stdout (no `RawOutput` field); `check.Result` exposes it via `RawOutput string \`json:"-"\`` (`check/check.go:18`). Mirror this asymmetry consciously when adding similar JSON-emitting subcommands.
 - Test runner `recordingRunner` is package-private to `qemuimg` (`client_test.go:167`); do not promote it to a shared test helper unless you are willing to update all six call sites.
 - The remote acceptance host has `qemu-img` at `/usr/bin/qemu-img` (Rocky 8.10 aarch64). Pass it via `Config.Binary` for integration tests; default `"qemu-img"` works on macOS dev hosts when qemu is installed via Homebrew.

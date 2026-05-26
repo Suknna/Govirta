@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	imgargv "github.com/suknna/govirta/internal/virt/qemuimg/internal/argv"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
@@ -42,7 +43,7 @@ func (b *Builder) Do(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if filepath.Ext(path) != ".qcow2" {
+	if !strings.EqualFold(filepath.Ext(path), ".qcow2") {
 		return imgexec.InvalidRequest("path must be a .qcow2 file")
 	}
 	if err := ctx.Err(); err != nil {

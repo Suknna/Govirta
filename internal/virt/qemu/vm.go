@@ -11,6 +11,7 @@ import (
 	"github.com/suknna/govirta/internal/virt/qemu/chardev"
 	"github.com/suknna/govirta/internal/virt/qemu/cpu"
 	"github.com/suknna/govirta/internal/virt/qemu/display"
+	"github.com/suknna/govirta/internal/virt/qemu/firmware"
 	"github.com/suknna/govirta/internal/virt/qemu/machine"
 	"github.com/suknna/govirta/internal/virt/qemu/monitor"
 	"github.com/suknna/govirta/internal/virt/qemu/netdev"
@@ -257,6 +258,11 @@ func (b *Builder) AddChardev(v chardev.Socket) *Builder {
 	return b
 }
 
+func (b *Builder) BIOS(v firmware.BIOS) *Builder {
+	b.ordered = append(b.ordered, typedArg("-bios", v.Arg))
+	return b
+}
+
 func (b *Builder) Monitor(v monitor.Monitor) *Builder {
 	b.ordered = append(b.ordered, typedArg("-mon", v.Arg))
 	return b
@@ -410,7 +416,7 @@ func validateAllowedGenericArgumentShape(flag string, shape argumentShape) error
 			return nil
 		}
 		return fmt.Errorf("%s must be added with Flag", flag)
-	case "-bios", "-rtc":
+	case "-rtc":
 		if shape == argumentShapeValue || shape == argumentShapeTypedValue {
 			return nil
 		}
@@ -446,7 +452,7 @@ func genericArgumentShape(v Argument) (string, argumentShape, bool) {
 
 func isRejectedTypedArgument(flag string) bool {
 	switch flag {
-	case "-machine", "-M", "-name", "-cpu", "-smp", "-m", "-blockdev", "-device", "-netdev", "-chardev", "-mon", "-serial", "-display", "-msg", "-pidfile", "-no-reboot", "-no-shutdown":
+	case "-machine", "-M", "-name", "-cpu", "-smp", "-m", "-bios", "-blockdev", "-device", "-netdev", "-chardev", "-mon", "-serial", "-display", "-msg", "-pidfile", "-no-reboot", "-no-shutdown":
 		return true
 	default:
 		return false
