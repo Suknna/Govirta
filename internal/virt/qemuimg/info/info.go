@@ -3,8 +3,8 @@ package info
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
+	imgargv "github.com/suknna/govirta/internal/virt/qemuimg/internal/argv"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
 )
 
@@ -36,11 +36,12 @@ func (b *Builder) Path(path string) *Builder {
 }
 
 func (b *Builder) Do(ctx context.Context) (Result, error) {
-	if strings.TrimSpace(b.path) == "" {
-		return Result{}, imgexec.InvalidRequest("path is required")
+	path, err := imgargv.PathOperand("path", b.path)
+	if err != nil {
+		return Result{}, err
 	}
 
-	result, err := b.runner.Run(ctx, b.binary, []string{"info", "--output=json", b.path})
+	result, err := b.runner.Run(ctx, b.binary, []string{"info", "--output=json", path})
 	if err != nil {
 		return Result{}, imgexec.WrapError(result, err)
 	}

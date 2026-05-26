@@ -15,6 +15,7 @@ import (
 	"github.com/suknna/govirta/internal/virt/qemu/monitor"
 	"github.com/suknna/govirta/internal/virt/qemu/netdev"
 	"github.com/suknna/govirta/internal/virt/qemu/qflag"
+	"github.com/suknna/govirta/internal/virt/qemu/qopt"
 	"github.com/suknna/govirta/internal/virt/qemu/serial"
 )
 
@@ -95,8 +96,44 @@ func (a argvArg) valid() bool { return a.flag != "" && a.value != "" }
 
 func (a argvArg) name() string { return a.flag }
 
+type typedArgument struct {
+	flag   string
+	render func() (string, error)
+	value  string
+	err    error
+}
+
+func TypedArg(flag string, render func() (string, error)) Argument {
+	return &typedArgument{flag: flag, render: render}
+}
+
+func (a *typedArgument) appendArgv(argv []string) []string { return append(argv, a.flag, a.value) }
+
+func (a *typedArgument) valid() bool {
+	a.prepare()
+	return a.err == nil && a.flag != "" && a.value != ""
+}
+
+func (a *typedArgument) name() string { return a.flag }
+
+func (a *typedArgument) argumentError() error {
+	a.prepare()
+	return a.err
+}
+
+func (a *typedArgument) prepare() {
+	if a == nil || a.err != nil || a.value != "" {
+		return
+	}
+	if a.render == nil {
+		a.err = errors.New("renderer is required")
+		return
+	}
+	a.value, a.err = a.render()
+}
+
 // Device renders a value accepted by QEMU's -device flag.
-type Device interface{ Arg() string }
+type Device interface{ Arg() (string, error) }
 
 type Builder struct {
 	binary     string
@@ -111,6 +148,7 @@ type Builder struct {
 	noShutdown bool
 	msg        *Msg
 	pidFile    string
+	err        error
 }
 
 type VM struct{ builder Builder }
@@ -133,6 +171,10 @@ func (b *Builder) Binary(path string) *Builder { b.binary = path; return b }
 func (b *Builder) Name(name string, opts ...NameOption) *Builder {
 	c := nameConfig{value: name}
 	for _, opt := range opts {
+		if opt == nil {
+			b.err = errors.Join(b.err, errors.New("nil name option"))
+			continue
+		}
 		opt(&c)
 	}
 	b.name = &c
@@ -152,36 +194,36 @@ func (b *Builder) SMP(v SMP) *Builder { b.smp = &v; return b }
 func (b *Builder) Memory(v Memory) *Builder { b.memory = &v; return b }
 
 func (b *Builder) AddBlockdev(v blockdev.Qcow2) *Builder {
-	b.ordered = append(b.ordered, Arg("-blockdev", v.Arg()))
+	b.ordered = append(b.ordered, TypedArg("-blockdev", v.Arg))
 	return b
 }
 
 func (b *Builder) AddDevice(v Device) *Builder {
 	if isNilDevice(v) {
-		b.ordered = append(b.ordered, Arg("-device", ""))
+		b.ordered = append(b.ordered, TypedArg("-device", func() (string, error) { return "", errors.New("device is required") }))
 		return b
 	}
-	b.ordered = append(b.ordered, Arg("-device", v.Arg()))
+	b.ordered = append(b.ordered, TypedArg("-device", v.Arg))
 	return b
 }
 
 func (b *Builder) AddNetdev(v netdev.Tap) *Builder {
-	b.ordered = append(b.ordered, Arg("-netdev", v.Arg()))
+	b.ordered = append(b.ordered, TypedArg("-netdev", v.Arg))
 	return b
 }
 
 func (b *Builder) AddChardev(v chardev.Socket) *Builder {
-	b.ordered = append(b.ordered, Arg("-chardev", v.Arg()))
+	b.ordered = append(b.ordered, TypedArg("-chardev", v.Arg))
 	return b
 }
 
 func (b *Builder) Monitor(v monitor.Monitor) *Builder {
-	b.ordered = append(b.ordered, Arg("-mon", v.Arg()))
+	b.ordered = append(b.ordered, TypedArg("-mon", v.Arg))
 	return b
 }
 
 func (b *Builder) Serial(v serial.Serial) *Builder {
-	b.ordered = append(b.ordered, Arg("-serial", v.Arg()))
+	b.ordered = append(b.ordered, TypedArg("-serial", v.Arg))
 	return b
 }
 
@@ -198,8 +240,16 @@ func (b *Builder) Msg(v Msg) *Builder                 { b.msg = &v; return b }
 func (b *Builder) PidFile(path string) *Builder       { b.pidFile = path; return b }
 
 func (b *Builder) Build() (VM, error) {
+	if b.err != nil {
+		return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, b.err)
+	}
 	if b.binary == "" {
 		return VM{}, fmt.Errorf("%w: qemu binary is required", ErrInvalidVM)
+	}
+	if b.name != nil {
+		if err := b.name.validate(); err != nil {
+			return VM{}, fmt.Errorf("%w: invalid name: %v", ErrInvalidVM, err)
+		}
 	}
 	if b.smp != nil && (b.smp.CPUs <= 0 || b.smp.Cores <= 0 || b.smp.Threads <= 0 || b.smp.Sockets <= 0) {
 		return VM{}, fmt.Errorf("%w: smp values must be positive", ErrInvalidVM)
@@ -207,18 +257,28 @@ func (b *Builder) Build() (VM, error) {
 	if b.memory != nil && b.memory.MiB <= 0 {
 		return VM{}, fmt.Errorf("%w: memory must be positive", ErrInvalidVM)
 	}
+	if b.msg != nil {
+		if err := b.msg.validate(); err != nil {
+			return VM{}, fmt.Errorf("%w: invalid msg: %v", ErrInvalidVM, err)
+		}
+	}
 	if b.machine != nil && !b.machine.Profile.IsSupported() {
 		return VM{}, fmt.Errorf("%w: unsupported machine profile", ErrInvalidVM)
 	}
 	for _, entry := range b.ordered {
 		if !validArgument(entry) {
+			if err := argumentError(entry); err != nil {
+				return VM{}, fmt.Errorf("%w: invalid qemu argument: %v", ErrInvalidVM, err)
+			}
 			return VM{}, fmt.Errorf("%w: invalid qemu argument", ErrInvalidVM)
 		}
 		if isMachineArgument(argumentName(entry)) {
 			return VM{}, fmt.Errorf("%w: -machine must use a predefined profile", ErrInvalidVM)
 		}
 	}
-	return VM{builder: *b}, nil
+	built := *b
+	built.ordered = append([]Argument(nil), b.ordered...)
+	return VM{builder: built}, nil
 }
 
 func (v VM) Argv() []string {
@@ -268,6 +328,14 @@ func validArgument(v Argument) bool {
 	return v != nil
 }
 
+func argumentError(v Argument) error {
+	type errorer interface{ argumentError() error }
+	if checked, ok := v.(errorer); ok {
+		return checked.argumentError()
+	}
+	return nil
+}
+
 func argumentName(v Argument) string {
 	type named interface{ name() string }
 	if checked, ok := v.(named); ok {
@@ -299,6 +367,13 @@ func (c nameConfig) arg() string {
 	return arg
 }
 
+func (c nameConfig) validate() error {
+	if err := qopt.ValidateValue("name", c.value); err != nil {
+		return err
+	}
+	return qopt.ValidateEnum("debug-threads", string(c.debugThreads), c.debugThreads.Valid())
+}
+
 func (s SMP) arg() string {
 	return "cpus=" + strconv.Itoa(s.CPUs) +
 		",cores=" + strconv.Itoa(s.Cores) +
@@ -315,4 +390,11 @@ func (m Msg) arg() string {
 		parts = append(parts, "guest-name="+string(m.GuestName))
 	}
 	return strings.Join(parts, ",")
+}
+
+func (m Msg) validate() error {
+	if err := qopt.ValidateEnum("timestamp", string(m.Timestamp), m.Timestamp.Valid()); err != nil {
+		return err
+	}
+	return qopt.ValidateEnum("guest-name", string(m.GuestName), m.GuestName.Valid())
 }

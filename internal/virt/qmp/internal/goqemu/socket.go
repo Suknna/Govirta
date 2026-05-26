@@ -21,13 +21,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/suknna/govirta/internal/virt/qmp/internal/protocol"
 )
 
 // Monitor represents the subset of go-qemu's QMP monitor used by Govirta.
 type Monitor interface {
-	Connect() error
+	Connect(ctx context.Context) error
 	Disconnect() error
-	Run(command []byte) ([]byte, error)
+	Run(ctx context.Context, command []byte) ([]byte, error)
 	Events(ctx context.Context) (<-chan Event, error)
 }
 
@@ -86,7 +88,10 @@ func NewSocketMonitor(network string, address string, timeout time.Duration) (*S
 }
 
 // Connect completes the QMP greeting and capabilities handshake.
-func (m *SocketMonitor) Connect() error {
+func (m *SocketMonitor) Connect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	enc := json.NewEncoder(m.c)
 	dec := json.NewDecoder(m.c)
 
@@ -97,6 +102,9 @@ func (m *SocketMonitor) Connect() error {
 	m.Version = &greeting.QMP.Version
 	m.Capabilities = greeting.QMP.Capabilities
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := enc.Encode(Command{Execute: "qmp_capabilities"}); err != nil {
 		return err
 	}
@@ -109,7 +117,7 @@ func (m *SocketMonitor) Connect() error {
 		return err
 	}
 
-	events := make(chan Event)
+	events := make(chan Event, 16)
 	stream := make(chan streamResponse)
 	go m.listen(m.c, events, stream)
 	m.events = events
@@ -129,7 +137,10 @@ func (m *SocketMonitor) Disconnect() error {
 }
 
 // Run executes a raw QMP command and returns the raw response.
-func (m *SocketMonitor) Run(command []byte) ([]byte, error) {
+func (m *SocketMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stream == nil {
@@ -141,25 +152,36 @@ func (m *SocketMonitor) Run(command []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	result := <-m.stream
-	if result.err != nil {
-		return nil, result.err
-	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result, ok := <-m.stream:
+		if !ok {
+			return nil, io.EOF
+		}
+		if result.err != nil {
+			return nil, result.err
+		}
 
-	var response response
-	if err := json.Unmarshal(result.buf, &response); err != nil {
-		return nil, err
+		var response response
+		if err := json.Unmarshal(result.buf, &response); err != nil {
+			return nil, err
+		}
+		if err := response.Err(); err != nil {
+			return nil, err
+		}
+		return result.buf, nil
 	}
-	if err := response.Err(); err != nil {
-		return nil, err
-	}
-	return result.buf, nil
 }
 
 // Events streams asynchronous QMP events.
 func (m *SocketMonitor) Events(ctx context.Context) (<-chan Event, error) {
-	_ = ctx
-	atomic.AddInt32(m.listeners, 1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !atomic.CompareAndSwapInt32(m.listeners, 0, 1) {
+		return nil, errors.New("qmp events already started")
+	}
 	return m.events, nil
 }
 
@@ -198,6 +220,7 @@ type greeting struct {
 type response struct {
 	Return any `json:"return,omitempty"`
 	Error  struct {
+		Class       string `json:"class"`
 		Description string `json:"desc"`
 	} `json:"error,omitempty"`
 }
@@ -206,7 +229,7 @@ func (r response) Err() error {
 	if r.Error.Description == "" {
 		return nil
 	}
-	return errors.New(r.Error.Description)
+	return &protocol.ResponseError{Class: r.Error.Class, Description: r.Error.Description}
 }
 
 type streamResponse struct {

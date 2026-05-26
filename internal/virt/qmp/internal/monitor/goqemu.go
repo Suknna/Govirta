@@ -23,16 +23,16 @@ type goQEMUMonitor struct {
 	monitor goqemu.Monitor
 }
 
-func (m goQEMUMonitor) Connect() error {
-	return m.monitor.Connect()
+func (m goQEMUMonitor) Connect(ctx context.Context) error {
+	return m.monitor.Connect(ctx)
 }
 
 func (m goQEMUMonitor) Disconnect() error {
 	return m.monitor.Disconnect()
 }
 
-func (m goQEMUMonitor) Run(command []byte) ([]byte, error) {
-	return m.monitor.Run(command)
+func (m goQEMUMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {
+	return m.monitor.Run(ctx, command)
 }
 
 func (m goQEMUMonitor) Events(ctx context.Context) (<-chan Event, error) {
@@ -52,11 +52,16 @@ func (m goQEMUMonitor) Events(ctx context.Context) (<-chan Event, error) {
 				if !ok {
 					return
 				}
-				events <- Event{
+				converted := Event{
 					Name:         event.Event,
 					Data:         event.Data,
 					Seconds:      event.Timestamp.Seconds,
 					Microseconds: event.Timestamp.Microseconds,
+				}
+				select {
+				case events <- converted:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}

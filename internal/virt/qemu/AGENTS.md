@@ -46,15 +46,17 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 | TAP netdev | `netdev/netdev.go:10` | `Tap{ID, IfName, Script, DownScript, Vhost}` |
 | QMP/serial chardev | `chardev/chardev.go:7` | `Socket{ID, Path, Server, Wait}` |
 | Optional flag plumbing | `qflag/qflag.go:4` | `OnOff` enum + `OptionalInt` distinguishing 0 vs unset |
+| QEMU option rendering | `qopt/qopt.go` | Shared typed option renderer; rejects comma/control-character injection in option values |
 
 ## CONVENTIONS
 
 - Machine config is profile-only. `Build()` rejects `AddArgument(Arg("-machine", ...))` and the `-M` alias (`vm.go:217`).
 - Generic escape hatch is `AddArgument(Arg(flag, value))` / `AddArgument(Flag(flag))`. Use only for flags without dedicated builders; `validArgument` rejects empty pieces (`vm.go:263`).
+- Typed entries validate and render during `Build()` through `qopt`; required fields, supported enum values, and QEMU option delimiters must be rejected before `VM.Argv()` is exposed.
 - Optional `OnOff` fields default to empty string (unset → omitted); never compare to `"on"`/`"off"` directly, use `qflag.On`/`qflag.Off`.
 - Optional integers (e.g. `VirtioBlkPCI.BootIndex`) use `qflag.OptionalInt` so 0 is distinguishable from unset.
 - Subpackages depend only on `qflag`; never cross-import sibling subpackages outside `device` (which legitimately references `blockdev` + `netdev` ref types).
-- Adding a new device: implement `Arg() string` matching the `Device` interface (`vm.go:99`) and pass it via `Builder.AddDevice`. No core switch changes required (`vm_test.go:266` covers this contract).
+- Adding a new device: implement `Arg() (string, error)` matching the `Device` interface (`vm.go:99`), validate with `qopt`, and pass it via `Builder.AddDevice`. No core switch changes required (`vm_test.go:266` covers this contract).
 
 ## ANTI-PATTERNS
 
@@ -74,10 +76,10 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 - Entry from root flow: `cmd/qemucli/main.go:35 (buildDefaultArgv)` — 来自 `cmd/qemucli/main.go:24 (main)` 的根 flow `#flow-qemucli-argv`
 - Local chain:
   1. `vm.go:118 (NewVM)` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
-  2. `vm.go:131-198 (Builder fluent setters)` — `Name`/`Machine`/`CPU`/`SMP`/`Memory` 写入命名字段；`AddBlockdev`/`AddDevice`/`AddNetdev`/`AddChardev`/`Monitor`/`Serial`/`AddArgument` 各自调用对应子包的 `Arg() string`，封装为 `argvArg{flag, value}` 追加到 `Builder.ordered []Argument`（保序）
+  2. `vm.go:131-198 (Builder fluent setters)` — `Name`/`Machine`/`CPU`/`SMP`/`Memory` 写入命名字段；`AddBlockdev`/`AddDevice`/`AddNetdev`/`AddChardev`/`Monitor`/`Serial` 保留 typed renderer，`Build()` 再调用对应子包的 `Arg() (string, error)`；`AddArgument` 仍封装 generic `argvArg{flag, value}`（保序）
   3. `vm.go:159 (AddDevice)` — 反射 nil 检查 `isNilDevice` (`vm.go:281`) 防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
-  4. `vm.go:200 (Builder.Build)` — 6 类校验顺序执行：binary 非空 → SMP 全正 → memory>0 → `Profile.IsSupported()` → `validArgument(entry)` → `argumentName(entry) ∉ {-machine, -M}`；任一失败 wrap `ErrInvalidVM` 返回
-  5. `vm.go:221 (Build → VM)` — 浅拷贝 Builder 进入 `VM` 值，避免 Argv() 期间外部 mutate
+  4. `vm.go:200 (Builder.Build)` — 校验 binary/name/SMP/memory/msg/profile + typed renderer + generic arguments + `argumentName(entry) ∉ {-machine, -M}`；任一失败 wrap `ErrInvalidVM` 返回
+  5. `vm.go:221 (Build → VM)` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
   6. `vm.go:224 (VM.Argv)` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片（按插入顺序展开 blockdev/device/netdev/chardev/monitor/serial）→ -display → -no-reboot → -no-shutdown → -msg → -pidfile
 - Data (within module): `Arch` → `*Builder` (字段化配置) → `VM` (不可变快照) → `[]string` (argv)
 - Side effects (within module): 无；纯值变换。错误经 `errors.Is(err, ErrInvalidVM)` 可命中
@@ -91,7 +93,7 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 
 ## NOTES
 
-- aarch64 没有对应的全 argv 黄金测试；`TestVMArgvAllowsExplicitBinaryOverride` (`vm_test.go:239`) 只断言 `argv[0]`。新增 aarch64 行为时建议同步补一条全断言用例。
+- aarch64 有完整 argv 黄金测试，覆盖 `/usr/libexec/qemu-kvm`、`virt`、`cortex-a57` 与 Rocky 验收固件 `-bios /usr/share/edk2/aarch64/QEMU_EFI.fd`。
 - `cmd/qemucli/main_test.go` 与 `vm_test.go:21` 的 expected argv 必须同步更新；前者是 CLI 输出契约，后者是构建器契约。
 - 黄金测试在 x86_64 全栈生产 VM 场景断言：`prod-vm` + Q35 KVM + host CPU + 4 vCPU + 8 GiB + qcow2 根盘 + virtio-blk + tap + virtio-net + QMP socket + 串口 socket + `-display none` + `-no-reboot/no-shutdown` + `-msg timestamp=on,guest-name=on` + `-pidfile`。
 - 当前 arch64 默认 binary 选 `qemu-system-aarch64`；Rocky 8.10 验收主机的 `/usr/libexec/qemu-kvm` 走 `Builder.Binary()` 显式覆盖（`vm_test.go:239` 已示范）。

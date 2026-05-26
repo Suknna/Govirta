@@ -221,6 +221,78 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 					Build()
 			},
 		},
+		{
+			name: "empty_blockdev_fields",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddBlockdev(blockdev.Qcow2{}).
+					Build()
+			},
+		},
+		{
+			name: "empty_netdev_fields",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddNetdev(netdev.Tap{}).
+					Build()
+			},
+		},
+		{
+			name: "empty_chardev_fields",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddChardev(chardev.Socket{}).
+					Build()
+			},
+		},
+		{
+			name: "empty_virtio_blk_drive",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddDevice(device.VirtioBlkPCI{}).
+					Build()
+			},
+		},
+		{
+			name: "empty_virtio_net_netdev",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddDevice(device.VirtioNetPCI{}).
+					Build()
+			},
+		},
+		{
+			name: "empty_monitor_fields",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Monitor(monitor.Monitor{}).
+					Build()
+			},
+		},
+		{
+			name: "invalid_msg_enum",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Msg(qemu.Msg{Timestamp: qemu.OnOff("maybe")}).
+					Build()
+			},
+		},
+		{
+			name: "netdev_injection_value",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddNetdev(netdev.Tap{ID: "net0", IfName: "tap0,script=/bad"}).
+					Build()
+			},
+		},
+		{
+			name: "nil_name_option",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Name("vm", nil).
+					Build()
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -244,24 +316,34 @@ func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 		CPU(cpu.ModelCortexA57).
 		SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 1}).
 		Memory(qemu.MiB(256)).
+		AddArgument(qemu.Arg("-bios", "/usr/share/edk2/aarch64/QEMU_EFI.fd")).
 		Build()
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
 
 	argv := vm.Argv()
-	if argv[0] != "/usr/libexec/qemu-kvm" {
-		t.Fatalf("argv[0] = %q, want /usr/libexec/qemu-kvm", argv[0])
+	want := []string{
+		"/usr/libexec/qemu-kvm",
+		"-name", "arm-vm",
+		"-machine", "type=virt,accel=kvm",
+		"-cpu", "cortex-a57",
+		"-smp", "cpus=1,cores=1,threads=1,sockets=1",
+		"-m", "size=256",
+		"-bios", "/usr/share/edk2/aarch64/QEMU_EFI.fd",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
 	}
 }
 
 type customDevice struct{}
 
-func (customDevice) Arg() string { return "custom-pci,id=custom0" }
+func (customDevice) Arg() (string, error) { return "custom-pci,id=custom0", nil }
 
 type typedNilDevice struct{}
 
-func (*typedNilDevice) Arg() string { return "typed-nil-device" }
+func (*typedNilDevice) Arg() (string, error) { return "typed-nil-device", nil }
 
 func TestBuilderAcceptsDeviceImplementationsWithoutCoreSwitchChanges(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchX86_64).

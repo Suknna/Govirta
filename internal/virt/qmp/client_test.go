@@ -76,6 +76,53 @@ func TestSocketClientConnectUsesFactoryAndHandshake(t *testing.T) {
 	}
 }
 
+func TestSocketClientRejectsDuplicateConnect(t *testing.T) {
+	mon := newFakeMonitor()
+	client, err := connectedTestClient(mon)
+	if err != nil {
+		t.Fatalf("connectedTestClient() error = %v", err)
+	}
+
+	err = client.Connect(context.Background())
+	if !errors.Is(err, ErrAlreadyConnected) {
+		t.Fatalf("Connect() error = %v, want %v", err, ErrAlreadyConnected)
+	}
+}
+
+func TestSocketClientConnectFailureDisconnectsMonitor(t *testing.T) {
+	mon := newFakeMonitor()
+	mon.connectErr = errors.New("handshake failed")
+	client, err := newSocketClient(Config{SocketPath: "vm.qmp"}, &fakeFactory{monitor: mon})
+	if err != nil {
+		t.Fatalf("newSocketClient() error = %v", err)
+	}
+
+	if err := client.Connect(context.Background()); !errors.Is(err, mon.connectErr) {
+		t.Fatalf("Connect() error = %v, want %v", err, mon.connectErr)
+	}
+	if mon.disconnectCalls != 1 {
+		t.Fatalf("Disconnect() calls = %d, want 1", mon.disconnectCalls)
+	}
+}
+
+func TestSocketClientConnectCanceledAfterFactoryDisconnectsMonitor(t *testing.T) {
+	mon := newFakeMonitor()
+	ctx, cancel := context.WithCancel(context.Background())
+	factory := &fakeFactory{monitor: mon, afterNew: cancel}
+	client, err := newSocketClient(Config{SocketPath: "vm.qmp"}, factory)
+	if err != nil {
+		t.Fatalf("newSocketClient() error = %v", err)
+	}
+
+	err = client.Connect(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Connect() error = %v, want %v", err, context.Canceled)
+	}
+	if mon.disconnectCalls != 1 {
+		t.Fatalf("Disconnect() calls = %d, want 1", mon.disconnectCalls)
+	}
+}
+
 func TestSocketClientConnectCanceledContext(t *testing.T) {
 	factory := &fakeFactory{monitor: newFakeMonitor()}
 	client, err := newSocketClient(Config{SocketPath: "vm.qmp"}, factory)
@@ -248,6 +295,46 @@ func TestSocketClientDisconnectIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSocketClientDisconnectCanceledContextStillClosesMonitor(t *testing.T) {
+	mon := newFakeMonitor()
+	client, err := connectedTestClient(mon)
+	if err != nil {
+		t.Fatalf("connectedTestClient() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = client.Disconnect(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Disconnect() error = %v, want context.Canceled", err)
+	}
+	if mon.disconnectCalls != 1 {
+		t.Fatalf("Disconnect() calls = %d, want 1", mon.disconnectCalls)
+	}
+}
+
+func TestSocketClientEventsCancelWithoutConsumer(t *testing.T) {
+	mon := newFakeMonitor()
+	client, err := connectedTestClient(mon)
+	if err != nil {
+		t.Fatalf("connectedTestClient() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := client.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events() error = %v", err)
+	}
+	mon.events <- monitor.Event{Name: "SHUTDOWN", Seconds: 1}
+	cancel()
+	close(mon.events)
+
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatalf("events channel did not close after cancellation")
+	}
+}
+
 func TestNoopClientConnectCanceledContext(t *testing.T) {
 	client := NewNoopClient()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -282,12 +369,13 @@ func connectedTestClient(mon *fakeMonitor) (*SocketClient, error) {
 }
 
 type fakeFactory struct {
-	monitor *fakeMonitor
-	called  bool
-	network string
-	address string
-	timeout time.Duration
-	err     error
+	monitor  *fakeMonitor
+	called   bool
+	network  string
+	address  string
+	timeout  time.Duration
+	err      error
+	afterNew func()
 }
 
 func (f *fakeFactory) New(network string, address string, timeout time.Duration) (monitor.Monitor, error) {
@@ -298,33 +386,45 @@ func (f *fakeFactory) New(network string, address string, timeout time.Duration)
 	if f.err != nil {
 		return nil, f.err
 	}
+	if f.afterNew != nil {
+		f.afterNew()
+	}
 	return f.monitor, nil
 }
 
 type fakeMonitor struct {
-	connected    bool
-	disconnected bool
-	runResponse  []byte
-	runErr       error
-	lastCommand  []byte
-	events       chan monitor.Event
+	connected       bool
+	disconnected    bool
+	connectErr      error
+	disconnectCalls int
+	runResponse     []byte
+	runErr          error
+	lastCommand     []byte
+	events          chan monitor.Event
 }
 
 func newFakeMonitor() *fakeMonitor {
 	return &fakeMonitor{events: make(chan monitor.Event, 4), runResponse: []byte(`{"return":{}}`)}
 }
 
-func (m *fakeMonitor) Connect() error {
+func (m *fakeMonitor) Connect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.connectErr != nil {
+		return m.connectErr
+	}
 	m.connected = true
 	return nil
 }
 
 func (m *fakeMonitor) Disconnect() error {
+	m.disconnectCalls++
 	m.disconnected = true
 	return nil
 }
 
-func (m *fakeMonitor) Run(command []byte) ([]byte, error) {
+func (m *fakeMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {
 	m.lastCommand = append([]byte(nil), command...)
 	return m.runResponse, m.runErr
 }

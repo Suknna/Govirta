@@ -4,8 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 
+	imgargv "github.com/suknna/govirta/internal/virt/qemuimg/internal/argv"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
 )
 
@@ -28,21 +28,31 @@ func (b *Builder) Path(path string) *Builder {
 }
 
 func (b *Builder) Do(ctx context.Context) error {
-	if strings.TrimSpace(b.path) == "" {
-		return imgexec.InvalidRequest("path is required")
+	path, err := imgargv.PathOperand("path", b.path)
+	if err != nil {
+		return err
 	}
-	if filepath.Ext(b.path) != ".qcow2" {
+	if filepath.Ext(path) != ".qcow2" {
 		return imgexec.InvalidRequest("path must be a .qcow2 file")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	info, err := os.Stat(b.path)
+	info, err := os.Lstat(path)
 	if err != nil {
-		return os.Remove(b.path)
+		return os.Remove(path)
 	}
 	if info.IsDir() {
 		return imgexec.InvalidRequest("path must be a .qcow2 file, not a directory")
 	}
-	return os.Remove(b.path)
+	if info.Mode()&os.ModeSymlink != 0 {
+		return imgexec.InvalidRequest("path must be a regular .qcow2 file, not a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return imgexec.InvalidRequest("path must be a regular .qcow2 file")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return os.Remove(path)
 }

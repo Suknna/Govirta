@@ -62,10 +62,10 @@ type fakeMonitor struct {
 	err     error
 }
 
-func (m *fakeMonitor) Connect() error                                           { return nil }
+func (m *fakeMonitor) Connect(ctx context.Context) error                        { return nil }
 func (m *fakeMonitor) Disconnect() error                                        { return nil }
 func (m *fakeMonitor) Events(ctx context.Context) (<-chan monitor.Event, error) { return nil, nil }
-func (m *fakeMonitor) Run(command []byte) ([]byte, error) {
+func (m *fakeMonitor) Run(ctx context.Context, command []byte) ([]byte, error) {
 	m.called = true
 	m.command = append([]byte(nil), command...)
 	return []byte(`{"return":{}}`), m.err

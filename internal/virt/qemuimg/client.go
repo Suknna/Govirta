@@ -12,6 +12,8 @@ import (
 
 var ErrInvalidRequest = imgexec.ErrInvalidRequest
 
+type CommandError = imgexec.CommandError
+
 type Config struct {
 	Binary string
 	Runner imgexec.Runner

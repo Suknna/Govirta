@@ -66,22 +66,38 @@ func (c *SocketClient) Connect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	if c.monitor != nil {
+		c.mu.Unlock()
+		return ErrAlreadyConnected
+	}
+	c.mu.Unlock()
 
 	mon, err := c.factory.New("unix", c.socketPath, c.timeout)
 	if err != nil {
 		return err
 	}
+	installed := false
+	defer func() {
+		if !installed {
+			_ = mon.Disconnect()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := mon.Connect(); err != nil {
+	if err := mon.Connect(ctx); err != nil {
 		return err
 	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.monitor != nil {
+		return ErrAlreadyConnected
+	}
 	c.monitor = mon
 	c.eventsStarted = false
-	c.mu.Unlock()
+	installed = true
 	return nil
 }
 
@@ -95,10 +111,6 @@ func (c *SocketClient) WaitReady(ctx context.Context) error {
 
 // Disconnect closes the active QMP connection if one exists.
 func (c *SocketClient) Disconnect(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
 	c.mu.Lock()
 	mon := c.monitor
 	c.monitor = nil
@@ -108,7 +120,10 @@ func (c *SocketClient) Disconnect(ctx context.Context) error {
 	if mon == nil {
 		return nil
 	}
-	return mon.Disconnect()
+	if err := mon.Disconnect(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // QueryStatus returns QEMU's current run-state.
@@ -164,7 +179,7 @@ func (c *SocketClient) Events(ctx context.Context, names ...EventName) (<-chan E
 		c.mu.Unlock()
 		return nil, err
 	}
-	return convertEvents(qevents.Stream(ctx, stream, eventNameStrings(names)...)), nil
+	return convertEvents(ctx, qevents.Stream(ctx, stream, eventNameStrings(names)...)), nil
 }
 
 func (c *SocketClient) connectedMonitor() (monitor.Monitor, error) {
@@ -187,12 +202,17 @@ func eventNameStrings(names []EventName) []string {
 	return values
 }
 
-func convertEvents(stream <-chan qevents.Event) <-chan Event {
+func convertEvents(ctx context.Context, stream <-chan qevents.Event) <-chan Event {
 	out := make(chan Event)
 	go func() {
 		defer close(out)
 		for event := range stream {
-			out <- Event{Name: EventName(event.Name), Data: event.Data, Timestamp: event.Timestamp}
+			converted := Event{Name: EventName(event.Name), Data: event.Data, Timestamp: event.Timestamp}
+			select {
+			case out <- converted:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	return out

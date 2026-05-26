@@ -7,9 +7,9 @@ import (
 
 // Monitor is the internal QMP transport boundary used by command packages.
 type Monitor interface {
-	Connect() error
+	Connect(ctx context.Context) error
 	Disconnect() error
-	Run(command []byte) ([]byte, error)
+	Run(ctx context.Context, command []byte) ([]byte, error)
 	Events(ctx context.Context) (<-chan Event, error)
 }
 

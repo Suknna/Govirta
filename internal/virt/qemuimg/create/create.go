@@ -3,8 +3,8 @@ package create
 import (
 	"context"
 	"strconv"
-	"strings"
 
+	imgargv "github.com/suknna/govirta/internal/virt/qemuimg/internal/argv"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
 )
 
@@ -39,11 +39,13 @@ func (b *Builder) SizeBytes(size int64) *Builder {
 }
 
 func (b *Builder) Do(ctx context.Context) error {
-	if strings.TrimSpace(b.target) == "" {
-		return imgexec.InvalidRequest("target is required")
+	target, err := imgargv.PathOperand("target", b.target)
+	if err != nil {
+		return err
 	}
-	if strings.TrimSpace(b.base) == "" {
-		return imgexec.InvalidRequest("base is required")
+	base, err := imgargv.PathOperand("base", b.base)
+	if err != nil {
+		return err
 	}
 	if b.size <= 0 {
 		return imgexec.InvalidRequest("size must be greater than zero")
@@ -53,8 +55,8 @@ func (b *Builder) Do(ctx context.Context) error {
 		"create",
 		"-f", "qcow2",
 		"-F", "qcow2",
-		"-b", b.base,
-		b.target,
+		"-b", base,
+		target,
 		strconv.FormatInt(b.size, 10),
 	}
 	result, err := b.runner.Run(ctx, b.binary, args)

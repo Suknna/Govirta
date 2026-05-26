@@ -35,6 +35,36 @@ func TestErrInvalidRequestAliasesExecBoundary(t *testing.T) {
 	}
 }
 
+func TestCommandErrorAliasesExecBoundary(t *testing.T) {
+	runnerErr := errors.New("runner failed")
+	runner := &recordingRunner{result: imgexec.Result{Stderr: "qemu-img failed"}, err: runnerErr}
+	client := NewClient(Config{Runner: runner})
+
+	_, err := client.QCOW2().Info().Path("disk.qcow2").Do(context.Background())
+
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) {
+		t.Fatalf("errors.As(... CommandError) = false, err = %v", err)
+	}
+	if commandErr.Result.Stderr != "qemu-img failed" {
+		t.Fatalf("CommandError.Result.Stderr = %q, want qemu-img failed", commandErr.Result.Stderr)
+	}
+}
+
+func TestQCOW2InfoRejectsLeadingDashPath(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Runner: runner})
+
+	_, err := client.QCOW2().Info().Path("--help").Do(context.Background())
+
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, want ErrInvalidRequest", err)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("Run() calls = %d, want 0", runner.calls)
+	}
+}
+
 func TestQCOW2ReturnsCommandBuilders(t *testing.T) {
 	qcow2 := NewClient(Config{}).QCOW2()
 

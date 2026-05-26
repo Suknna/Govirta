@@ -32,7 +32,11 @@ func Stream(ctx context.Context, source <-chan monitor.Event, names ...string) <
 				if len(filters) > 0 && !filters[converted.Name] {
 					continue
 				}
-				out <- converted
+				select {
+				case out <- converted:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()

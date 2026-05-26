@@ -66,6 +66,35 @@ func TestDoRejectsDirectoryEvenWithQCOW2Suffix(t *testing.T) {
 	}
 }
 
+func TestDoRejectsSymlinkEvenWithQCOW2Suffix(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.qcow2")
+	if err := os.WriteFile(target, []byte("qcow2"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	link := filepath.Join(dir, "disk.qcow2")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	err := New("qemu-img", nil).Path(link).Do(context.Background())
+
+	if !errors.Is(err, imgexec.ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, want invalid request", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("Lstat() error = %v, want symlink to remain", err)
+	}
+}
+
+func TestDoRejectsLeadingDashPath(t *testing.T) {
+	err := New("qemu-img", nil).Path("--help.qcow2").Do(context.Background())
+
+	if !errors.Is(err, imgexec.ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, want invalid request", err)
+	}
+}
+
 func TestDoReturnsErrorForMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.qcow2")
 

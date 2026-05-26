@@ -15,6 +15,7 @@ The direct socket monitor is vendored under `internal/goqemu` from `github.com/d
 | Public QMP API | `client.go` | `Client`, `SocketClient`, lifecycle and operation facade |
 | Public value types | `types.go` | `Config`, `Status`, `State`, `EventName`, `Event` |
 | Error classes | `errors.go` | `ErrInvalidConfig`, `ErrNotConnected`, `ErrEventsAlreadyStarted` |
+| QMP protocol errors | `internal/protocol/` + root alias | `ResponseError{Class, Description}` preserves QMP error class and desc |
 | Transport boundary | `internal/monitor/` | Project-owned `Monitor`/`Factory` and adapter to vendored socket monitor |
 | Vendored go-qemu subset | `internal/goqemu/socket.go` | Direct socket QMP greeting, capabilities handshake, command run, event stream |
 | Status command | `internal/status/` | `query-status` command construction and response parsing |
@@ -25,9 +26,11 @@ The direct socket monitor is vendored under `internal/goqemu` from `github.com/d
 ## CONVENTIONS
 
 - Upper layers must depend on the root `qmp.Client` interface, not internal subpackages.
-- `SocketClient.Connect(ctx)` means the QMP unix socket was dialed and the capabilities handshake completed.
+- `SocketClient.Connect(ctx)` means the QMP unix socket was dialed and the capabilities handshake completed. Duplicate connects return `ErrAlreadyConnected`; failed connects close the created monitor before returning.
+- `Disconnect(ctx)` always attempts to release the monitor before returning context cancellation.
 - `WaitReady(ctx)` confirms QMP monitor readiness, not guest OS boot completion.
 - `Events(ctx, ...)` is single-use per connected socket because the underlying go-qemu socket monitor documents event streams as single-use.
+- Internal monitor `Run(ctx, command)` is context-aware; command callers must pass caller context rather than blocking indefinitely on a live socket.
 - QMP command names are typed constants; do not expose a raw `RunCommand` API to callers.
 - Preserve unknown `query-status` states as `State(raw)` instead of rejecting future QEMU values.
 
@@ -48,14 +51,14 @@ The direct socket monitor is vendored under `internal/goqemu` from `github.com/d
   1. `SocketClient.Connect(ctx)` checks context cancellation.
   2. `internal/monitor.GoQEMUFactory.New("unix", socketPath, timeout)` creates the vendored socket monitor.
   3. `internal/goqemu.NewSocketMonitor` dials the unix socket.
-  4. `SocketMonitor.Connect` reads the QMP greeting, sends `qmp_capabilities`, validates the response, and starts the listener goroutine.
+  4. `SocketMonitor.Connect(ctx)` checks cancellation, reads the QMP greeting, sends `qmp_capabilities`, validates the response, and starts the listener goroutine.
 - Exit: successful return means QMP can accept commands.
 
 ### Flow: status and power commands {#flow-qmp-commands}
 
-- `SocketClient.QueryStatus(ctx)` -> `internal/status.Query(ctx, monitor)` -> JSON `query-status` -> `monitor.Run` -> typed `Status`.
-- `SocketClient.SystemPowerdown(ctx)` -> `internal/power.SystemPowerdown(ctx, monitor)` -> JSON `system_powerdown` -> `monitor.Run`.
-- `SocketClient.Quit(ctx)` -> `internal/power.Quit(ctx, monitor)` -> JSON `quit` -> `monitor.Run`.
+- `SocketClient.QueryStatus(ctx)` -> `internal/status.Query(ctx, monitor)` -> JSON `query-status` -> `monitor.Run(ctx, ...)` -> typed `Status`.
+- `SocketClient.SystemPowerdown(ctx)` -> `internal/power.SystemPowerdown(ctx, monitor)` -> JSON `system_powerdown` -> `monitor.Run(ctx, ...)`.
+- `SocketClient.Quit(ctx)` -> `internal/power.Quit(ctx, monitor)` -> JSON `quit` -> `monitor.Run(ctx, ...)`.
 
 ### Flow: event stream {#flow-qmp-events}
 

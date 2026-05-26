@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	imgargv "github.com/suknna/govirta/internal/virt/qemuimg/internal/argv"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
 )
 
@@ -32,13 +33,14 @@ func (b *Builder) Name(name string) *Builder {
 }
 
 func (b *Builder) Do(ctx context.Context) error {
-	if strings.TrimSpace(b.path) == "" {
-		return imgexec.InvalidRequest("path is required")
+	path, err := imgargv.PathOperand("path", b.path)
+	if err != nil {
+		return err
 	}
 	if strings.TrimSpace(b.name) == "" {
 		return imgexec.InvalidRequest("name is required")
 	}
 
-	result, err := b.runner.Run(ctx, b.binary, []string{"snapshot", "-c", b.name, b.path})
+	result, err := b.runner.Run(ctx, b.binary, []string{"snapshot", "-c", b.name, path})
 	return imgexec.WrapError(result, err)
 }

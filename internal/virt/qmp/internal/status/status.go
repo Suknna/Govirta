@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/suknna/govirta/internal/virt/qmp/internal/monitor"
+	"github.com/suknna/govirta/internal/virt/qmp/internal/protocol"
 )
 
 type commandName string
@@ -30,7 +31,7 @@ func Query(ctx context.Context, mon monitor.Monitor) (Result, error) {
 		return Result{}, err
 	}
 
-	raw, err := mon.Run(command)
+	raw, err := mon.Run(ctx, command)
 	if err != nil {
 		return Result{}, err
 	}
@@ -46,6 +47,7 @@ func Parse(raw []byte) (Result, error) {
 			Status     string `json:"status"`
 		} `json:"return"`
 		Error *struct {
+			Class       string `json:"class"`
 			Description string `json:"desc"`
 		} `json:"error,omitempty"`
 	}
@@ -53,16 +55,7 @@ func Parse(raw []byte) (Result, error) {
 		return Result{}, err
 	}
 	if response.Error != nil && response.Error.Description != "" {
-		return Result{}, &ResponseError{Description: response.Error.Description}
+		return Result{}, &protocol.ResponseError{Class: response.Error.Class, Description: response.Error.Description}
 	}
 	return Result{Running: response.Return.Running, Singlestep: response.Return.Singlestep, State: response.Return.Status}, nil
-}
-
-// ResponseError reports an error returned by QMP.
-type ResponseError struct {
-	Description string
-}
-
-func (e *ResponseError) Error() string {
-	return e.Description
 }

@@ -1,6 +1,21 @@
 package serial
 
-type Serial struct{ arg string }
+import (
+	"fmt"
+	"strings"
 
-func Chardev(id string) Serial { return Serial{arg: "chardev:" + id} }
-func (s Serial) Arg() string   { return s.arg }
+	"github.com/suknna/govirta/internal/virt/qemu/qopt"
+)
+
+type Serial struct{ chardevID string }
+
+func Chardev(id string) Serial { return Serial{chardevID: id} }
+
+func (s Serial) Validate() error { return qopt.ValidateValue("chardev", s.chardevID) }
+
+func (s Serial) Arg() (string, error) {
+	if err := s.Validate(); err != nil {
+		return "", fmt.Errorf("serial: %w", err)
+	}
+	return "chardev:" + strings.TrimPrefix(s.chardevID, "chardev:"), nil
+}

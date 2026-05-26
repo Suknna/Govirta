@@ -34,6 +34,6 @@ func run(ctx context.Context, mon monitor.Monitor, command commandName) error {
 	if err != nil {
 		return err
 	}
-	_, err = mon.Run(payload)
+	_, err = mon.Run(ctx, payload)
 	return err
 }

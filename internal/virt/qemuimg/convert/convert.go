@@ -2,8 +2,8 @@ package convert
 
 import (
 	"context"
-	"strings"
 
+	imgargv "github.com/suknna/govirta/internal/virt/qemuimg/internal/argv"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
 )
 
@@ -32,13 +32,15 @@ func (b *Builder) Target(path string) *Builder {
 }
 
 func (b *Builder) Do(ctx context.Context) error {
-	if strings.TrimSpace(b.source) == "" {
-		return imgexec.InvalidRequest("source is required")
+	source, err := imgargv.PathOperand("source", b.source)
+	if err != nil {
+		return err
 	}
-	if strings.TrimSpace(b.target) == "" {
-		return imgexec.InvalidRequest("target is required")
+	target, err := imgargv.PathOperand("target", b.target)
+	if err != nil {
+		return err
 	}
 
-	result, err := b.runner.Run(ctx, b.binary, []string{"convert", "-O", "qcow2", b.source, b.target})
+	result, err := b.runner.Run(ctx, b.binary, []string{"convert", "-O", "qcow2", source, target})
 	return imgexec.WrapError(result, err)
 }

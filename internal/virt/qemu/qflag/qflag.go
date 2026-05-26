@@ -11,6 +11,9 @@ const (
 	Off OnOff = "off"
 )
 
+// Valid reports whether the value is unset or one of QEMU's supported on/off values.
+func (v OnOff) Valid() bool { return v == "" || v == On || v == Off }
+
 // OptionalInt represents an integer option that may be absent.
 type OptionalInt struct {
 	value int
