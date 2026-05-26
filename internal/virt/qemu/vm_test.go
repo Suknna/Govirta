@@ -308,6 +308,53 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestNewVMRejectsUnsupportedArchWithSpecificMessage(t *testing.T) {
+	// 回归 F9：未知 arch（如把 aarch64 拼成 arm64）应给出明确的
+	// 「unsupported arch」错误，而不是模糊的 「qemu binary is required」。
+	cases := []struct {
+		name string
+		arch qemu.Arch
+	}{
+		{name: "empty_arch", arch: qemu.Arch("")},
+		{name: "common_typo_arm64", arch: qemu.Arch("arm64")},
+		{name: "common_typo_amd64", arch: qemu.Arch("amd64")},
+		{name: "uppercase", arch: qemu.Arch("X86_64")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := qemu.NewVM(tc.arch).Build()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+			if !strings.Contains(err.Error(), "unsupported arch") {
+				t.Fatalf("Build() error = %q, want it to mention 'unsupported arch'", err.Error())
+			}
+		})
+	}
+}
+
+func TestNewVMUnsupportedArchClearedByExplicitBinary(t *testing.T) {
+	// 回归 F9：远程 acceptance 主机使用 /usr/libexec/qemu-kvm，调用方
+	// 可能传未知 arch 然后用 Binary 覆盖；这条路径必须能通过 Build。
+	vm, err := qemu.NewVM(qemu.Arch("custom-arch")).
+		Binary("/usr/libexec/qemu-kvm").
+		Machine(machine.ProfileAArch64VirtKVM).
+		CPU(cpu.ModelCortexA57).
+		SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 1}).
+		Memory(qemu.MiB(256)).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v, want nil after explicit Binary override", err)
+	}
+	argv := vm.Argv()
+	if len(argv) == 0 || argv[0] != "/usr/libexec/qemu-kvm" {
+		t.Fatalf("Argv()[0] = %v, want /usr/libexec/qemu-kvm", argv)
+	}
+}
+
 func TestVMArgvAllowsExplicitBinaryOverride(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchAArch64).
 		Binary("/usr/libexec/qemu-kvm").

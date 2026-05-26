@@ -136,7 +136,12 @@ func (a *typedArgument) prepare() {
 type Device interface{ Arg() (string, error) }
 
 type Builder struct {
-	binary     string
+	binary string
+	// archErr 记录 NewVM 收到未知 Arch 时的错误，使 Build 能给出
+	// 「unsupported arch X」而不是模糊的「qemu binary is required」。
+	// 显式调用 Binary(path) 提供非空路径会清除此错误，因为显式 binary
+	// 优先于基于 arch 的自动选择。
+	archErr    error
 	name       *nameConfig
 	machine    *machine.Config
 	cpu        cpu.Model
@@ -153,7 +158,18 @@ type Builder struct {
 
 type VM struct{ builder Builder }
 
-func NewVM(arch Arch) *Builder { return &Builder{binary: binaryForArch(arch)} }
+// NewVM 根据 arch 选择默认 QEMU binary。未知 arch 会被记录到内部 archErr，
+// Build 时返回「unsupported arch X」错误；调用方若要使用未在内置列表中
+// 的 arch（例如远程主机的 /usr/libexec/qemu-kvm），应紧接着调用 Binary
+// 显式指定二进制路径以覆盖错误。
+func NewVM(arch Arch) *Builder {
+	bin := binaryForArch(arch)
+	b := &Builder{binary: bin}
+	if bin == "" {
+		b.archErr = fmt.Errorf("unsupported arch %q, expected %q or %q", string(arch), ArchX86_64, ArchAArch64)
+	}
+	return b
+}
 
 func binaryForArch(arch Arch) string {
 	switch arch {
@@ -166,7 +182,15 @@ func binaryForArch(arch Arch) string {
 	}
 }
 
-func (b *Builder) Binary(path string) *Builder { b.binary = path; return b }
+// Binary 显式指定 QEMU 可执行文件路径。提供非空 path 会清除 NewVM 阶段
+// 因未知 Arch 记录的 archErr，因为显式 binary 优先级高于 arch 自动选择。
+func (b *Builder) Binary(path string) *Builder {
+	b.binary = path
+	if path != "" {
+		b.archErr = nil
+	}
+	return b
+}
 
 func (b *Builder) Name(name string, opts ...NameOption) *Builder {
 	c := nameConfig{value: name}
@@ -244,6 +268,10 @@ func (b *Builder) Build() (VM, error) {
 		return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, b.err)
 	}
 	if b.binary == "" {
+		// archErr 优先于通用「binary 缺失」，让调用方一眼看出是 arch 拼写错误。
+		if b.archErr != nil {
+			return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, b.archErr)
+		}
 		return VM{}, fmt.Errorf("%w: qemu binary is required", ErrInvalidVM)
 	}
 	if b.name != nil {
