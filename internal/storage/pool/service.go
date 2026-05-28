@@ -483,22 +483,43 @@ func (s *Service) DeleteImage(ctx context.Context, poolName string, req image.De
 		return volume.ErrUnsupported
 	}
 
-	p.mu.RLock()
+	p.mu.Lock()
 	record, exists := p.images[req.ImageID]
 	driver := p.ImageDriver
-	p.mu.RUnlock()
 	if !exists || record.State != ImageStateReady {
+		p.mu.Unlock()
 		return image.ErrImageNotFound
 	}
+	deletingRecord := record
+	deletingRecord.State = ImageStateDeleting
+	p.images[req.ImageID] = deletingRecord
+	p.mu.Unlock()
 
 	if err := driver.Delete(ctx, req); err != nil {
+		p.mu.Lock()
+		current, exists := p.images[req.ImageID]
+		if exists && imageRecordsMatch(current, deletingRecord) {
+			record.State = ImageStateReady
+			p.images[req.ImageID] = record
+		}
+		p.mu.Unlock()
 		return err
 	}
 
 	p.mu.Lock()
-	delete(p.images, req.ImageID)
+	current, exists := p.images[req.ImageID]
+	if exists && imageRecordsMatch(current, deletingRecord) {
+		delete(p.images, req.ImageID)
+	}
 	p.mu.Unlock()
 	return nil
+}
+
+func imageRecordsMatch(a, b ImageRecord) bool {
+	return a.ID == b.ID &&
+		a.Format == b.Format &&
+		a.DeclaredSizeBytes == b.DeclaredSizeBytes &&
+		a.State == b.State
 }
 
 func findVolumeByNameLocked(volumes map[volume.ID]volume.Volume, name string) (volume.Volume, bool) {
@@ -574,6 +595,11 @@ type pendingImageWriter struct {
 }
 
 func (w *pendingImageWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return 0, image.ErrInvalidImage
+	}
 	return w.writer.Write(p)
 }
 
@@ -584,13 +610,14 @@ func (w *pendingImageWriter) Close() error {
 		return image.ErrInvalidImage
 	}
 	w.done = true
-	w.mu.Unlock()
+	defer w.mu.Unlock()
 
 	if err := w.writer.Close(); err != nil {
+		cancelErr := w.writer.Cancel()
 		w.pool.mu.Lock()
 		delete(w.pool.images, w.imageID)
 		w.pool.mu.Unlock()
-		return err
+		return errors.Join(err, cancelErr)
 	}
 
 	w.pool.mu.Lock()
@@ -612,16 +639,13 @@ func (w *pendingImageWriter) Cancel() error {
 		return image.ErrInvalidImage
 	}
 	w.done = true
-	w.mu.Unlock()
+	defer w.mu.Unlock()
 
 	cancelErr := w.writer.Cancel()
 	w.pool.mu.Lock()
 	delete(w.pool.images, w.imageID)
 	w.pool.mu.Unlock()
-	if cancelErr != nil {
-		return errors.Join(cancelErr)
-	}
-	return nil
+	return cancelErr
 }
 
 func normalizePublishedVolume(published volume.PublishedVolume, vol volume.Volume, req block.PublishRequest) volume.PublishedVolume {

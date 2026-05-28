@@ -48,6 +48,8 @@ const (
 	ImageStatePending ImageState = "pending"
 	// ImageStateReady identifies an image committed and available for reads.
 	ImageStateReady ImageState = "ready"
+	// ImageStateDeleting identifies a ready image whose backend delete is in progress.
+	ImageStateDeleting ImageState = "deleting"
 )
 
 // ImageRecord stores pool-local image accounting metadata.

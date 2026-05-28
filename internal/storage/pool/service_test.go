@@ -562,6 +562,9 @@ func TestPutImageCloseMovesReadyAndGetImageSucceeds(t *testing.T) {
 	if err := writer.Close(); !errors.Is(err, image.ErrInvalidImage) {
 		t.Fatalf("second Close() error = %v, want %v", err, image.ErrInvalidImage)
 	}
+	if _, err := writer.Write([]byte("late")); !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Write() after Close error = %v, want %v", err, image.ErrInvalidImage)
+	}
 
 	reader, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"})
 	if err != nil {
@@ -596,12 +599,40 @@ func TestPutImageCancelRemovesPendingAndReleasesCapacity(t *testing.T) {
 	if err := writer.Cancel(); !errors.Is(err, image.ErrInvalidImage) {
 		t.Fatalf("second Cancel() error = %v, want %v", err, image.ErrInvalidImage)
 	}
+	if _, err := writer.Write([]byte("late")); !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Write() after Cancel error = %v, want %v", err, image.ErrInvalidImage)
+	}
 	if _, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"}); !errors.Is(err, image.ErrImageNotFound) {
 		t.Fatalf("GetImage() canceled image error = %v, want %v", err, image.ErrImageNotFound)
 	}
 	if writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-b", 100)); err != nil {
 		t.Fatalf("PutImage() after cancel error = %v, want nil", err)
 	} else if err := writer.Cancel(); err != nil {
+		t.Fatalf("Cancel() image-b error = %v, want nil", err)
+	}
+}
+
+func TestPutImageCloseFailureCancelsAndReleasesCapacity(t *testing.T) {
+	closeErr := errors.New("close failed")
+	cancelErr := errors.New("cancel failed")
+	service := NewService()
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, &fakeImageDriver{nextWriterCloseErr: closeErr, nextWriterCancelErr: cancelErr})); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 100))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if err := writer.Close(); !errors.Is(err, closeErr) || !errors.Is(err, cancelErr) {
+		t.Fatalf("Close() error = %v, want joined %v and %v", err, closeErr, cancelErr)
+	}
+
+	writer, err = service.PutImage(context.Background(), "file-pool", newPutRequest("image-b", 100))
+	if err != nil {
+		t.Fatalf("PutImage() after failed close error = %v, want nil", err)
+	}
+	if err := writer.Cancel(); err != nil {
 		t.Fatalf("Cancel() image-b error = %v, want nil", err)
 	}
 }
@@ -648,6 +679,68 @@ func TestDeleteImageRemovesReadyImageAndFreesAllocation(t *testing.T) {
 	}
 	if err := writer.Cancel(); err != nil {
 		t.Fatalf("Cancel() image-b error = %v, want nil", err)
+	}
+}
+
+func TestDeleteImageInProgressRejectsDuplicatePut(t *testing.T) {
+	imageDriver := &fakeImageDriver{deleteStarted: make(chan struct{}), releaseDelete: make(chan struct{})}
+	service := NewService()
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 40))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a"})
+	}()
+	<-imageDriver.deleteStarted
+
+	if _, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"}); !errors.Is(err, image.ErrImageNotFound) {
+		t.Fatalf("GetImage() deleting image error = %v, want %v", err, image.ErrImageNotFound)
+	}
+	if _, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 40)); !errors.Is(err, image.ErrImageExists) {
+		t.Fatalf("PutImage() during delete error = %v, want %v", err, image.ErrImageExists)
+	}
+	close(imageDriver.releaseDelete)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("DeleteImage() error = %v, want nil", err)
+	}
+}
+
+func TestDeleteImageFailureRestoresReadyRecord(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	imageDriver := &fakeImageDriver{deleteErr: deleteErr}
+	service := NewService()
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 40))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if _, err := writer.Write([]byte("image-bytes")); err != nil {
+		t.Fatalf("Write() error = %v, want nil", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+
+	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a"}); !errors.Is(err, deleteErr) {
+		t.Fatalf("DeleteImage() error = %v, want %v", err, deleteErr)
+	}
+	reader, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"})
+	if err != nil {
+		t.Fatalf("GetImage() after failed delete error = %v, want nil", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("reader Close() error = %v, want nil", err)
 	}
 }
 
@@ -1242,10 +1335,15 @@ func newPutRequest(id string, declaredSizeBytes int64) image.PutRequest {
 }
 
 type fakeImageDriver struct {
-	actualUsedBytes int64
-	putCalls        int
-	deleteCalls     int
-	images          map[string][]byte
+	actualUsedBytes     int64
+	putCalls            int
+	deleteCalls         int
+	nextWriterCloseErr  error
+	nextWriterCancelErr error
+	deleteErr           error
+	deleteStarted       chan struct{}
+	releaseDelete       chan struct{}
+	images              map[string][]byte
 }
 
 func (d *fakeImageDriver) DriverInfo(ctx context.Context) (image.DriverInfo, error) {
@@ -1260,7 +1358,10 @@ func (d *fakeImageDriver) Put(ctx context.Context, req image.PutRequest) (image.
 		return nil, err
 	}
 	d.putCalls++
-	return &fakeImageWriter{driver: d, imageID: req.ImageID}, nil
+	writer := &fakeImageWriter{driver: d, imageID: req.ImageID, closeErr: d.nextWriterCloseErr, cancelErr: d.nextWriterCancelErr}
+	d.nextWriterCloseErr = nil
+	d.nextWriterCancelErr = nil
+	return writer, nil
 }
 
 func (d *fakeImageDriver) Get(ctx context.Context, req image.GetRequest) (io.ReadCloser, error) {
@@ -1279,6 +1380,15 @@ func (d *fakeImageDriver) Delete(ctx context.Context, req image.DeleteRequest) e
 		return err
 	}
 	d.deleteCalls++
+	if d.deleteStarted != nil {
+		close(d.deleteStarted)
+	}
+	if d.releaseDelete != nil {
+		<-d.releaseDelete
+	}
+	if d.deleteErr != nil {
+		return d.deleteErr
+	}
 	delete(d.images, req.ImageID)
 	return nil
 }
@@ -1291,9 +1401,11 @@ func (d *fakeImageDriver) GetActualUsedBytes(ctx context.Context) (int64, error)
 }
 
 type fakeImageWriter struct {
-	driver  *fakeImageDriver
-	imageID string
-	data    bytes.Buffer
+	driver    *fakeImageDriver
+	imageID   string
+	data      bytes.Buffer
+	closeErr  error
+	cancelErr error
 }
 
 func (w *fakeImageWriter) Write(p []byte) (int, error) {
@@ -1301,6 +1413,9 @@ func (w *fakeImageWriter) Write(p []byte) (int, error) {
 }
 
 func (w *fakeImageWriter) Close() error {
+	if w.closeErr != nil {
+		return w.closeErr
+	}
 	if w.driver.images == nil {
 		w.driver.images = make(map[string][]byte)
 	}
@@ -1309,5 +1424,5 @@ func (w *fakeImageWriter) Close() error {
 }
 
 func (w *fakeImageWriter) Cancel() error {
-	return nil
+	return w.cancelErr
 }
