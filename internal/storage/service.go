@@ -3,8 +3,10 @@ package storage
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/suknna/govirta/internal/storage/block"
+	"github.com/suknna/govirta/internal/storage/diskformat"
 	"github.com/suknna/govirta/internal/storage/pool"
 	"github.com/suknna/govirta/internal/storage/volume"
 )
@@ -40,6 +42,19 @@ type CreateRootVolumeRequest struct {
 
 // CreateDataVolumeRequest is the data-disk counterpart to CreateRootVolumeRequest.
 type CreateDataVolumeRequest = CreateRootVolumeRequest
+
+// CreateRootVolumeFromReaderRequest describes a root volume copied from image bytes.
+type CreateRootVolumeFromReaderRequest struct {
+	VMID          string
+	VMName        string
+	PoolName      string
+	Name          string
+	DiskIndex     int
+	CapacityBytes int64
+	ReadOnly      bool
+	Reader        io.Reader
+	Format        diskformat.Format
+}
 
 // PublishVolumeRequest identifies a block volume publish operation for a VM.
 type PublishVolumeRequest struct {
@@ -103,6 +118,38 @@ func (s *VolumeService) CreateRootVolume(ctx context.Context, req CreateRootVolu
 			ReadOnly:      req.ReadOnly,
 		},
 	})
+}
+
+// CreateRootVolumeFromReader creates a root disk volume as a full copy of source bytes.
+func (s *VolumeService) CreateRootVolumeFromReader(ctx context.Context, req CreateRootVolumeFromReaderRequest) (volume.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
+	}
+	if req.PoolName == "" {
+		return volume.Volume{}, pool.ErrPoolRequired
+	}
+	if req.Reader == nil || !req.Format.Valid() || req.VMID == "" || req.VMName == "" || req.Name == "" || req.DiskIndex < 0 || req.CapacityBytes <= 0 {
+		return volume.Volume{}, volume.ErrInvalidRequest
+	}
+
+	volID := volume.ID(fmt.Sprintf("%s-%s-%d", req.VMID, volume.RoleRoot, req.DiskIndex))
+	created, err := s.pools.CreateVolumeFromReader(ctx, req.PoolName, block.CreateFromReaderRequest{
+		Reader:        req.Reader,
+		Format:        req.Format,
+		Name:          req.Name,
+		PoolName:      req.PoolName,
+		VMID:          req.VMID,
+		VMName:        req.VMName,
+		VolumeID:      volID,
+		DiskIndex:     req.DiskIndex,
+		CapacityBytes: req.CapacityBytes,
+		ReadOnly:      req.ReadOnly,
+	})
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	created.Role = volume.RoleRoot
+	return created, nil
 }
 
 // CreateDataVolume creates a data disk volume by setting volume.RoleData.

@@ -7,6 +7,7 @@ import (
 	"github.com/suknna/govirta/internal/virt/qemuimg/info"
 	imgexec "github.com/suknna/govirta/internal/virt/qemuimg/internal/exec"
 	"github.com/suknna/govirta/internal/virt/qemuimg/remove"
+	"github.com/suknna/govirta/internal/virt/qemuimg/resize"
 	"github.com/suknna/govirta/internal/virt/qemuimg/snapshot"
 )
 
@@ -95,30 +96,42 @@ func (c *ExecClient) QCOW2() QCOW2Client {
 	return QCOW2Client{binary: c.binary, runner: c.runner}
 }
 
+// Binary returns the configured qemu-img binary path.
 func (c QCOW2Client) Binary() string {
 	return c.binary
 }
 
+// Create returns a builder for creating qcow2 images.
 func (c QCOW2Client) Create() *create.Builder {
 	return create.New(c.binary, c.runner)
 }
 
+// Info returns a builder for querying qcow2 image metadata.
 func (c QCOW2Client) Info() *info.Builder {
 	return info.New(c.binary, c.runner)
 }
 
+// Convert returns a builder for converting images into qcow2 output.
 func (c QCOW2Client) Convert() *convert.Builder {
 	return convert.New(c.binary, c.runner)
 }
 
+// Resize returns a builder for resizing qcow2 images.
+func (c QCOW2Client) Resize() *resize.Builder {
+	return resize.New(c.binary, c.runner)
+}
+
+// Snapshot returns a builder for creating qcow2 internal snapshots.
 func (c QCOW2Client) Snapshot() *snapshot.Builder {
 	return snapshot.New(c.binary, c.runner)
 }
 
+// Check returns a builder for checking qcow2 image consistency.
 func (c QCOW2Client) Check() *check.Builder {
 	return check.New(c.binary, c.runner)
 }
 
+// Remove returns a builder for deleting trusted Govirta-owned qcow2 files.
 func (c QCOW2Client) Remove() *remove.Builder {
 	return remove.New(c.binary, c.runner)
 }

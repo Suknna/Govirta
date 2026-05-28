@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"github.com/suknna/govirta/internal/storage/image"
 	"github.com/suknna/govirta/internal/storage/pool"
 	"github.com/suknna/govirta/internal/storage/volume"
 )
@@ -19,6 +20,13 @@ var (
 	ErrPoolAlreadyExists = pool.ErrPoolAlreadyExists
 	// ErrPoolCapacityExceeded marks volume allocation requests beyond pool overcommit capacity.
 	ErrPoolCapacityExceeded = pool.ErrPoolCapacityExceeded
+
+	// ErrInvalidImage marks caller input that cannot identify or store an image.
+	ErrInvalidImage = image.ErrInvalidImage
+	// ErrImageExists marks duplicate image IDs in the same pool.
+	ErrImageExists = image.ErrImageExists
+	// ErrImageNotFound marks lookup or delete requests for unknown images.
+	ErrImageNotFound = image.ErrImageNotFound
 
 	// ErrVolumeNotFound marks lookup or mutation requests for an unknown volume.
 	ErrVolumeNotFound = volume.ErrVolumeNotFound

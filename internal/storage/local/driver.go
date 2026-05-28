@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/suknna/govirta/internal/storage/block"
+	"github.com/suknna/govirta/internal/storage/diskformat"
 	"github.com/suknna/govirta/internal/storage/volume"
 	"github.com/suknna/govirta/internal/virt/qemuimg"
 )
@@ -24,6 +26,7 @@ const (
 var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var walkDir = filepath.WalkDir
+var removePath = os.Remove
 
 // Config configures a host-local qcow2 block driver for one storage pool.
 type Config struct {
@@ -118,6 +121,67 @@ func (d *Driver) Create(ctx context.Context, req block.CreateRequest) (volume.Vo
 			formatKey: string(volume.DiskFormatQCOW2),
 		},
 	}, nil
+}
+
+// CreateFromReader creates a standalone qcow2 root volume from explicit image bytes.
+// It never creates qcow2 backing chains: qcow2 input is committed as a full file,
+// and raw input is converted through qemu-img with an explicit raw source format.
+func (d *Driver) CreateFromReader(ctx context.Context, req block.CreateFromReaderRequest) (volume.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
+	}
+	if req.Reader == nil || !req.Format.Valid() {
+		return volume.Volume{}, volume.ErrInvalidRequest
+	}
+
+	path, volumeDir, err := d.pathForCreateFromReader(req)
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	if req.CapacityBytes < 0 {
+		return volume.Volume{}, volume.ErrInvalidRequest
+	}
+	if err := os.MkdirAll(volumeDir, 0o755); err != nil {
+		return volume.Volume{}, err
+	}
+	if err := ensureCreateTargetAvailable(path); err != nil {
+		return volume.Volume{}, err
+	}
+
+	tmpPath := path + ".tmp"
+	if err := ensureCreateTargetAvailable(tmpPath); err != nil {
+		return volume.Volume{}, err
+	}
+	if err := copyReaderToPath(ctx, req.Reader, tmpPath); err != nil {
+		cleanupErr := errors.Join(removeIfExists(tmpPath), removeDirIfEmpty(volumeDir))
+		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+
+	if req.Format == diskformat.FormatQCOW2 {
+		if err := commitCopiedImage(tmpPath, path); err != nil {
+			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
+			return volume.Volume{}, errors.Join(err, cleanupErr)
+		}
+	} else {
+		if err := d.qemuimg.QCOW2().Convert().SourceFormat("raw").Source(tmpPath).Target(path).Do(ctx); err != nil {
+			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
+			return volume.Volume{}, errors.Join(err, cleanupErr)
+		}
+	}
+
+	if req.CapacityBytes > 0 {
+		if err := d.qemuimg.QCOW2().Resize().Path(path).SizeBytes(req.CapacityBytes).Do(ctx); err != nil {
+			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
+			return volume.Volume{}, errors.Join(err, cleanupErr)
+		}
+	}
+
+	if err := removeIfExists(tmpPath); err != nil {
+		cleanupErr := errors.Join(removeIfExists(path), removeIfExists(tmpPath), removeDirIfEmpty(volumeDir))
+		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+
+	return d.newVolume(req, path), nil
 }
 
 // Delete removes a local qcow2 file and then removes its empty VM directory.
@@ -276,6 +340,22 @@ func (d *Driver) pathForCreate(req block.CreateRequest) (string, string, error) 
 	return path, volumeDir, nil
 }
 
+func (d *Driver) pathForCreateFromReader(req block.CreateFromReaderRequest) (string, string, error) {
+	if req.PoolName != d.poolName || req.VolumeID == "" || req.VMID == "" || req.VMName == "" || req.Name == "" || req.CapacityBytes < 0 || req.DiskIndex < 0 {
+		return "", "", volume.ErrInvalidRequest
+	}
+	if !safeName(req.PoolName) || !safeName(req.VMID) || !safeName(req.VMName) {
+		return "", "", volume.ErrInvalidRequest
+	}
+
+	volumeDir := filepath.Join(d.poolRoot, req.VMID)
+	path := filepath.Join(volumeDir, fmt.Sprintf("%s-disk-%d.qcow2", req.VMName, req.DiskIndex))
+	if !pathWithinDir(path, volumeDir) || !pathWithinDir(path, d.poolRoot) {
+		return "", "", volume.ErrInvalidRequest
+	}
+	return path, volumeDir, nil
+}
+
 func (d *Driver) pathFromVolume(vol volume.Volume) (string, string, error) {
 	if vol.PoolName != d.poolName || vol.VMID == "" || !safeName(vol.VMID) || vol.VMName == "" || !safeName(vol.VMName) || vol.DiskIndex < 0 {
 		return "", "", volume.ErrInvalidRequest
@@ -324,15 +404,56 @@ func pathWithinDir(path, dir string) bool {
 }
 
 func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removePath(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
 func removeDirIfEmpty(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removePath(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+func copyReaderToPath(ctx context.Context, reader io.Reader, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(file, reader)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return errors.Join(copyErr, closeErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return ctx.Err()
+}
+
+func commitCopiedImage(tmpPath, targetPath string) error {
+	return os.Link(tmpPath, targetPath)
+}
+
+func (d *Driver) newVolume(req block.CreateFromReaderRequest, path string) volume.Volume {
+	return volume.Volume{
+		ID:            req.VolumeID,
+		Name:          req.Name,
+		VMID:          req.VMID,
+		VMName:        req.VMName,
+		PoolName:      req.PoolName,
+		DiskIndex:     req.DiskIndex,
+		Backend:       driverName,
+		CapacityBytes: req.CapacityBytes,
+		State:         volume.StateAvailable,
+		Context: map[string]string{
+			pathKey:   path,
+			formatKey: string(volume.DiskFormatQCOW2),
+		},
+	}
 }

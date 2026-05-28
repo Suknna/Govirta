@@ -2,11 +2,14 @@ package pool
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 
 	"github.com/suknna/govirta/internal/storage/block"
+	"github.com/suknna/govirta/internal/storage/image"
 	"github.com/suknna/govirta/internal/storage/volume"
 )
 
@@ -23,13 +26,22 @@ func NewService() *Service {
 	}
 }
 
-// RegisterPool registers a block storage pool without creating or replacing defaults.
+// RegisterPool registers a storage pool without creating or replacing defaults.
 func (s *Service) RegisterPool(p *Pool) error {
-	if p == nil || p.Config.Name == "" || p.Config.Type == "" || p.Config.Backend == "" || p.Config.StorageRoot == "" || p.Config.CapacityBytes <= 0 || p.Driver == nil {
+	if p == nil || p.Config.Name == "" || p.Config.Type == "" || p.Config.Backend == "" || p.Config.StorageRoot == "" || p.Config.CapacityBytes <= 0 {
 		return volume.ErrInvalidRequest
 	}
-	if p.Config.Type != PoolTypeBlock {
-		return volume.ErrUnsupported
+	switch p.Config.Type {
+	case PoolTypeBlock:
+		if p.Driver == nil || p.ImageDriver != nil {
+			return volume.ErrInvalidRequest
+		}
+	case PoolTypeFile:
+		if p.ImageDriver == nil || p.Driver != nil {
+			return volume.ErrInvalidRequest
+		}
+	default:
+		return volume.ErrInvalidRequest
 	}
 
 	s.mu.Lock()
@@ -40,8 +52,11 @@ func (s *Service) RegisterPool(p *Pool) error {
 	}
 
 	p.mu.Lock()
-	if p.volumes == nil {
+	if p.Config.Type == PoolTypeBlock && p.volumes == nil {
 		p.volumes = make(map[volume.ID]volume.Volume)
+	}
+	if p.Config.Type == PoolTypeFile && p.images == nil {
+		p.images = make(map[string]ImageRecord)
 	}
 	p.mu.Unlock()
 
@@ -110,22 +125,29 @@ func (s *Service) GetPoolUsage(ctx context.Context, poolName string) (Usage, err
 
 	p.mu.RLock()
 	config := p.Config
-	driver := p.Driver
+	blockDriver := p.Driver
+	imageDriver := p.ImageDriver
 	allocatedBytes := p.allocatedLocked()
+	overcommitRatio := overcommitRatioForType(config.Type)
 	p.mu.RUnlock()
 
-	actualUsedBytes, err := driver.GetActualUsedBytes(ctx)
+	var actualUsedBytes int64
+	if config.Type == PoolTypeFile {
+		actualUsedBytes, err = imageDriver.GetActualUsedBytes(ctx)
+	} else {
+		actualUsedBytes, err = blockDriver.GetActualUsedBytes(ctx)
+	}
 	if err != nil {
 		return Usage{}, err
 	}
 
-	allocationLimitBytes := allocationLimit(config.CapacityBytes)
+	allocationLimitBytes := ratioAllocationLimit(config.CapacityBytes, overcommitRatio)
 	return Usage{
 		PoolName:               config.Name,
 		Type:                   config.Type,
 		Backend:                config.Backend,
 		CapacityBytes:          config.CapacityBytes,
-		OvercommitRatio:        DefaultOvercommitRatio,
+		OvercommitRatio:        overcommitRatio,
 		AllocationLimitBytes:   allocationLimitBytes,
 		AllocatedBytes:         allocatedBytes,
 		ActualUsedBytes:        actualUsedBytes,
@@ -142,6 +164,9 @@ func (s *Service) CreateVolume(ctx context.Context, poolName string, req block.C
 	p, err := s.getPool(poolName)
 	if err != nil {
 		return volume.Volume{}, err
+	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.Volume{}, volume.ErrUnsupported
 	}
 
 	p.mu.Lock()
@@ -178,12 +203,60 @@ func (s *Service) CreateVolume(ctx context.Context, poolName string, req block.C
 	return cloneVolume(created), nil
 }
 
+// CreateVolumeFromReader creates or returns an idempotent existing volume from source bytes within a named block pool.
+func (s *Service) CreateVolumeFromReader(ctx context.Context, poolName string, req block.CreateFromReaderRequest) (volume.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
+	}
+
+	p, err := s.getPool(poolName)
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.Volume{}, volume.ErrUnsupported
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, exists := p.volumes[req.VolumeID]
+	driver := p.Driver
+	if exists {
+		if createFromReaderRequestMatchesVolume(req, existing) {
+			return cloneVolume(existing), nil
+		}
+		return volume.Volume{}, volume.ErrVolumeConflict
+	}
+	if existing, exists := findVolumeByNameLocked(p.volumes, req.Name); exists {
+		if createFromReaderRequestMatchesVolume(req, existing) {
+			return cloneVolume(existing), nil
+		}
+		return volume.Volume{}, volume.ErrVolumeConflict
+	}
+	if err := reserveCapacityLocked(p, req.CapacityBytes); err != nil {
+		return volume.Volume{}, err
+	}
+
+	created, err := driver.CreateFromReader(ctx, req)
+	if err != nil {
+		return volume.Volume{}, fmt.Errorf("create volume %q from reader in pool %q: %w", req.Name, poolName, err)
+	}
+	created = normalizeCreatedVolumeFromReader(created, req)
+
+	if p.volumes == nil {
+		p.volumes = make(map[volume.ID]volume.Volume)
+	}
+	p.volumes[created.ID] = cloneVolume(created)
+	return cloneVolume(created), nil
+}
+
 func reserveCapacityLocked(p *Pool, bytes int64) error {
 	if bytes <= 0 {
 		return volume.ErrInvalidRequest
 	}
 
-	limit := allocationLimit(p.Config.CapacityBytes)
+	limit := ratioAllocationLimit(p.Config.CapacityBytes, overcommitRatioForType(p.Config.Type))
 	allocated := p.allocatedLocked()
 	if allocated > limit || bytes > limit-allocated {
 		return ErrPoolCapacityExceeded
@@ -203,6 +276,9 @@ func (s *Service) PublishVolume(ctx context.Context, poolName string, volumeID v
 	p, err := s.getPool(poolName)
 	if err != nil {
 		return volume.PublishedVolume{}, err
+	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.PublishedVolume{}, volume.ErrUnsupported
 	}
 
 	p.mu.Lock()
@@ -252,6 +328,9 @@ func (s *Service) UnpublishVolume(ctx context.Context, poolName string, volumeID
 	if err != nil {
 		return err
 	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.ErrUnsupported
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -291,6 +370,9 @@ func (s *Service) DeleteVolume(ctx context.Context, poolName string, volumeID vo
 	if err != nil {
 		return err
 	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.ErrUnsupported
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -312,6 +394,134 @@ func (s *Service) DeleteVolume(ctx context.Context, poolName string, volumeID vo
 	return nil
 }
 
+// PutImage reserves and starts writing a new image in a named file pool.
+func (s *Service) PutImage(ctx context.Context, poolName string, req image.PutRequest) (image.ImageWriter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req.ImageID == "" || !req.Format.Valid() || req.DeclaredSizeBytes <= 0 {
+		return nil, image.ErrInvalidImage
+	}
+
+	p, err := s.getPool(poolName)
+	if err != nil {
+		return nil, err
+	}
+	if p.Config.Type != PoolTypeFile {
+		return nil, volume.ErrUnsupported
+	}
+
+	p.mu.Lock()
+	if _, exists := p.images[req.ImageID]; exists {
+		p.mu.Unlock()
+		return nil, image.ErrImageExists
+	}
+	if err := reserveCapacityLocked(p, req.DeclaredSizeBytes); err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
+	if p.images == nil {
+		p.images = make(map[string]ImageRecord)
+	}
+	p.images[req.ImageID] = ImageRecord{ID: req.ImageID, Format: req.Format, DeclaredSizeBytes: req.DeclaredSizeBytes, State: ImageStatePending}
+	driver := p.ImageDriver
+	p.mu.Unlock()
+
+	writer, err := driver.Put(ctx, req)
+	if err != nil {
+		p.mu.Lock()
+		delete(p.images, req.ImageID)
+		p.mu.Unlock()
+		return nil, err
+	}
+
+	return &pendingImageWriter{pool: p, imageID: req.ImageID, writer: writer}, nil
+}
+
+// GetImage opens a ready image for reading from a named file pool.
+func (s *Service) GetImage(ctx context.Context, poolName string, req image.GetRequest) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req.ImageID == "" {
+		return nil, image.ErrInvalidImage
+	}
+
+	p, err := s.getPool(poolName)
+	if err != nil {
+		return nil, err
+	}
+	if p.Config.Type != PoolTypeFile {
+		return nil, volume.ErrUnsupported
+	}
+
+	p.mu.RLock()
+	record, exists := p.images[req.ImageID]
+	driver := p.ImageDriver
+	p.mu.RUnlock()
+	if !exists || record.State != ImageStateReady {
+		return nil, image.ErrImageNotFound
+	}
+
+	return driver.Get(ctx, req)
+}
+
+// DeleteImage deletes a ready image from a named file pool and releases its allocation.
+func (s *Service) DeleteImage(ctx context.Context, poolName string, req image.DeleteRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.ImageID == "" {
+		return image.ErrInvalidImage
+	}
+
+	p, err := s.getPool(poolName)
+	if err != nil {
+		return err
+	}
+	if p.Config.Type != PoolTypeFile {
+		return volume.ErrUnsupported
+	}
+
+	p.mu.Lock()
+	record, exists := p.images[req.ImageID]
+	driver := p.ImageDriver
+	if !exists || record.State != ImageStateReady {
+		p.mu.Unlock()
+		return image.ErrImageNotFound
+	}
+	deletingRecord := record
+	deletingRecord.State = ImageStateDeleting
+	p.images[req.ImageID] = deletingRecord
+	p.mu.Unlock()
+
+	if err := driver.Delete(ctx, req); err != nil {
+		p.mu.Lock()
+		current, exists := p.images[req.ImageID]
+		if exists && imageRecordsMatch(current, deletingRecord) {
+			record.State = ImageStateReady
+			p.images[req.ImageID] = record
+		}
+		p.mu.Unlock()
+		return err
+	}
+
+	p.mu.Lock()
+	current, exists := p.images[req.ImageID]
+	if exists && imageRecordsMatch(current, deletingRecord) {
+		delete(p.images, req.ImageID)
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+func imageRecordsMatch(a, b ImageRecord) bool {
+	return a.ID == b.ID &&
+		a.Format == b.Format &&
+		a.DeclaredSizeBytes == b.DeclaredSizeBytes &&
+		a.State == b.State
+}
+
 func findVolumeByNameLocked(volumes map[volume.ID]volume.Volume, name string) (volume.Volume, bool) {
 	for _, vol := range volumes {
 		if vol.Name == name {
@@ -322,6 +532,16 @@ func findVolumeByNameLocked(volumes map[volume.ID]volume.Volume, name string) (v
 }
 
 func createRequestMatchesVolume(req block.CreateRequest, vol volume.Volume) bool {
+	return vol.Name == req.Name &&
+		vol.PoolName == req.PoolName &&
+		vol.VMID == req.VMID &&
+		vol.VMName == req.VMName &&
+		vol.DiskIndex == req.DiskIndex &&
+		vol.CapacityBytes == req.CapacityBytes &&
+		vol.ID == req.VolumeID
+}
+
+func createFromReaderRequestMatchesVolume(req block.CreateFromReaderRequest, vol volume.Volume) bool {
 	return vol.Name == req.Name &&
 		vol.PoolName == req.PoolName &&
 		vol.VMID == req.VMID &&
@@ -343,6 +563,89 @@ func normalizeCreatedVolume(vol volume.Volume, req block.CreateRequest) volume.V
 		vol.State = volume.StateAvailable
 	}
 	return vol
+}
+
+func normalizeCreatedVolumeFromReader(vol volume.Volume, req block.CreateFromReaderRequest) volume.Volume {
+	vol.ID = req.VolumeID
+	vol.Name = req.Name
+	vol.PoolName = req.PoolName
+	vol.VMID = req.VMID
+	vol.VMName = req.VMName
+	vol.DiskIndex = req.DiskIndex
+	vol.CapacityBytes = req.CapacityBytes
+	if vol.State == "" {
+		vol.State = volume.StateAvailable
+	}
+	return vol
+}
+
+func overcommitRatioForType(typ PoolType) float64 {
+	if typ == PoolTypeFile {
+		return DefaultFileOvercommitRatio
+	}
+	return DefaultOvercommitRatio
+}
+
+type pendingImageWriter struct {
+	pool    *Pool
+	imageID string
+	writer  image.ImageWriter
+	mu      sync.Mutex
+	done    bool
+}
+
+func (w *pendingImageWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return 0, image.ErrInvalidImage
+	}
+	return w.writer.Write(p)
+}
+
+func (w *pendingImageWriter) Close() error {
+	w.mu.Lock()
+	if w.done {
+		w.mu.Unlock()
+		return image.ErrInvalidImage
+	}
+	w.done = true
+	defer w.mu.Unlock()
+
+	if err := w.writer.Close(); err != nil {
+		cancelErr := w.writer.Cancel()
+		w.pool.mu.Lock()
+		delete(w.pool.images, w.imageID)
+		w.pool.mu.Unlock()
+		return errors.Join(err, cancelErr)
+	}
+
+	w.pool.mu.Lock()
+	record, exists := w.pool.images[w.imageID]
+	if !exists || record.State != ImageStatePending {
+		w.pool.mu.Unlock()
+		return image.ErrInvalidImage
+	}
+	record.State = ImageStateReady
+	w.pool.images[w.imageID] = record
+	w.pool.mu.Unlock()
+	return nil
+}
+
+func (w *pendingImageWriter) Cancel() error {
+	w.mu.Lock()
+	if w.done {
+		w.mu.Unlock()
+		return image.ErrInvalidImage
+	}
+	w.done = true
+	defer w.mu.Unlock()
+
+	cancelErr := w.writer.Cancel()
+	w.pool.mu.Lock()
+	delete(w.pool.images, w.imageID)
+	w.pool.mu.Unlock()
+	return cancelErr
 }
 
 func normalizePublishedVolume(published volume.PublishedVolume, vol volume.Volume, req block.PublishRequest) volume.PublishedVolume {

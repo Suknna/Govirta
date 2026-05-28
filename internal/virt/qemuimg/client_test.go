@@ -97,6 +97,9 @@ func TestQCOW2ReturnsCommandBuilders(t *testing.T) {
 	if qcow2.Convert() == nil {
 		t.Fatalf("Convert() = nil, want builder")
 	}
+	if qcow2.Resize() == nil {
+		t.Fatalf("Resize() = nil, want builder")
+	}
 	if qcow2.Snapshot() == nil {
 		t.Fatalf("Snapshot() = nil, want builder")
 	}
@@ -179,6 +182,30 @@ func TestQCOW2ConvertUsesConfiguredRunner(t *testing.T) {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
 	assertRun(t, runner, "/custom/qemu-img", []string{"convert", "-f", "qcow2", "-O", "qcow2", "src.qcow2", "dst.qcow2"})
+}
+
+func TestQCOW2ConvertUsesConfiguredRunnerWithRawSource(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().Convert().Source("src.raw").SourceFormat("raw").Target("dst.qcow2").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"convert", "-f", "raw", "-O", "qcow2", "src.raw", "dst.qcow2"})
+}
+
+func TestQCOW2ResizeUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().Resize().Path("disk.qcow2").SizeBytes(1073741824).Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"resize", "-f", "qcow2", "disk.qcow2", "1073741824"})
 }
 
 func TestQCOW2SnapshotUsesConfiguredRunner(t *testing.T) {
