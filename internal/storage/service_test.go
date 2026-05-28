@@ -16,8 +16,6 @@ import (
 )
 
 func TestCreateVolumeValidation(t *testing.T) {
-	service, _ := newTestVolumeService(t)
-
 	tests := []struct {
 		name string
 		req  CreateVolumeRequest
@@ -26,13 +24,19 @@ func TestCreateVolumeValidation(t *testing.T) {
 		{name: "pool required", req: newCreateVolumeRequest(func(req *CreateVolumeRequest) { req.PoolName = "" }), want: ErrPoolRequired},
 		{name: "vm id required", req: newCreateVolumeRequest(func(req *CreateVolumeRequest) { req.VMID = "" }), want: ErrInvalidRequest},
 		{name: "vm name required", req: newCreateVolumeRequest(func(req *CreateVolumeRequest) { req.VMName = "" }), want: ErrInvalidRequest},
+		{name: "role required", req: newCreateVolumeRequest(func(req *CreateVolumeRequest) { req.Spec.Role = "" }), want: ErrInvalidRequest},
+		{name: "unknown role rejected", req: newCreateVolumeRequest(func(req *CreateVolumeRequest) { req.Spec.Role = volume.Role("swap") }), want: ErrInvalidRequest},
 		{name: "disk index non-negative", req: newCreateVolumeRequest(func(req *CreateVolumeRequest) { req.Spec.DiskIndex = -1 }), want: ErrInvalidRequest},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			service, driver := newTestVolumeService(t)
 			if _, err := service.CreateVolume(context.Background(), tc.req); !errors.Is(err, tc.want) {
 				t.Fatalf("CreateVolume() error = %v, want %v", err, tc.want)
+			}
+			if driver.createCalls != 0 {
+				t.Fatalf("driver Create calls = %d, want 0", driver.createCalls)
 			}
 		})
 	}

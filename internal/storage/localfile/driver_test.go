@@ -137,6 +137,149 @@ func TestPutDuplicateImageReturnsExists(t *testing.T) {
 	}
 }
 
+func TestPutRejectsSymlinkImageRootWithoutExternalMutation(t *testing.T) {
+	driver := newTestDriver(t)
+	externalRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(driver.imageRoot()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(driver.imageRoot()), err)
+	}
+	if err := os.Symlink(externalRoot, driver.imageRoot()); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	_, err := driver.Put(context.Background(), image.PutRequest{ImageID: "escape", Format: diskformat.FormatQCOW2, DeclaredSizeBytes: 1})
+	if !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Put() error = %v, want ErrInvalidImage", err)
+	}
+	if _, err := os.Stat(filepath.Join(externalRoot, "escape")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("external image dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestGetRejectsSymlinkImageRootWithoutReadingExternalFile(t *testing.T) {
+	driver := newTestDriver(t)
+	externalRoot := t.TempDir()
+	externalPath := filepath.Join(externalRoot, "escape", "escape.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(filepath.Dir(driver.imageRoot()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(driver.imageRoot()), err)
+	}
+	if err := os.Symlink(externalRoot, driver.imageRoot()); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	r, err := driver.Get(context.Background(), image.GetRequest{ImageID: "escape"})
+	if !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Get() error = %v, want ErrInvalidImage", err)
+	}
+	if r != nil {
+		if closeErr := r.Close(); closeErr != nil {
+			t.Fatalf("reader Close() error = %v", closeErr)
+		}
+		t.Fatal("Get() reader != nil, want nil")
+	}
+}
+
+func TestDeleteRejectsSymlinkImageRootWithoutDeletingExternalFile(t *testing.T) {
+	driver := newTestDriver(t)
+	externalRoot := t.TempDir()
+	externalPath := filepath.Join(externalRoot, "escape", "escape.raw")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(filepath.Dir(driver.imageRoot()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(driver.imageRoot()), err)
+	}
+	if err := os.Symlink(externalRoot, driver.imageRoot()); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	err := driver.Delete(context.Background(), image.DeleteRequest{ImageID: "escape"})
+	if !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Delete() error = %v, want ErrInvalidImage", err)
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external image bytes = %q, want outside", got)
+	}
+}
+
+func TestGetActualUsedBytesRejectsSymlinkImageRootWithoutCountingExternalFiles(t *testing.T) {
+	driver := newTestDriver(t)
+	externalRoot := t.TempDir()
+	externalPath := filepath.Join(externalRoot, "escape", "escape.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(filepath.Dir(driver.imageRoot()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(driver.imageRoot()), err)
+	}
+	if err := os.Symlink(externalRoot, driver.imageRoot()); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	used, err := driver.GetActualUsedBytes(context.Background())
+	if !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("GetActualUsedBytes() error = %v, want ErrInvalidImage", err)
+	}
+	if used != 0 {
+		t.Fatalf("GetActualUsedBytes() = %d, want 0", used)
+	}
+}
+
+func TestOperationsRejectSymlinkPoolAncestorBeforeExternalAccess(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *Driver) error
+	}{
+		{name: "put", run: func(ctx context.Context, driver *Driver) error {
+			_, err := driver.Put(ctx, image.PutRequest{ImageID: "escape", Format: diskformat.FormatQCOW2, DeclaredSizeBytes: 1})
+			return err
+		}},
+		{name: "get", run: func(ctx context.Context, driver *Driver) error {
+			r, err := driver.Get(ctx, image.GetRequest{ImageID: "escape"})
+			if r != nil {
+				return errors.Join(err, r.Close())
+			}
+			return err
+		}},
+		{name: "delete", run: func(ctx context.Context, driver *Driver) error {
+			return driver.Delete(ctx, image.DeleteRequest{ImageID: "escape"})
+		}},
+		{name: "get actual used bytes", run: func(ctx context.Context, driver *Driver) error {
+			_, err := driver.GetActualUsedBytes(ctx)
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver := newTestDriver(t)
+			externalPoolParent := t.TempDir()
+			externalImageRoot := filepath.Join(externalPoolParent, "pool-a", "images")
+			externalPath := filepath.Join(externalImageRoot, "escape", "escape.qcow2")
+			writeFile(t, externalPath, "outside")
+			if err := os.Symlink(externalPoolParent, filepath.Join(driver.root, "pool")); err != nil {
+				t.Fatalf("Symlink() error = %v", err)
+			}
+
+			err := tt.run(context.Background(), driver)
+			if !errors.Is(err, image.ErrInvalidImage) {
+				t.Fatalf("%s error = %v, want ErrInvalidImage", tt.name, err)
+			}
+			got, readErr := os.ReadFile(externalPath)
+			if readErr != nil {
+				t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+			}
+			if string(got) != "outside" {
+				t.Fatalf("external image bytes = %q, want outside", got)
+			}
+			if _, err := os.Stat(filepath.Join(externalImageRoot, "escape", "escape.qcow2.tmp")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("external temp stat error = %v, want not exist", err)
+			}
+		})
+	}
+}
+
 func TestPutDuplicateImageIDWithDifferentFormatReturnsExists(t *testing.T) {
 	driver := newTestDriver(t)
 	ctx := context.Background()
@@ -165,6 +308,94 @@ func TestDeleteRemovesImageAndEmptyDir(t *testing.T) {
 	}
 	if _, err := os.Stat(imageDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("image dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestDeleteRemovesCommittedImageStaleTempAndEmptyDir(t *testing.T) {
+	driver := newTestDriver(t)
+	w, err := driver.Put(context.Background(), image.PutRequest{ImageID: "cleanup-fail", Format: diskformat.FormatQCOW2, DeclaredSizeBytes: 4})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	internalWriter := w.(*imageWriter)
+	if _, err := w.Write([]byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	originalRemoveCommittedTemp := removeCommittedTemp
+	removeCommittedTemp = func(path string) error {
+		if path == internalWriter.tmp {
+			return errors.New("remove temp failed")
+		}
+		return originalRemoveCommittedTemp(path)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil after committed target link", err)
+	}
+	removeCommittedTemp = originalRemoveCommittedTemp
+	t.Cleanup(func() { removeCommittedTemp = originalRemoveCommittedTemp })
+
+	used, err := driver.GetActualUsedBytes(context.Background())
+	if err != nil {
+		t.Fatalf("GetActualUsedBytes() before Delete error = %v, want nil", err)
+	}
+	if used != 8 {
+		t.Fatalf("GetActualUsedBytes() before Delete = %d, want target and stale tmp usage", used)
+	}
+	if err := driver.Delete(context.Background(), image.DeleteRequest{ImageID: "cleanup-fail"}); err != nil {
+		t.Fatalf("Delete() error = %v, want nil", err)
+	}
+	if _, err := os.Stat(internalWriter.target); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("target stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(internalWriter.tmp); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale tmp stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(internalWriter.imageDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("image dir stat error = %v, want not exist", err)
+	}
+	used, err = driver.GetActualUsedBytes(context.Background())
+	if err != nil {
+		t.Fatalf("GetActualUsedBytes() after Delete error = %v, want nil", err)
+	}
+	if used != 0 {
+		t.Fatalf("GetActualUsedBytes() after Delete = %d, want no stale usage", used)
+	}
+}
+
+func TestDeleteReturnsDiagnosticErrorWhenStaleTempRemovalFails(t *testing.T) {
+	driver := newTestDriver(t)
+	ctx := context.Background()
+	writeImage(t, driver, "stale-error", diskformat.FormatRaw, "data")
+	path, _, err := driver.imagePath("stale-error", diskformat.FormatRaw)
+	if err != nil {
+		t.Fatalf("imagePath() error = %v", err)
+	}
+	tmp := path + ".tmp"
+	writeFile(t, tmp, "stale")
+
+	staleErr := errors.New("permission denied")
+	originalRemoveCommittedTemp := removeCommittedTemp
+	removeCommittedTemp = func(removePath string) error {
+		if removePath == tmp {
+			return staleErr
+		}
+		return originalRemoveCommittedTemp(removePath)
+	}
+	t.Cleanup(func() { removeCommittedTemp = originalRemoveCommittedTemp })
+
+	err = driver.Delete(ctx, image.DeleteRequest{ImageID: "stale-error"})
+	if !errors.Is(err, staleErr) {
+		t.Fatalf("Delete() error = %v, want wrapped %v", err, staleErr)
+	}
+	if !strings.Contains(err.Error(), tmp) {
+		t.Fatalf("Delete() error = %q, want stale tmp path %q", err, tmp)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("target stat error = %v, want removed before stale tmp error", err)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("stale tmp stat error = %v, want retained after removal failure", err)
 	}
 }
 
@@ -377,6 +608,16 @@ func newTestDriver(t *testing.T) *Driver {
 		t.Fatalf("NewDriver() error = %v", err)
 	}
 	return driver
+}
+
+func writeFile(t *testing.T, path string, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
 }
 
 func writeImage(t *testing.T, driver *Driver, imageID string, format diskformat.Format, data string) {

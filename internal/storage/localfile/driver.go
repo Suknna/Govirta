@@ -81,14 +81,21 @@ func (d *Driver) Put(ctx context.Context, req image.PutRequest) (image.ImageWrit
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(d.imageRoot(), 0o755); err != nil {
+	if err := d.ensureImageRoot(d.imageRoot()); err != nil {
 		return nil, err
 	}
 	if err := os.Mkdir(imageDir, 0o700); err != nil {
 		if errors.Is(err, fs.ErrExist) {
+			if err := ensureExistingImageDir(imageDir); err != nil {
+				return nil, err
+			}
 			return nil, fmt.Errorf("%w: %s", image.ErrImageExists, req.ImageID)
 		}
 		return nil, err
+	}
+	if err := ensureExistingImageDir(imageDir); err != nil {
+		cleanupErr := removeDirIfEmpty(imageDir)
+		return nil, errors.Join(err, cleanupErr)
 	}
 	tmp := target + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -102,6 +109,15 @@ func (d *Driver) Put(ctx context.Context, req image.PutRequest) (image.ImageWrit
 // Get opens committed image bytes for reading.
 func (d *Driver) Get(ctx context.Context, req image.GetRequest) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !safeName(req.ImageID) {
+		return nil, image.ErrInvalidImage
+	}
+	if err := d.ensureExistingImageRoot(d.imageRoot()); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", image.ErrImageNotFound, req.ImageID)
+		}
 		return nil, err
 	}
 	path, err := d.existingImagePath(req.ImageID)
@@ -123,6 +139,15 @@ func (d *Driver) Delete(ctx context.Context, req image.DeleteRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !safeName(req.ImageID) {
+		return image.ErrInvalidImage
+	}
+	if err := d.ensureExistingImageRoot(d.imageRoot()); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", image.ErrImageNotFound, req.ImageID)
+		}
+		return err
+	}
 	path, err := d.existingImagePath(req.ImageID)
 	if err != nil {
 		return err
@@ -133,12 +158,21 @@ func (d *Driver) Delete(ctx context.Context, req image.DeleteRequest) error {
 		}
 		return err
 	}
+	if err := removeCommittedTemp(path + ".tmp"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove stale committed image temp %s: %w", path+".tmp", err)
+	}
 	return removeDirIfEmpty(filepath.Dir(path))
 }
 
 // GetActualUsedBytes walks the driver image root and sums regular file sizes.
 func (d *Driver) GetActualUsedBytes(ctx context.Context) (int64, error) {
 	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := d.ensureExistingImageRoot(d.imageRoot()); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
 		return 0, err
 	}
 
@@ -256,8 +290,14 @@ func (d *Driver) existingImagePath(imageID string) (string, error) {
 		return "", image.ErrInvalidImage
 	}
 	for _, format := range []diskformat.Format{diskformat.FormatQCOW2, diskformat.FormatRaw} {
-		path, _, err := d.imagePath(imageID, format)
+		path, imageDir, err := d.imagePath(imageID, format)
 		if err != nil {
+			return "", err
+		}
+		if err := ensureExistingImageDir(imageDir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return "", err
 		}
 		info, err := os.Lstat(path)
@@ -272,6 +312,96 @@ func (d *Driver) existingImagePath(imageID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w: %s", image.ErrImageNotFound, imageID)
+}
+
+func (d *Driver) ensureImageRoot(path string) error {
+	return ensureImageDirUnder(d.root, path)
+}
+
+func (d *Driver) ensureExistingImageRoot(path string) error {
+	return ensureExistingImageDirUnder(d.root, path)
+}
+
+func ensureExistingImageDir(path string) error {
+	return ensureExistingImageDirPath(path)
+}
+
+func ensureImageDirUnder(root, path string) error {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if !pathWithinOrEqual(path, root) {
+		return image.ErrInvalidImage
+	}
+	if err := ensureExistingImageDirPath(root); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return image.ErrInvalidImage
+	}
+	if rel == "." {
+		return nil
+	}
+
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return fmt.Errorf("%w: image directory must be a real directory: %s", image.ErrInvalidImage, current)
+			}
+			continue
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err := os.Mkdir(current, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		if err := ensureExistingImageDirPath(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureExistingImageDirUnder(root, path string) error {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if !pathWithinOrEqual(path, root) {
+		return image.ErrInvalidImage
+	}
+	if err := ensureExistingImageDirPath(root); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return image.ErrInvalidImage
+	}
+	if rel == "." {
+		return nil
+	}
+
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		if err := ensureExistingImageDirPath(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureExistingImageDirPath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%w: image directory must be a real directory: %s", image.ErrInvalidImage, path)
+	}
+	return nil
 }
 
 func cleanStorageRoot(root string) (string, error) {
@@ -311,6 +441,12 @@ func pathWithinDir(path, dir string) bool {
 	path = filepath.Clean(path)
 	dir = filepath.Clean(dir)
 	return strings.HasPrefix(path, dir+string(os.PathSeparator))
+}
+
+func pathWithinOrEqual(path, dir string) bool {
+	path = filepath.Clean(path)
+	dir = filepath.Clean(dir)
+	return path == dir || strings.HasPrefix(path, dir+string(os.PathSeparator))
 }
 
 func cleanupPendingImage(tmp, imageDir string) error {

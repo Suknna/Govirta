@@ -101,7 +101,7 @@ func (p *Pool) ReserveCapacity(bytes int64) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	limit := allocationLimit(p.Config.CapacityBytes)
+	limit := ratioAllocationLimit(p.Config.CapacityBytes, overcommitRatioForType(p.Config.Type))
 	allocated := p.allocatedLocked()
 	if allocated > limit || bytes > limit-allocated {
 		return ErrPoolCapacityExceeded

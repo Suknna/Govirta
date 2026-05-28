@@ -51,16 +51,15 @@ func (s *Service) RegisterPool(p *Pool) error {
 		return ErrPoolAlreadyExists
 	}
 
-	p.mu.Lock()
-	if p.Config.Type == PoolTypeBlock && p.volumes == nil {
-		p.volumes = make(map[volume.ID]volume.Volume)
+	owned := p.clone()
+	if owned.Config.Type == PoolTypeBlock && owned.volumes == nil {
+		owned.volumes = make(map[volume.ID]volume.Volume)
 	}
-	if p.Config.Type == PoolTypeFile && p.images == nil {
-		p.images = make(map[string]ImageRecord)
+	if owned.Config.Type == PoolTypeFile && owned.images == nil {
+		owned.images = make(map[string]ImageRecord)
 	}
-	p.mu.Unlock()
 
-	s.pools[p.Config.Name] = p
+	s.pools[p.Config.Name] = &owned
 	return nil
 }
 

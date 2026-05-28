@@ -99,6 +99,83 @@ func TestCreateRejectsExistingTarget(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsSymlinkVolumeDirectoryBeforeRunner(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	volumeDir := filepath.Join(driver.poolRoot, "vm-a")
+	externalDir := t.TempDir()
+	if err := os.MkdirAll(driver.poolRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", driver.poolRoot, err)
+	}
+	if err := os.Symlink(externalDir, volumeDir); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	_, err := driver.Create(context.Background(), newCreateRequest())
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("Create() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	if _, err := os.Stat(filepath.Join(externalDir, "vm-a-disk-0.qcow2")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("external target stat error = %v, want not exist", err)
+	}
+}
+
+func TestOperationsRejectSymlinkPoolAncestorBeforeExternalAccess(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *Driver) error
+	}{
+		{name: "create", run: func(ctx context.Context, driver *Driver) error {
+			_, err := driver.Create(ctx, newCreateRequest())
+			return err
+		}},
+		{name: "create from reader", run: func(ctx context.Context, driver *Driver) error {
+			_, err := driver.CreateFromReader(ctx, newCreateFromReaderRequest(strings.NewReader("raw"), diskformat.FormatRaw))
+			return err
+		}},
+		{name: "delete", run: func(ctx context.Context, driver *Driver) error {
+			return driver.Delete(ctx, newVolumeWithPath(filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")))
+		}},
+		{name: "publish", run: func(ctx context.Context, driver *Driver) error {
+			_, err := driver.Publish(ctx, newVolumeWithPath(filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")), block.PublishRequest{VolumeID: "vol-a", VMID: "vm-a"})
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver, runner := newTestDriver(t)
+			externalPoolParent := t.TempDir()
+			externalVolumeDir := filepath.Join(externalPoolParent, "pool-a", "vm-a")
+			externalPath := filepath.Join(externalVolumeDir, "vm-a-disk-0.qcow2")
+			writeFile(t, externalPath, "outside")
+			if err := os.Symlink(externalPoolParent, filepath.Join(driver.storageRoot, "pool")); err != nil {
+				t.Fatalf("Symlink() error = %v", err)
+			}
+
+			err := tt.run(context.Background(), driver)
+			if !errors.Is(err, volume.ErrInvalidRequest) {
+				t.Fatalf("%s error = %v, want %v", tt.name, err, volume.ErrInvalidRequest)
+			}
+			if calls := runner.args(); len(calls) != 0 {
+				t.Fatalf("qemu-img calls = %#v, want none", calls)
+			}
+			got, readErr := os.ReadFile(externalPath)
+			if readErr != nil {
+				t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+			}
+			if string(got) != "outside" {
+				t.Fatalf("external target bytes = %q, want outside", got)
+			}
+			if _, err := os.Stat(externalPath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("external tmp stat error = %v, want not exist", err)
+			}
+		})
+	}
+}
+
 func TestRejectsUnsafeCreateInput(t *testing.T) {
 	driver, runner := newTestDriver(t)
 	tests := []struct {
@@ -181,6 +258,38 @@ func TestPublishRejectsMismatchedRequestIdentityWithoutRunner(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsMissingOrNonQCOW2FormatContextWithoutRunner(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+
+	tests := []struct {
+		name   string
+		format string
+	}{
+		{name: "missing"},
+		{name: "raw", format: string(volume.DiskFormatRaw)},
+		{name: "vmdk", format: "vmdk"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vol := newVolumeWithPath(path)
+			if tt.format == "" {
+				delete(vol.Context, formatKey)
+			} else {
+				vol.Context[formatKey] = tt.format
+			}
+			_, err := driver.Publish(context.Background(), vol, block.PublishRequest{VolumeID: vol.ID, VMID: vol.VMID})
+			if !errors.Is(err, volume.ErrInvalidRequest) {
+				t.Fatalf("Publish() error = %v, want %v", err, volume.ErrInvalidRequest)
+			}
+		})
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+}
+
 func TestPublishRejectsUnsafeImageFileType(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -250,6 +359,95 @@ func TestDeleteRejectsPathOutsidePoolRoot(t *testing.T) {
 	}
 }
 
+func TestDeleteRejectsMissingOrNonQCOW2FormatContextWithoutRunner(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+
+	tests := []struct {
+		name   string
+		format string
+	}{
+		{name: "missing"},
+		{name: "raw", format: string(volume.DiskFormatRaw)},
+		{name: "vmdk", format: "vmdk"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vol := newVolumeWithPath(path)
+			if tt.format == "" {
+				delete(vol.Context, formatKey)
+			} else {
+				vol.Context[formatKey] = tt.format
+			}
+			err := driver.Delete(context.Background(), vol)
+			if !errors.Is(err, volume.ErrInvalidRequest) {
+				t.Fatalf("Delete() error = %v, want %v", err, volume.ErrInvalidRequest)
+			}
+		})
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+}
+
+func TestDeleteRejectsSymlinkVolumeDirectoryBeforeRunner(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	volumeDir := filepath.Join(driver.poolRoot, "vm-a")
+	externalDir := t.TempDir()
+	externalPath := filepath.Join(externalDir, "vm-a-disk-0.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(driver.poolRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", driver.poolRoot, err)
+	}
+	if err := os.Symlink(externalDir, volumeDir); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	err := driver.Delete(context.Background(), newVolumeWithPath(filepath.Join(volumeDir, "vm-a-disk-0.qcow2")))
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("Delete() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external target bytes = %q, want outside", got)
+	}
+}
+
+func TestDeleteRejectsSymlinkVolumeFileBeforeRunner(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	externalPath := filepath.Join(t.TempDir(), "external.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.Symlink(externalPath, path); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	err := driver.Delete(context.Background(), newVolumeWithPath(path))
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("Delete() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external target bytes = %q, want outside", got)
+	}
+}
+
 func TestSnapshotAndResizeUnsupportedAfterContextCheck(t *testing.T) {
 	driver, _ := newTestDriver(t)
 	vol := newVolumeWithPath(filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2"))
@@ -293,8 +491,29 @@ func TestGetActualUsedBytesReportsMissingRootAndUsage(t *testing.T) {
 	}
 }
 
+func TestGetActualUsedBytesRejectsSymlinkPoolAncestorWithoutCountingExternalFiles(t *testing.T) {
+	driver, _ := newTestDriver(t)
+	externalPoolParent := t.TempDir()
+	externalPath := filepath.Join(externalPoolParent, "pool-a", "vm-a", "disk.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.Symlink(externalPoolParent, filepath.Join(driver.storageRoot, "pool")); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	used, err := driver.GetActualUsedBytes(context.Background())
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("GetActualUsedBytes() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if used != 0 {
+		t.Fatalf("GetActualUsedBytes() = %d, want 0", used)
+	}
+}
+
 func TestGetActualUsedBytesHonorsContextDuringWalk(t *testing.T) {
 	driver, _ := newTestDriver(t)
+	if err := os.MkdirAll(driver.poolRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", driver.poolRoot, err)
+	}
 	originalWalkDir := walkDir
 	t.Cleanup(func() { walkDir = originalWalkDir })
 	ctx, cancel := context.WithCancel(context.Background())
@@ -445,6 +664,63 @@ func TestCreateFromReaderRejectsExistingTargetWithoutOverwrite(t *testing.T) {
 	}
 }
 
+func TestCreateFromReaderRejectsSymlinkTargetBeforeMutation(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	externalPath := filepath.Join(t.TempDir(), "external.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(target), err)
+	}
+	if err := os.Symlink(externalPath, target); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	_, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(strings.NewReader("raw"), diskformat.FormatRaw))
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("CreateFromReader() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external target bytes = %q, want outside", got)
+	}
+	if _, err := os.Stat(target + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tmp stat error = %v, want not exist", err)
+	}
+}
+
+func TestCreateFromReaderRejectsSymlinkVolumeDirectoryBeforeMutation(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	volumeDir := filepath.Join(driver.poolRoot, "vm-a")
+	externalDir := t.TempDir()
+	if err := os.MkdirAll(driver.poolRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", driver.poolRoot, err)
+	}
+	if err := os.Symlink(externalDir, volumeDir); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	_, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(strings.NewReader("raw"), diskformat.FormatRaw))
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("CreateFromReader() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	if _, err := os.Stat(filepath.Join(externalDir, "vm-a-disk-0.qcow2")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("external target stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(externalDir, "vm-a-disk-0.qcow2.tmp")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("external tmp stat error = %v, want not exist", err)
+	}
+}
+
 func TestCreateFromReaderCanceledContextDoesNotCallRunner(t *testing.T) {
 	driver, runner := newTestDriver(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -580,7 +856,7 @@ func newVolumeWithPath(path string) volume.Volume {
 		VMName:    "vm-a",
 		PoolName:  "pool-a",
 		DiskIndex: 0,
-		Context:   map[string]string{pathKey: path},
+		Context:   map[string]string{pathKey: path, formatKey: string(volume.DiskFormatQCOW2)},
 	}
 }
 

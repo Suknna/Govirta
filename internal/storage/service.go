@@ -224,5 +224,8 @@ func validateCreateRequest(req CreateVolumeRequest) error {
 	if req.VMID == "" || req.VMName == "" || req.Spec.Name == "" || req.Spec.DiskIndex < 0 || req.Spec.CapacityBytes <= 0 {
 		return volume.ErrInvalidRequest
 	}
+	if req.Spec.Role != volume.RoleRoot && req.Spec.Role != volume.RoleData {
+		return volume.ErrInvalidRequest
+	}
 	return nil
 }

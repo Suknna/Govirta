@@ -157,6 +157,17 @@ func TestCapacityAdmission(t *testing.T) {
 	}
 }
 
+func TestFilePoolReserveCapacityDoesNotOvercommit(t *testing.T) {
+	p := newTestFilePool("pool-a", 100, &fakeImageDriver{})
+	p.images = map[string]ImageRecord{
+		"image-a": {ID: "image-a", DeclaredSizeBytes: 100, State: ImageStateReady},
+	}
+
+	if err := p.ReserveCapacity(1); !errors.Is(err, ErrPoolCapacityExceeded) {
+		t.Fatalf("ReserveCapacity(1) error = %v, want %v", err, ErrPoolCapacityExceeded)
+	}
+}
+
 func TestCapacityAdmissionAvoidsAdditionOverflow(t *testing.T) {
 	p := newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, math.MaxInt64, fakeDriver{})
 	p.volumes = map[volume.ID]volume.Volume{
@@ -239,6 +250,89 @@ func TestGetPoolReturnsCopy(t *testing.T) {
 	}
 	if got := registered.volumes["vol-a"].CapacityBytes; got != 30 {
 		t.Fatalf("registered volume capacity = %d, want 30", got)
+	}
+}
+
+func TestRegisterPoolStoresServiceOwnedCopy(t *testing.T) {
+	service := NewService()
+	p := newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, fakeDriver{})
+	p.volumes = map[volume.ID]volume.Volume{
+		"vol-a": {ID: "vol-a", CapacityBytes: 30},
+	}
+
+	if err := service.RegisterPool(p); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	p.Config.CapacityBytes = 1000
+	p.volumes["vol-a"] = volume.Volume{ID: "vol-a", CapacityBytes: 90}
+	p.volumes["vol-b"] = volume.Volume{ID: "vol-b", CapacityBytes: 60}
+
+	registered, err := service.GetPool("pool-a")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v, want nil", err)
+	}
+	if registered.Config.CapacityBytes != 100 {
+		t.Fatalf("registered capacity = %d, want 100", registered.Config.CapacityBytes)
+	}
+	if got := registered.volumes["vol-a"].CapacityBytes; got != 30 {
+		t.Fatalf("registered volume capacity = %d, want 30", got)
+	}
+	if _, exists := registered.volumes["vol-b"]; exists {
+		t.Fatalf("registered volumes includes post-registration mutation")
+	}
+
+	usage, err := service.GetPoolUsage(context.Background(), "pool-a")
+	if err != nil {
+		t.Fatalf("GetPoolUsage() error = %v, want nil", err)
+	}
+	if usage.CapacityBytes != 100 || usage.AllocatedBytes != 30 {
+		t.Fatalf("usage capacity/allocated = %d/%d, want 100/30", usage.CapacityBytes, usage.AllocatedBytes)
+	}
+}
+
+func TestRegisterFilePoolStoresServiceOwnedCopy(t *testing.T) {
+	service := NewService()
+	driver := &fakeImageDriver{}
+	p := newTestFilePool("image-pool", 100, driver)
+	p.images = map[string]ImageRecord{
+		"image-a": {ID: "image-a", DeclaredSizeBytes: 30, State: ImageStateReady},
+	}
+
+	if err := service.RegisterPool(p); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	p.Config.CapacityBytes = 1000
+	p.images["image-a"] = ImageRecord{ID: "image-a", DeclaredSizeBytes: 90, State: ImageStateReady}
+	p.images["image-b"] = ImageRecord{ID: "image-b", DeclaredSizeBytes: 60, State: ImageStateReady}
+
+	registered, err := service.GetPool("image-pool")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v, want nil", err)
+	}
+	if registered.Config.CapacityBytes != 100 {
+		t.Fatalf("registered capacity = %d, want 100", registered.Config.CapacityBytes)
+	}
+	if got := registered.images["image-a"].DeclaredSizeBytes; got != 30 {
+		t.Fatalf("registered image size = %d, want 30", got)
+	}
+	if _, exists := registered.images["image-b"]; exists {
+		t.Fatalf("registered images includes post-registration mutation")
+	}
+
+	writer, err := service.PutImage(context.Background(), "image-pool", newPutRequest("image-c", 70))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer Close() error = %v, want nil", err)
+	}
+
+	usage, err := service.GetPoolUsage(context.Background(), "image-pool")
+	if err != nil {
+		t.Fatalf("GetPoolUsage() error = %v, want nil", err)
+	}
+	if usage.CapacityBytes != 100 || usage.AllocatedBytes != 100 {
+		t.Fatalf("usage capacity/allocated = %d/%d, want 100/100", usage.CapacityBytes, usage.AllocatedBytes)
 	}
 }
 
@@ -487,6 +581,114 @@ func TestCreateVolumeFromReaderAdmitsCapacityAndWritesIndex(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeFromReaderDuplicateSameSpecIsIdempotent(t *testing.T) {
+	driver := &lifecycleDriver{}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	req := newCreateFromReaderRequest("vol-a", "vol-a", 50)
+	first, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req)
+	if err != nil {
+		t.Fatalf("CreateVolumeFromReader() first error = %v, want nil", err)
+	}
+	second, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req)
+	if err != nil {
+		t.Fatalf("CreateVolumeFromReader() second error = %v, want nil", err)
+	}
+	if second.ID != first.ID || second.Name != first.Name || second.CapacityBytes != first.CapacityBytes {
+		t.Fatalf("second volume = %+v, want %+v", second, first)
+	}
+	if driver.createFromReaderCalls != 1 {
+		t.Fatalf("create from reader driver calls = %d, want 1", driver.createFromReaderCalls)
+	}
+}
+
+func TestCreateVolumeFromReaderDuplicateConflictDoesNotCallDriver(t *testing.T) {
+	driver := &lifecycleDriver{}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	if _, err := service.CreateVolumeFromReader(context.Background(), "pool-a", newCreateFromReaderRequest("vol-a", "vol-a", 50)); err != nil {
+		t.Fatalf("CreateVolumeFromReader() first error = %v, want nil", err)
+	}
+
+	conflicts := []struct {
+		name string
+		req  block.CreateFromReaderRequest
+	}{
+		{name: "same ID different spec", req: newCreateFromReaderRequest("vol-renamed", "vol-a", 50)},
+		{name: "same name different spec", req: newCreateFromReaderRequest("vol-a", "vol-b", 50)},
+	}
+	for _, tc := range conflicts {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := service.CreateVolumeFromReader(context.Background(), "pool-a", tc.req); !errors.Is(err, volume.ErrVolumeConflict) {
+				t.Fatalf("CreateVolumeFromReader() error = %v, want %v", err, volume.ErrVolumeConflict)
+			}
+		})
+	}
+	if driver.createFromReaderCalls != 1 {
+		t.Fatalf("create from reader driver calls = %d, want 1", driver.createFromReaderCalls)
+	}
+}
+
+func TestCreateVolumeFromReaderConcurrentCapacityAdmissionDoesNotOverAllocate(t *testing.T) {
+	driver := &lifecycleDriver{}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, req := range []block.CreateFromReaderRequest{
+		newCreateFromReaderRequest("vol-a", "vol-a", 100),
+		newCreateFromReaderRequest("vol-b", "vol-b", 100),
+	} {
+		wg.Add(1)
+		go func(req block.CreateFromReaderRequest) {
+			defer wg.Done()
+			<-start
+			_, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req)
+			errs <- err
+		}(req)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	var successes int
+	var capacityFailures int
+	for err := range errs {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrPoolCapacityExceeded):
+			capacityFailures++
+		default:
+			t.Fatalf("CreateVolumeFromReader() concurrent error = %v, want nil or %v", err, ErrPoolCapacityExceeded)
+		}
+	}
+	if successes != 1 || capacityFailures != 1 {
+		t.Fatalf("concurrent results = success:%d capacity:%d, want one success and one capacity rejection", successes, capacityFailures)
+	}
+	if driver.createFromReaderCalls != 1 {
+		t.Fatalf("create from reader driver calls = %d, want 1", driver.createFromReaderCalls)
+	}
+
+	usage, err := service.GetPoolUsage(context.Background(), "pool-a")
+	if err != nil {
+		t.Fatalf("GetPoolUsage() error = %v, want nil", err)
+	}
+	if usage.AllocatedBytes > usage.AllocationLimitBytes {
+		t.Fatalf("AllocatedBytes = %d exceeds limit %d", usage.AllocatedBytes, usage.AllocationLimitBytes)
+	}
+}
+
 func TestCreateVolumeRejectsFilePool(t *testing.T) {
 	service := NewService()
 	if err := service.RegisterPool(newTestFilePool("file-pool", 100, &fakeImageDriver{})); err != nil {
@@ -539,6 +741,127 @@ func TestPutImagePendingCapacityPreventsOvercommit(t *testing.T) {
 	}
 	if err := writer.Cancel(); err != nil {
 		t.Fatalf("Cancel() error = %v, want nil", err)
+	}
+}
+
+func TestPutImageConcurrentCapacityAdmissionDoesNotOverAllocate(t *testing.T) {
+	service := NewService()
+	imageDriver := &fakeImageDriver{}
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	type putResult struct {
+		writer image.ImageWriter
+		err    error
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make(chan putResult, 2)
+	for _, req := range []image.PutRequest{
+		newPutRequest("image-a", 70),
+		newPutRequest("image-b", 70),
+	} {
+		wg.Add(1)
+		go func(req image.PutRequest) {
+			defer wg.Done()
+			<-start
+			writer, err := service.PutImage(context.Background(), "file-pool", req)
+			results <- putResult{writer: writer, err: err}
+		}(req)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var successes int
+	var capacityFailures int
+	var successWriter image.ImageWriter
+	for result := range results {
+		switch {
+		case result.err == nil:
+			successes++
+			successWriter = result.writer
+		case errors.Is(result.err, ErrPoolCapacityExceeded):
+			capacityFailures++
+		default:
+			t.Fatalf("PutImage() concurrent error = %v, want nil or %v", result.err, ErrPoolCapacityExceeded)
+		}
+	}
+	if successes != 1 || capacityFailures != 1 {
+		t.Fatalf("concurrent results = success:%d capacity:%d, want one success and one capacity rejection", successes, capacityFailures)
+	}
+	if imageDriver.putCalls != 1 {
+		t.Fatalf("image driver Put calls = %d, want 1", imageDriver.putCalls)
+	}
+
+	usage, err := service.GetPoolUsage(context.Background(), "file-pool")
+	if err != nil {
+		t.Fatalf("GetPoolUsage() error = %v, want nil", err)
+	}
+	if usage.AllocatedBytes > usage.AllocationLimitBytes {
+		t.Fatalf("AllocatedBytes = %d exceeds limit %d", usage.AllocatedBytes, usage.AllocationLimitBytes)
+	}
+	if successWriter == nil {
+		t.Fatalf("successful PutImage() did not return a writer")
+	}
+	if err := successWriter.Cancel(); err != nil {
+		t.Fatalf("Cancel() success writer error = %v, want nil", err)
+	}
+}
+
+func TestPutImageConcurrentDuplicateIDCallsDriverOnce(t *testing.T) {
+	service := NewService()
+	imageDriver := &fakeImageDriver{}
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	type putResult struct {
+		writer image.ImageWriter
+		err    error
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make(chan putResult, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 40))
+			results <- putResult{writer: writer, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var successes int
+	var duplicateFailures int
+	var successWriter image.ImageWriter
+	for result := range results {
+		switch {
+		case result.err == nil:
+			successes++
+			successWriter = result.writer
+		case errors.Is(result.err, image.ErrImageExists):
+			duplicateFailures++
+		default:
+			t.Fatalf("PutImage() concurrent duplicate error = %v, want nil or %v", result.err, image.ErrImageExists)
+		}
+	}
+	if successes != 1 || duplicateFailures != 1 {
+		t.Fatalf("concurrent duplicate results = success:%d duplicate:%d, want one success and one duplicate rejection", successes, duplicateFailures)
+	}
+	if imageDriver.putCalls != 1 {
+		t.Fatalf("image driver Put calls = %d, want 1", imageDriver.putCalls)
+	}
+	if successWriter == nil {
+		t.Fatalf("successful PutImage() did not return a writer")
+	}
+	if err := successWriter.Cancel(); err != nil {
+		t.Fatalf("Cancel() success writer error = %v, want nil", err)
 	}
 }
 

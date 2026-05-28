@@ -95,7 +95,7 @@ func (d *Driver) Create(ctx context.Context, req block.CreateRequest) (volume.Vo
 	if err != nil {
 		return volume.Volume{}, err
 	}
-	if err := os.MkdirAll(volumeDir, 0o755); err != nil {
+	if err := d.ensureOwnedDir(volumeDir); err != nil {
 		return volume.Volume{}, err
 	}
 	if err := ensureCreateTargetAvailable(path); err != nil {
@@ -141,7 +141,7 @@ func (d *Driver) CreateFromReader(ctx context.Context, req block.CreateFromReade
 	if req.CapacityBytes < 0 {
 		return volume.Volume{}, volume.ErrInvalidRequest
 	}
-	if err := os.MkdirAll(volumeDir, 0o755); err != nil {
+	if err := d.ensureOwnedDir(volumeDir); err != nil {
 		return volume.Volume{}, err
 	}
 	if err := ensureCreateTargetAvailable(path); err != nil {
@@ -194,6 +194,12 @@ func (d *Driver) Delete(ctx context.Context, vol volume.Volume) error {
 	if err != nil {
 		return err
 	}
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
+		return err
+	}
+	if err := ensurePublishableImage(path); err != nil {
+		return err
+	}
 	if err := d.qemuimg.QCOW2().Remove().Path(path).Do(ctx); err != nil {
 		return err
 	}
@@ -204,6 +210,9 @@ func (d *Driver) Delete(ctx context.Context, vol volume.Volume) error {
 // The walk checks ctx during traversal so cancellation can interrupt large pools.
 func (d *Driver) GetActualUsedBytes(ctx context.Context) (int64, error) {
 	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := d.ensureExistingOwnedDir(d.poolRoot); err != nil {
 		return 0, err
 	}
 
@@ -245,8 +254,11 @@ func (d *Driver) Publish(ctx context.Context, vol volume.Volume, req block.Publi
 	if req.VolumeID != vol.ID || req.VMID != vol.VMID {
 		return volume.PublishedVolume{}, volume.ErrInvalidRequest
 	}
-	path, _, err := d.pathFromVolume(vol)
+	path, volumeDir, err := d.pathFromVolume(vol)
 	if err != nil {
+		return volume.PublishedVolume{}, err
+	}
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
 		return volume.PublishedVolume{}, err
 	}
 	if err := ensurePublishableImage(path); err != nil {
@@ -324,6 +336,92 @@ func ensurePublishableImage(path string) error {
 	return nil
 }
 
+func (d *Driver) ensureOwnedDir(path string) error {
+	return ensureOwnedDirUnder(d.storageRoot, path, volume.ErrInvalidRequest)
+}
+
+func (d *Driver) ensureExistingOwnedDir(path string) error {
+	return ensureExistingOwnedDirUnder(d.storageRoot, path, volume.ErrInvalidRequest)
+}
+
+func ensureOwnedDirUnder(root, path string, baseErr error) error {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if !pathWithinOrEqual(path, root) {
+		return baseErr
+	}
+	if err := ensureExistingOwnedDirPath(root, baseErr); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return baseErr
+	}
+	if rel == "." {
+		return nil
+	}
+
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return fmt.Errorf("%w: path must be a real directory: %s", baseErr, current)
+			}
+			continue
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err := os.Mkdir(current, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		if err := ensureExistingOwnedDirPath(current, baseErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureExistingOwnedDirUnder(root, path string, baseErr error) error {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if !pathWithinOrEqual(path, root) {
+		return baseErr
+	}
+	if err := ensureExistingOwnedDirPath(root, baseErr); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return baseErr
+	}
+	if rel == "." {
+		return nil
+	}
+
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		if err := ensureExistingOwnedDirPath(current, baseErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureExistingOwnedDirPath(path string, baseErr error) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%w: path must be a real directory: %s", baseErr, path)
+	}
+	return nil
+}
+
 func (d *Driver) pathForCreate(req block.CreateRequest) (string, string, error) {
 	if req.PoolName != d.poolName || req.VolumeID == "" || req.VMID == "" || req.VMName == "" || req.Name == "" || req.CapacityBytes <= 0 || req.DiskIndex < 0 {
 		return "", "", volume.ErrInvalidRequest
@@ -358,6 +456,9 @@ func (d *Driver) pathForCreateFromReader(req block.CreateFromReaderRequest) (str
 
 func (d *Driver) pathFromVolume(vol volume.Volume) (string, string, error) {
 	if vol.PoolName != d.poolName || vol.VMID == "" || !safeName(vol.VMID) || vol.VMName == "" || !safeName(vol.VMName) || vol.DiskIndex < 0 {
+		return "", "", volume.ErrInvalidRequest
+	}
+	if vol.Context[formatKey] != string(volume.DiskFormatQCOW2) {
 		return "", "", volume.ErrInvalidRequest
 	}
 	volumeDir := filepath.Join(d.poolRoot, vol.VMID)
@@ -401,6 +502,12 @@ func pathWithinDir(path, dir string) bool {
 	path = filepath.Clean(path)
 	dir = filepath.Clean(dir)
 	return strings.HasPrefix(path, dir+string(os.PathSeparator))
+}
+
+func pathWithinOrEqual(path, dir string) bool {
+	path = filepath.Clean(path)
+	dir = filepath.Clean(dir)
+	return path == dir || strings.HasPrefix(path, dir+string(os.PathSeparator))
 }
 
 func removeIfExists(path string) error {
