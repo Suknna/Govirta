@@ -26,6 +26,7 @@ const (
 var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var walkDir = filepath.WalkDir
+var removePath = os.Remove
 
 // Config configures a host-local qcow2 block driver for one storage pool.
 type Config struct {
@@ -156,19 +157,16 @@ func (d *Driver) CreateFromReader(ctx context.Context, req block.CreateFromReade
 		return volume.Volume{}, errors.Join(err, cleanupErr)
 	}
 
-	committed := false
 	if req.Format == diskformat.FormatQCOW2 {
 		if err := commitCopiedImage(tmpPath, path); err != nil {
 			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
 			return volume.Volume{}, errors.Join(err, cleanupErr)
 		}
-		committed = true
 	} else {
 		if err := d.qemuimg.QCOW2().Convert().SourceFormat("raw").Source(tmpPath).Target(path).Do(ctx); err != nil {
 			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
 			return volume.Volume{}, errors.Join(err, cleanupErr)
 		}
-		committed = true
 	}
 
 	if req.CapacityBytes > 0 {
@@ -179,12 +177,8 @@ func (d *Driver) CreateFromReader(ctx context.Context, req block.CreateFromReade
 	}
 
 	if err := removeIfExists(tmpPath); err != nil {
-		// The committed qcow2 is already durable and independent; reporting only a
-		// stale temp cleanup failure would make higher layers roll back valid metadata.
-		if committed {
-			return d.newVolume(req, path), nil
-		}
-		return volume.Volume{}, errors.Join(err, removeIfExists(path), removeDirIfEmpty(volumeDir))
+		cleanupErr := errors.Join(removeIfExists(path), removeIfExists(tmpPath), removeDirIfEmpty(volumeDir))
+		return volume.Volume{}, errors.Join(err, cleanupErr)
 	}
 
 	return d.newVolume(req, path), nil
@@ -410,14 +404,14 @@ func pathWithinDir(path, dir string) bool {
 }
 
 func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removePath(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
 func removeDirIfEmpty(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removePath(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil

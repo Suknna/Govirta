@@ -507,6 +507,40 @@ func TestCreateFromReaderCleanupFailureJoinsPrimaryError(t *testing.T) {
 	}
 }
 
+func TestCreateFromReaderCommittedTmpCleanupFailureReturnsError(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	cleanupErr := errors.New("remove tmp failed")
+	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	tmp := target + ".tmp"
+	originalRemovePath := removePath
+	removePath = func(path string) error {
+		if path == tmp {
+			return cleanupErr
+		}
+		return originalRemovePath(path)
+	}
+	t.Cleanup(func() {
+		removePath = originalRemovePath
+		if err := originalRemovePath(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("Remove(%s) cleanup error = %v", tmp, err)
+		}
+		if err := originalRemovePath(filepath.Dir(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("Remove(%s) cleanup error = %v", filepath.Dir(target), err)
+		}
+	})
+
+	_, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(strings.NewReader("qcow2 bytes"), diskformat.FormatQCOW2))
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("CreateFromReader() error = %v, want wrapped %v", err, cleanupErr)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target stat error = %v, want not exist after rollback cleanup", err)
+	}
+}
+
 func newTestDriver(t *testing.T) (*Driver, *fakeRunner) {
 	t.Helper()
 	runner := &fakeRunner{}
