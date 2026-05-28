@@ -22,6 +22,17 @@ type CommandError = imgexec.CommandError
 // 调用方通过 errors.As(err, &*DecodeError) 提取原始输出。
 type DecodeError = imgexec.DecodeError
 
+// RunResult 是注入式 qemu-img runner 返回的执行结果类型。
+//
+// 上层包通过该别名引用 runner 输出，不需要直接依赖 internal/exec。
+type RunResult = imgexec.Result
+
+// Runner 是 qemu-img 命令的执行边界。
+//
+// Config.Runner 接受任意实现，便于在测试或替代后端中注入伪造 runner，
+// 而不暴露 internal/exec 的内部类型。
+type Runner = imgexec.Runner
+
 // Config 配置 qemu-img 客户端。
 //
 // Binary 为空时回退到 PATH 中的 "qemu-img"。Runner 为空时使用默认的
@@ -30,7 +41,7 @@ type DecodeError = imgexec.DecodeError
 // Runner 接口实例，多个并发的 Do(ctx) 都会同时调用 Runner.Run。
 type Config struct {
 	Binary string
-	Runner imgexec.Runner
+	Runner Runner
 }
 
 // Client 是 qemu-img 命令客户端的最小公共契约。
@@ -49,7 +60,7 @@ type Client interface {
 // 可并发调用 QCOW2() 与后续子命令；并发安全最终取决于 runner 实现。
 type ExecClient struct {
 	binary string
-	runner imgexec.Runner
+	runner Runner
 }
 
 // QCOW2Client 是 qcow2 子命令的入口。

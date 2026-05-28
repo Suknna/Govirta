@@ -1,0 +1,181 @@
+package storage
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/suknna/govirta/internal/storage/block"
+	"github.com/suknna/govirta/internal/storage/pool"
+	"github.com/suknna/govirta/internal/storage/volume"
+)
+
+// VolumeService is the VM-facing storage API for block volume operations.
+type VolumeService struct {
+	pools *pool.Service
+}
+
+// NewVolumeService creates a VM-facing volume service backed by an explicit pool service.
+func NewVolumeService(pools *pool.Service) *VolumeService {
+	return &VolumeService{pools: pools}
+}
+
+// CreateVolumeRequest describes a VM-scoped block volume create operation.
+type CreateVolumeRequest struct {
+	VMID     string
+	VMName   string
+	PoolName string
+	Spec     volume.Spec
+}
+
+// CreateRootVolumeRequest describes a convenience root or data volume create operation.
+type CreateRootVolumeRequest struct {
+	VMID          string
+	VMName        string
+	PoolName      string
+	Name          string
+	DiskIndex     int
+	CapacityBytes int64
+	ReadOnly      bool
+}
+
+// CreateDataVolumeRequest is the data-disk counterpart to CreateRootVolumeRequest.
+type CreateDataVolumeRequest = CreateRootVolumeRequest
+
+// PublishVolumeRequest identifies a block volume publish operation for a VM.
+type PublishVolumeRequest struct {
+	VolumeID volume.ID
+	VMID     string
+	PoolName string
+	ReadOnly bool
+}
+
+// UnpublishVolumeRequest identifies a previously published block volume for release.
+type UnpublishVolumeRequest struct {
+	VolumeID volume.ID
+	VMID     string
+	PoolName string
+}
+
+// DeleteVolumeRequest identifies a volume deletion within an explicit pool.
+type DeleteVolumeRequest struct {
+	VolumeID volume.ID
+	PoolName string
+}
+
+// CreateVolume validates VM-facing input and delegates creation to the named pool.
+func (s *VolumeService) CreateVolume(ctx context.Context, req CreateVolumeRequest) (volume.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
+	}
+	if err := validateCreateRequest(req); err != nil {
+		return volume.Volume{}, err
+	}
+
+	volID := volume.ID(fmt.Sprintf("%s-%s-%d", req.VMID, req.Spec.Role, req.Spec.DiskIndex))
+	created, err := s.pools.CreateVolume(ctx, req.PoolName, block.CreateRequest{
+		Name:          req.Spec.Name,
+		PoolName:      req.PoolName,
+		VMID:          req.VMID,
+		VMName:        req.VMName,
+		VolumeID:      volID,
+		DiskIndex:     req.Spec.DiskIndex,
+		CapacityBytes: req.Spec.CapacityBytes,
+		ReadOnly:      req.Spec.ReadOnly,
+	})
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	created.Role = req.Spec.Role
+	return created, nil
+}
+
+// CreateRootVolume creates a root disk volume by setting volume.RoleRoot.
+func (s *VolumeService) CreateRootVolume(ctx context.Context, req CreateRootVolumeRequest) (volume.Volume, error) {
+	return s.CreateVolume(ctx, CreateVolumeRequest{
+		VMID:     req.VMID,
+		VMName:   req.VMName,
+		PoolName: req.PoolName,
+		Spec: volume.Spec{
+			Name:          req.Name,
+			Role:          volume.RoleRoot,
+			DiskIndex:     req.DiskIndex,
+			CapacityBytes: req.CapacityBytes,
+			ReadOnly:      req.ReadOnly,
+		},
+	})
+}
+
+// CreateDataVolume creates a data disk volume by setting volume.RoleData.
+func (s *VolumeService) CreateDataVolume(ctx context.Context, req CreateDataVolumeRequest) (volume.Volume, error) {
+	return s.CreateVolume(ctx, CreateVolumeRequest{
+		VMID:     req.VMID,
+		VMName:   req.VMName,
+		PoolName: req.PoolName,
+		Spec: volume.Spec{
+			Name:          req.Name,
+			Role:          volume.RoleData,
+			DiskIndex:     req.DiskIndex,
+			CapacityBytes: req.CapacityBytes,
+			ReadOnly:      req.ReadOnly,
+		},
+	})
+}
+
+// PublishVolume prepares runtime access and returns the storage attachment contract.
+func (s *VolumeService) PublishVolume(ctx context.Context, req PublishVolumeRequest) (volume.PublishedVolume, error) {
+	if err := ctx.Err(); err != nil {
+		return volume.PublishedVolume{}, err
+	}
+	if req.PoolName == "" {
+		return volume.PublishedVolume{}, pool.ErrPoolRequired
+	}
+	if req.VolumeID == "" || req.VMID == "" {
+		return volume.PublishedVolume{}, volume.ErrInvalidRequest
+	}
+	return s.pools.PublishVolume(ctx, req.PoolName, req.VolumeID, block.PublishRequest{
+		VolumeID: req.VolumeID,
+		VMID:     req.VMID,
+		ReadOnly: req.ReadOnly,
+	})
+}
+
+// UnpublishVolume releases a runtime attachment if present.
+func (s *VolumeService) UnpublishVolume(ctx context.Context, req UnpublishVolumeRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.PoolName == "" {
+		return pool.ErrPoolRequired
+	}
+	if req.VolumeID == "" || req.VMID == "" {
+		return volume.ErrInvalidRequest
+	}
+	return s.pools.UnpublishVolume(ctx, req.PoolName, req.VolumeID, block.UnpublishRequest{
+		VolumeID: req.VolumeID,
+		VMID:     req.VMID,
+	})
+}
+
+// DeleteVolume deletes an unpublished volume from the named pool.
+func (s *VolumeService) DeleteVolume(ctx context.Context, req DeleteVolumeRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.PoolName == "" {
+		return pool.ErrPoolRequired
+	}
+	if req.VolumeID == "" {
+		return volume.ErrInvalidRequest
+	}
+	return s.pools.DeleteVolume(ctx, req.PoolName, req.VolumeID)
+}
+
+func validateCreateRequest(req CreateVolumeRequest) error {
+	if req.PoolName == "" {
+		return pool.ErrPoolRequired
+	}
+	if req.VMID == "" || req.VMName == "" || req.Spec.Name == "" || req.Spec.DiskIndex < 0 || req.Spec.CapacityBytes <= 0 {
+		return volume.ErrInvalidRequest
+	}
+	return nil
+}
