@@ -1,4 +1,4 @@
-package convert
+package resize
 
 import (
 	"context"
@@ -24,12 +24,12 @@ func (r *recordingRunner) Run(ctx context.Context, binary string, args []string)
 	return imgexec.Result{}, r.err
 }
 
-func TestDoBuildsConvertArgv(t *testing.T) {
+func TestDoBuildsResizeArgv(t *testing.T) {
 	runner := &recordingRunner{}
 
 	err := New("qemu-img", runner).
-		Source("src.qcow2").
-		Target("dst.qcow2").
+		Path("disk.qcow2").
+		SizeBytes(1073741824).
 		Do(context.Background())
 
 	if err != nil {
@@ -38,40 +38,28 @@ func TestDoBuildsConvertArgv(t *testing.T) {
 	if runner.binary != "qemu-img" {
 		t.Fatalf("binary = %q, want qemu-img", runner.binary)
 	}
-	wantArgs := []string{"convert", "-f", "qcow2", "-O", "qcow2", "src.qcow2", "dst.qcow2"}
+	wantArgs := []string{"resize", "-f", "qcow2", "disk.qcow2", "1073741824"}
 	if !reflect.DeepEqual(runner.args, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", runner.args, wantArgs)
 	}
 }
 
-func TestDoBuildsRawToQCOW2ConvertArgv(t *testing.T) {
-	runner := &recordingRunner{}
-
-	err := New("qemu-img", runner).
-		Source("src.raw").
-		SourceFormat("raw").
-		Target("dst.qcow2").
+func TestDoRequiresPath(t *testing.T) {
+	err := New("qemu-img", &recordingRunner{}).
+		SizeBytes(1073741824).
 		Do(context.Background())
 
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
-	}
-	if runner.binary != "qemu-img" {
-		t.Fatalf("binary = %q, want qemu-img", runner.binary)
-	}
-	wantArgs := []string{"convert", "-f", "raw", "-O", "qcow2", "src.raw", "dst.qcow2"}
-	if !reflect.DeepEqual(runner.args, wantArgs) {
-		t.Fatalf("args = %#v, want %#v", runner.args, wantArgs)
+	if !errors.Is(err, imgexec.ErrInvalidRequest) {
+		t.Fatalf("Do() error = %v, want invalid request", err)
 	}
 }
 
-func TestDoRejectsInvalidSourceFormat(t *testing.T) {
+func TestDoRejectsLeadingDashPath(t *testing.T) {
 	runner := &recordingRunner{}
 
 	err := New("qemu-img", runner).
-		Source("src.vmdk").
-		SourceFormat("vmdk").
-		Target("dst.qcow2").
+		Path("--help").
+		SizeBytes(1073741824).
 		Do(context.Background())
 
 	if !errors.Is(err, imgexec.ErrInvalidRequest) {
@@ -82,31 +70,27 @@ func TestDoRejectsInvalidSourceFormat(t *testing.T) {
 	}
 }
 
-func TestDoRequiresSource(t *testing.T) {
-	err := New("qemu-img", &recordingRunner{}).
-		Target("dst.qcow2").
+func TestDoRequiresPositiveSize(t *testing.T) {
+	runner := &recordingRunner{}
+
+	err := New("qemu-img", runner).
+		Path("disk.qcow2").
+		SizeBytes(0).
 		Do(context.Background())
 
 	if !errors.Is(err, imgexec.ErrInvalidRequest) {
 		t.Fatalf("Do() error = %v, want invalid request", err)
 	}
-}
-
-func TestDoRequiresTarget(t *testing.T) {
-	err := New("qemu-img", &recordingRunner{}).
-		Source("src.qcow2").
-		Do(context.Background())
-
-	if !errors.Is(err, imgexec.ErrInvalidRequest) {
-		t.Fatalf("Do() error = %v, want invalid request", err)
+	if runner.binary != "" || runner.args != nil {
+		t.Fatalf("Run() was called with binary %q args %#v, want no call", runner.binary, runner.args)
 	}
 }
 
 func TestDoReturnsRunnerError(t *testing.T) {
 	wantErr := errors.New("runner failed")
 	err := New("qemu-img", &recordingRunner{err: wantErr}).
-		Source("src.qcow2").
-		Target("dst.qcow2").
+		Path("disk.qcow2").
+		SizeBytes(1073741824).
 		Do(context.Background())
 
 	if !errors.Is(err, wantErr) {
@@ -119,8 +103,8 @@ func TestDoReturnsContextCanceled(t *testing.T) {
 	cancel()
 
 	err := New("qemu-img", &recordingRunner{}).
-		Source("src.qcow2").
-		Target("dst.qcow2").
+		Path("disk.qcow2").
+		SizeBytes(1073741824).
 		Do(ctx)
 
 	if !errors.Is(err, context.Canceled) {
