@@ -88,8 +88,42 @@ func TestCancelRemovesTempAndLeavesNoImage(t *testing.T) {
 	if _, err := os.Stat(internalWriter.tmp); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("temp stat error = %v, want not exist", err)
 	}
+	if _, err := os.Stat(internalWriter.imageDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("image dir stat error = %v, want not exist", err)
+	}
 	if _, err := driver.Get(ctx, image.GetRequest{ImageID: "cancelled"}); !errors.Is(err, image.ErrImageNotFound) {
 		t.Fatalf("Get() error = %v, want ErrImageNotFound", err)
+	}
+}
+
+func TestPutReservesImageIDBeforeClose(t *testing.T) {
+	driver := newTestDriver(t)
+	ctx := context.Background()
+	w, err := driver.Put(ctx, image.PutRequest{ImageID: "reserved", Format: diskformat.FormatQCOW2, DeclaredSizeBytes: 4})
+	if err != nil {
+		t.Fatalf("Put(qcow2) error = %v", err)
+	}
+	internalWriter := w.(*imageWriter)
+
+	if _, err := driver.Put(ctx, image.PutRequest{ImageID: "reserved", Format: diskformat.FormatRaw, DeclaredSizeBytes: 4}); !errors.Is(err, image.ErrImageExists) {
+		t.Fatalf("Put(raw duplicate) error = %v, want ErrImageExists", err)
+	}
+	if _, err := w.Write([]byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	entries, err := os.ReadDir(internalWriter.imageDir)
+	if err != nil {
+		t.Fatalf("ReadDir(imageDir) error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "reserved.qcow2" {
+		t.Fatalf("image dir entries = %v, want only reserved.qcow2", entryNames(entries))
+	}
+	if _, err := os.Stat(filepath.Join(internalWriter.imageDir, "reserved.raw")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("raw target stat error = %v, want not exist", err)
 	}
 }
 
@@ -225,6 +259,40 @@ func TestCloseConflictRemovesTempAndReturnsExists(t *testing.T) {
 	if _, err := os.Stat(internalWriter.tmp); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("temp stat error = %v, want not exist", err)
 	}
+	got, err := os.ReadFile(internalWriter.target)
+	if err != nil {
+		t.Fatalf("ReadFile(target) error = %v", err)
+	}
+	if string(got) != "existing" {
+		t.Fatalf("target bytes = %q, want existing", got)
+	}
+	if _, err := os.Stat(internalWriter.imageDir); err != nil {
+		t.Fatalf("image dir stat error = %v, want existing conflict dir retained", err)
+	}
+}
+
+func TestCloseFailureRemovesTempAndEmptyImageDir(t *testing.T) {
+	driver := newTestDriver(t)
+	w, err := driver.Put(context.Background(), image.PutRequest{ImageID: "close-fail", Format: diskformat.FormatRaw, DeclaredSizeBytes: 4})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	internalWriter := w.(*imageWriter)
+	if _, err := w.Write([]byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := internalWriter.file.Close(); err != nil {
+		t.Fatalf("manual file Close() error = %v", err)
+	}
+	if err := w.Close(); err == nil {
+		t.Fatal("Close() error = nil, want close failure")
+	}
+	if _, err := os.Stat(internalWriter.tmp); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("temp stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(internalWriter.imageDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("image dir stat error = %v, want not exist", err)
+	}
 }
 
 func TestWriterRejectsRepeatedTerminalOperationsAndWrites(t *testing.T) {
@@ -268,4 +336,12 @@ func writeImage(t *testing.T, driver *Driver, imageID string, format diskformat.
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close(%q) error = %v", imageID, err)
 	}
+}
+
+func entryNames(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
 }

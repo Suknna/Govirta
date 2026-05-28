@@ -79,15 +79,13 @@ func (d *Driver) Put(ctx context.Context, req image.PutRequest) (image.ImageWrit
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.existingImagePath(req.ImageID); err == nil {
-		return nil, fmt.Errorf("%w: %s", image.ErrImageExists, req.ImageID)
-	} else if !errors.Is(err, image.ErrImageNotFound) {
+	if err := os.MkdirAll(d.imageRoot(), 0o755); err != nil {
 		return nil, err
 	}
-	if err := ensureTargetMissing(target); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+	if err := os.Mkdir(imageDir, 0o700); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("%w: %s", image.ErrImageExists, req.ImageID)
+		}
 		return nil, err
 	}
 	tmp := target + ".tmp"
@@ -96,7 +94,7 @@ func (d *Driver) Put(ctx context.Context, req image.PutRequest) (image.ImageWrit
 		cleanupErr := removeDirIfEmpty(imageDir)
 		return nil, errors.Join(err, cleanupErr)
 	}
-	return &imageWriter{file: file, tmp: tmp, target: target}, nil
+	return &imageWriter{file: file, tmp: tmp, target: target, imageDir: imageDir}, nil
 }
 
 // Get opens committed image bytes for reading.
@@ -177,11 +175,12 @@ func (d *Driver) GetActualUsedBytes(ctx context.Context) (int64, error) {
 }
 
 type imageWriter struct {
-	mu     sync.Mutex
-	file   *os.File
-	tmp    string
-	target string
-	done   bool
+	mu       sync.Mutex
+	file     *os.File
+	tmp      string
+	target   string
+	imageDir string
+	done     bool
 }
 
 func (w *imageWriter) Write(p []byte) (int, error) {
@@ -202,18 +201,17 @@ func (w *imageWriter) Close() error {
 	w.done = true
 
 	if err := w.file.Close(); err != nil {
-		cleanupErr := os.Remove(w.tmp)
+		cleanupErr := cleanupPendingImage(w.tmp, w.imageDir)
 		return errors.Join(err, cleanupErr)
 	}
-	if err := ensureTargetMissing(w.target); err != nil {
-		cleanupErr := os.Remove(w.tmp)
+	if err := os.Link(w.tmp, w.target); err != nil {
+		cleanupErr := cleanupPendingImage(w.tmp, w.imageDir)
+		if errors.Is(err, fs.ErrExist) {
+			err = errors.Join(fmt.Errorf("%w: %s", image.ErrImageExists, w.target), err)
+		}
 		return errors.Join(err, cleanupErr)
 	}
-	if err := os.Rename(w.tmp, w.target); err != nil {
-		cleanupErr := os.Remove(w.tmp)
-		return errors.Join(err, cleanupErr)
-	}
-	return nil
+	return os.Remove(w.tmp)
 }
 
 func (w *imageWriter) Cancel() error {
@@ -225,8 +223,8 @@ func (w *imageWriter) Cancel() error {
 	w.done = true
 
 	closeErr := w.file.Close()
-	removeErr := os.Remove(w.tmp)
-	return errors.Join(closeErr, removeErr)
+	cleanupErr := cleanupPendingImage(w.tmp, w.imageDir)
+	return errors.Join(closeErr, cleanupErr)
 }
 
 func (d *Driver) imageRoot() string {
@@ -307,15 +305,10 @@ func pathWithinDir(path, dir string) bool {
 	return strings.HasPrefix(path, dir+string(os.PathSeparator))
 }
 
-func ensureTargetMissing(path string) error {
-	_, err := os.Lstat(path)
-	if err == nil {
-		return fmt.Errorf("%w: %s", image.ErrImageExists, path)
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	return err
+func cleanupPendingImage(tmp, imageDir string) error {
+	removeTmpErr := os.Remove(tmp)
+	removeDirErr := removeDirIfEmpty(imageDir)
+	return errors.Join(removeTmpErr, removeDirErr)
 }
 
 func removeDirIfEmpty(path string) error {
