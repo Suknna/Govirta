@@ -26,6 +26,8 @@ var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var walkDir = filepath.WalkDir
 
+var removeCommittedTemp = os.Remove
+
 var _ image.Driver = (*Driver)(nil)
 
 // Config configures a host-local file image driver for one storage pool.
@@ -211,7 +213,13 @@ func (w *imageWriter) Close() error {
 		}
 		return errors.Join(err, cleanupErr)
 	}
-	return os.Remove(w.tmp)
+	removeErr := removeCommittedTemp(w.tmp)
+	if removeErr != nil {
+		// The no-overwrite link above is the commit point. Returning a cleanup
+		// error here would make upper layers roll back metadata for an image that
+		// is already durable at target, so tmp cleanup is intentionally best effort.
+	}
+	return nil
 }
 
 func (w *imageWriter) Cancel() error {

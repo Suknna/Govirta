@@ -295,6 +295,61 @@ func TestCloseFailureRemovesTempAndEmptyImageDir(t *testing.T) {
 	}
 }
 
+func TestClosePreservesCommittedImageWhenTempCleanupFails(t *testing.T) {
+	driver := newTestDriver(t)
+	w, err := driver.Put(context.Background(), image.PutRequest{ImageID: "cleanup-fail", Format: diskformat.FormatQCOW2, DeclaredSizeBytes: 4})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	internalWriter := w.(*imageWriter)
+	if _, err := w.Write([]byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	cleanupErr := errors.New("remove temp failed")
+	originalRemoveCommittedTemp := removeCommittedTemp
+	removeCommittedTemp = func(path string) error {
+		if path == internalWriter.tmp {
+			return cleanupErr
+		}
+		return originalRemoveCommittedTemp(path)
+	}
+	t.Cleanup(func() {
+		removeCommittedTemp = originalRemoveCommittedTemp
+	})
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil after committed target link", err)
+	}
+	got, err := os.ReadFile(internalWriter.target)
+	if err != nil {
+		t.Fatalf("ReadFile(target) error = %v", err)
+	}
+	if string(got) != "data" {
+		t.Fatalf("target bytes = %q, want data", got)
+	}
+	if _, err := os.Stat(internalWriter.tmp); err != nil {
+		t.Fatalf("temp stat error = %v, want tmp retained after cleanup failure", err)
+	}
+
+	r, err := driver.Get(context.Background(), image.GetRequest{ImageID: "cleanup-fail"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			t.Fatalf("reader Close() error = %v", err)
+		}
+	}()
+	readBack, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(readBack) != "data" {
+		t.Fatalf("read bytes = %q, want data", readBack)
+	}
+}
+
 func TestWriterRejectsRepeatedTerminalOperationsAndWrites(t *testing.T) {
 	driver := newTestDriver(t)
 	w, err := driver.Put(context.Background(), image.PutRequest{ImageID: "terminal", Format: diskformat.FormatRaw, DeclaredSizeBytes: 1})
