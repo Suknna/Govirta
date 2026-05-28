@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 6c06c5f
+  base_commit: 7a9533f
   files:
     - internal/storage/service.go
     - internal/storage/image_service.go

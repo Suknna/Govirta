@@ -276,7 +276,13 @@ Govirta/
 - Unit tests must not require real QEMU binaries, TAP devices, or the remote acceptance host. Use fake runners for qemu-img and storage-local unit tests.
 - Command execution boundaries must pass `binary` + `[]string`; do not build shell command strings in production code.
 - Runtime logs use zerolog structured fields. `fmt.Println` is acceptable for CLI user output, not library runtime logs.
+- All errors must propagate to the caller. Do not ignore errors with `_ = err`, blank assignments, best-effort cleanup that discards failures, or silent fallback paths. When an operation has both a primary error and cleanup/rollback errors, compose them with Go stdlib `errors.Join` so callers can inspect every failure with `errors.Is` / `errors.As`.
 - Storage APIs require explicit pool, format, and source choices when behavior affects storage outcomes; no implicit default storage pool or format inference.
+- All externally provided APIs, including Go package APIs, HTTP APIs, and gRPC APIs, must require callers to pass every behavior-affecting parameter explicitly. Do not infer, auto-fill, default, or decide missing API parameters on behalf of callers.
+- Image-derived root volumes must always be full independent copies of source image bytes. Do not use qcow2 backing-file links, reflink-style logical sharing, or any image-to-root-disk link semantics in the current project scope.
+- Context/knowledge-base references must not be dangling: every `AGENTS.md` cross-reference, `#flow-*` anchor, docs path, and symbol reference added to this knowledge base must resolve to an existing section, file, or source symbol at the time it is written.
+- Control-plane persistent data storage follows the Kubernetes-inspired architecture and only considers etcd. Do not introduce SQLite, PostgreSQL, MySQL, embedded KV stores, or alternative metadata databases unless the project architecture is explicitly changed first.
+- Variables that model a type discriminator, enum-like choice, lifecycle state, phase, role, backend kind, operation mode, or other state-machine value must use a dedicated custom Go type plus named constants. Do not represent such values as ad-hoc raw `string`, `int`, or `bool` values.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -286,10 +292,15 @@ Govirta/
 - Do not create orphan `context.Background()` / `context.TODO()` inside internal production packages.
 - Do not start fire-and-forget goroutines; every goroutine needs owner, shutdown path, and `ctx.Done()` for long-running work.
 - Do not use `panic` for expected business errors, string-match errors, swallow errors silently, or use `goto` as normal control flow.
+- Do not discard, suppress, overwrite, or log-and-continue errors that affect correctness, cleanup, rollback, persistence, storage, networking, process execution, or API responses; return them upward and use `errors.Join` when multiple errors must be preserved.
 - Do not let QEMU packages create host bridge/TAP resources; host networking belongs under `internal/network/bridge`.
 - Do not spend implementation effort on distributed scheduling, Kubernetes integration, live migration, hot-plug, or multi-node control before the single-node cold-operation closure is complete.
 - Do not implement cold snapshot, cold resize, or cold config modification against a running VM; these operations must require a stopped/offline VM until a later hot-operation phase is explicitly designed.
 - Do not add qemu-nbd, qemu-storage-daemon, qemu-io, CSI sidecars, gRPC storage services, or libvirt-derived storage abstractions in the current phase.
+- Do not design public Go package APIs, HTTP APIs, or gRPC APIs that silently infer defaults, complete missing fields, choose storage/network/runtime behavior, or otherwise make caller decisions implicitly.
+- Do not introduce backing-file chains or linked root disks for image-derived VM roots; root disks copied from images must remain independent even if the source image is later deleted.
+- Do not introduce non-etcd persistent metadata stores for control-plane data in the current architecture.
+- Do not add raw primitive state/type variables when a custom typed constant set is appropriate for API contracts, state machines, or persisted/serialized domain values.
 
 ## UNIQUE STYLES
 
