@@ -2,10 +2,11 @@
 
 <!--
 Verified-against:
-  base_commit: 1f893ee
+  base_commit: 6c06c5f
   files:
     - internal/virt/qemu/vm.go
     - internal/virt/qemuimg/client.go
+    - internal/virt/qemuimg/resize/resize.go
     - internal/virt/qmp/client.go
   flows: []
 -->
@@ -19,7 +20,7 @@ Local virtualization boundary aggregator. Owns three sibling packages: typed QEM
 | Task | Location | Notes |
 | --- | --- | --- |
 | Build QEMU argv | `qemu/AGENTS.md` | Full Builder API, profile whitelist, golden test contract |
-| qemu-img subcommands | `qemuimg/AGENTS.md` | Create/Info/Convert/Snapshot/Check/Remove builders + Runner boundary |
+| qemu-img subcommands | `qemuimg/AGENTS.md` | Create/Info/Convert/Resize/Snapshot/Check/Remove builders + Runner boundary |
 | QMP boundary | `qmp/AGENTS.md` | Project-owned QMP client; root facade + internal go-qemu direct socket subset |
 | Composition by node agent | `../node/agent.go:18` | `NewAgent` injects `qmp.NewNoopClient()` (composition lives in `internal/node`) |
 
@@ -39,7 +40,7 @@ Local virtualization boundary aggregator. Owns three sibling packages: typed QEM
 This directory is a pure aggregator with no symbols of its own. Per-flow chains live in:
 
 - `qemu/AGENTS.md#flow-argv-build` — typed Builder → `VM.Argv()` argv flatten (consumed by `cmd/qemucli` today; future runtime caller).
-- `qemuimg/AGENTS.md#flow-qcow2-do` — `Client.QCOW2().<sub>().Do(ctx)` → argv → `Runner.Run` → external `qemu-img` process.
+- `qemuimg/AGENTS.md#flow-qcow2-do` — `Client.QCOW2().<sub>().Do(ctx)` → argv/local deletion → `Runner.Run` or filesystem → external `qemu-img` process / trusted qcow2 delete.
 - `qmp/AGENTS.md#flow-qmp-ready` — `SocketClient.Connect` -> vendored direct socket monitor -> QMP capabilities handshake.
 - `qmp/AGENTS.md#flow-qmp-commands` — typed status/power methods -> internal command packages -> QMP `Run`.
 - `qmp/AGENTS.md#flow-qmp-events` — single-use event stream -> internal event conversion/filtering.
@@ -48,7 +49,7 @@ This directory is a pure aggregator with no symbols of its own. Per-flow chains 
 
 ## NOTES
 
-- Architecture defaults from project memory: `amd64` → `qemu-system-x86_64` + `q35`; `arm64` → `qemu-system-aarch64` or `/usr/libexec/qemu-kvm` + `virt` + `cortex-a57`.
+- `qemu.NewVM(arch)` auto-selects binary only: `ArchX86_64` → `qemu-system-x86_64`, `ArchAArch64` → `qemu-system-aarch64`. Machine profile, CPU model, and runtime binary overrides stay caller-set.
 - Rocky Linux aarch64 acceptance requires firmware `-bios /usr/share/edk2/aarch64/QEMU_EFI.fd` for ARM cirros boot.
 - For QEMU argv changes, update both `qemu/vm_test.go` and `cmd/qemucli/main_test.go` when the example CLI output should change.
 - `qmp/` still keeps `NoopClient` for node skeleton composition tests, but the real `SocketClient` is available for future runtime integration.

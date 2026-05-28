@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 1f893ee
+  base_commit: 6c06c5f
   files:
     - docs/roadmap/README.md
   flows: []
@@ -34,4 +34,4 @@ Roadmap maintenance rules only. This directory no longer owns standalone phase-g
 ## NOTES
 
 - The permanent architecture direction remains QEMU + QMP + qemu-img + netlink.
-- Working tree has deleted `cycle-1` through `cycle-5.md`; the `README.md` rewrite reflects the new structure but is not yet committed (see root `git status`).
+- `cycle-1` through `cycle-5.md` have been removed on main; keep planning details in `docs/superpowers/specs` and `docs/superpowers/plans`.

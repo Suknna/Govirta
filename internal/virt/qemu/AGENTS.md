@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 1f893ee
+  base_commit: 6c06c5f
   files:
     - internal/virt/qemu/vm.go
     - internal/virt/qemu/vm_test.go
@@ -77,12 +77,13 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 
 - Entry from root flow: `cmd/qemucli/main.go:35 (buildDefaultArgv)` — 来自 `cmd/qemucli/main.go:24 (main)` 的根 flow `#flow-qemucli-argv`
 - Local chain:
-  1. `NewVM` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
-  2. `Builder fluent setters` — `Name`/`Machine`/`CPU`/`SMP`/`Memory` 写入命名字段；`AddBlockdev`/`AddDevice`/`AddNetdev`/`AddChardev`/`BIOS`/`Monitor`/`Serial` 保留 package-internal typed renderer，`Build()` 再调用对应子包的 `Arg() (string, error)`；`AddArgument` 保序追加外部 generic argument
-  3. `AddDevice` — 反射 nil 检查 `isNilDevice`，防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
-  4. `Builder.Build` — 校验 binary/name/SMP/CPU/memory/display/msg/profile + typed renderer + external generic arguments allowlist；任一失败 wrap `ErrInvalidVM` 返回
-  5. `Build → VM` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
-  6. `VM.Argv` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片（按插入顺序展开 blockdev/device/netdev/chardev/monitor/serial）→ -display → -no-reboot → -no-shutdown → -msg → -pidfile
+  1. `internal/virt/qemu/vm.go:178 (NewVM)` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
+  2. `internal/virt/qemu/vm.go:212 (Builder.Name)` / `:225 (Builder.Machine)` / `:231 (Builder.CPU)` / `:233 (Builder.SMP)` / `:235 (Builder.Memory)` — 写入命名字段
+  3. `internal/virt/qemu/vm.go:237 (Builder.AddBlockdev)` / `:242 (Builder.AddDevice)` / `:251 (Builder.AddNetdev)` / `:256 (Builder.AddChardev)` / `:261 (Builder.BIOS)` / `:266 (Builder.Monitor)` / `:271 (Builder.Serial)` — 保留 package-internal typed renderer
+  4. `internal/virt/qemu/vm.go:242 (Builder.AddDevice)` — 反射 nil 检查 `isNilDevice`，防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
+  5. `internal/virt/qemu/vm.go:288 (Builder.Build)` — 校验 binary/name/SMP/CPU/memory/display/msg/profile + typed renderer + external generic arguments allowlist；任一失败 wrap `ErrInvalidVM` 返回
+  6. `internal/virt/qemu/vm.go:335 (Builder.Build)` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
+  7. `internal/virt/qemu/vm.go:340 (VM.Argv)` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片 → -display → -no-reboot → -no-shutdown → -msg → -pidfile
 - Data (within module): `Arch` → `*Builder` (字段化配置) → `VM` (不可变快照) → `[]string` (argv)
 - Side effects (within module): 无；纯值变换。错误经 `errors.Is(err, ErrInvalidVM)` 可命中
 - Exit / next hop: `cmd/qemucli/main.go:29 (main)` — `strings.Join(argv, " ")` 写 stdout（当前唯一消费者；future runtime 会传给 `os/exec.CommandContext`）
@@ -98,7 +99,7 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 - aarch64 有完整 argv 黄金测试，覆盖 `/usr/libexec/qemu-kvm`、`virt`、`cortex-a57` 与 Rocky 验收固件 `Builder.BIOS(firmware.BIOS{Path: "/usr/share/edk2/aarch64/QEMU_EFI.fd"})`。
 - `cmd/qemucli/main_test.go` 与 `vm_test.go:21` 的 expected argv 必须同步更新；前者是 CLI 输出契约，后者是构建器契约。
 - 黄金测试在 x86_64 全栈生产 VM 场景断言：`prod-vm` + Q35 KVM + host CPU + 4 vCPU + 8 GiB + qcow2 根盘 + virtio-blk + tap + virtio-net + QMP socket + 串口 socket + `-display none` + `-no-reboot/no-shutdown` + `-msg timestamp=on,guest-name=on` + `-pidfile`。
-- 当前 arch64 默认 binary 选 `qemu-system-aarch64`；Rocky 8.10 验收主机的 `/usr/libexec/qemu-kvm` 走 `Builder.Binary()` 显式覆盖（`vm_test.go:239` 已示范）。
+- 当前 `ArchAArch64` 默认 binary 选 `qemu-system-aarch64`；Rocky 8.10 验收主机的 `/usr/libexec/qemu-kvm` 走 `Builder.Binary()` 显式覆盖（`vm_test.go` 已示范）。
 - 远程 acceptance 的固件必须通过 `Builder.BIOS(firmware.BIOS{Path: "/usr/share/edk2/aarch64/QEMU_EFI.fd"})` 渲染；generic `AddArgument(Arg("-bios", "..."))` 与 external `TypedArg("-bios", ...)` 会被 `Build()` 拒绝。
 - `AddArgument` 是 allowlist-only 且校验参数形态。新增允许的 generic flag 时必须同时确认它没有已有 typed builder、不会绕过枚举/字段校验、不会用错误 arity 注入额外 argv，并补充 allowlist、denylist 与 arity 回归测试。
 - 单元测试纯逻辑，不依赖 QEMU 二进制；集成验收路径见根 AGENTS.md 的远程跨编译指引。

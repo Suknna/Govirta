@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 1f893ee
+  base_commit: 6c06c5f
   files:
     - internal/virt/qemuimg/client.go
     - internal/virt/qemuimg/client_test.go
@@ -11,6 +11,7 @@ Verified-against:
     - internal/virt/qemuimg/convert/convert.go
     - internal/virt/qemuimg/create/create.go
     - internal/virt/qemuimg/remove/remove.go
+    - internal/virt/qemuimg/resize/resize.go
     - internal/virt/qemuimg/snapshot/snapshot.go
     - internal/virt/qemuimg/internal/exec/exec.go
   flows:
@@ -23,25 +24,26 @@ Verified-against:
         - internal/virt/qemuimg/create/create.go
         - internal/virt/qemuimg/snapshot/snapshot.go
         - internal/virt/qemuimg/remove/remove.go
+        - internal/virt/qemuimg/resize/resize.go
         - internal/virt/qemuimg/internal/exec/exec.go
 -->
 
 ## OVERVIEW
 
-Offline qemu-img wrapper. `Client.QCOW2()` exposes per-subcommand fluent builders (`Create/Info/Convert/Snapshot/Check/Remove`). Most `Do(ctx)` methods validate fields, render argv, and dispatch via an injectable `Runner` that defaults to `os/exec.CommandContext`; `Remove().Do(ctx)` is the exception and performs local filesystem deletion for trusted Govirta-owned image paths.
+Offline qemu-img wrapper. `Client.QCOW2()` exposes per-subcommand fluent builders (`Create/Info/Convert/Resize/Snapshot/Check/Remove`). Most `Do(ctx)` methods validate fields, render argv, and dispatch via an injectable `Runner` that defaults to `os/exec.CommandContext`; `Remove().Do(ctx)` is the exception and performs local filesystem deletion for trusted Govirta-owned image paths.
 
 ## WHERE TO LOOK
 
 | Task | Location | Notes |
 | --- | --- | --- |
-| Client construction | `client.go:34` | `NewClient(Config)`; defaults `binary=qemu-img`, `runner=OSRunner{}` |
-| QCOW2 builder dispatch | `client.go:46` | `ExecClient.QCOW2()` → `QCOW2Client` value |
-| Subcommand builders | `check/`, `info/`, `convert/`, `create/`, `snapshot/`, `remove/` | One subpackage per subcommand; identical shape: `New(binary, runner)` + setters + `Do(ctx)` |
+| Client construction | `client.go:81` | `NewClient(Config)`; defaults `binary=qemu-img`, `runner=OSRunner{}` |
+| QCOW2 builder dispatch | `client.go:95` | `ExecClient.QCOW2()` → `QCOW2Client` value |
+| Subcommand builders | `check/`, `info/`, `convert/`, `create/`, `resize/`, `snapshot/`, `remove/` | One subpackage per subcommand; identical shape: `New(binary, runner)` + setters + `Do(ctx)` |
 | Runner boundary | `internal/exec/exec.go:18` | `Runner` interface; `OSRunner.Run` at line 47 |
 | Error model | `internal/exec/exec.go:11` | `ErrInvalidRequest` sentinel; `*CommandError` wraps process result + cause; `*DecodeError` wraps JSON decode result + cause |
 | Public error aliases | `client.go:13` | `qemuimg.ErrInvalidRequest = imgexec.ErrInvalidRequest`; `qemuimg.CommandError = imgexec.CommandError`; `qemuimg.DecodeError = imgexec.DecodeError` |
 | Path operand validation | `internal/argv/argv.go` | Rejects blank and leading-dash path operands before invoking qemu-img |
-| End-to-end argv assertions | `client_test.go:61` | `TestQCOW2*UsesConfiguredRunner` covers all 6 subcommands |
+| End-to-end argv assertions | `client_test.go` | `TestQCOW2*UsesConfiguredRunner` covers all runner-backed subcommands; remove has filesystem behavior tests |
 
 ## CONVENTIONS
 
@@ -67,13 +69,13 @@ Offline qemu-img wrapper. `Client.QCOW2()` exposes per-subcommand fluent builder
 
 ### Flow: qcow2 subcommand Do {#flow-qcow2-do}
 
-This is the canonical execution path for every subcommand exposed via `QCOW2Client`. There is no current production caller in `cmd/*`; future node-agent storage code will be the entry point. Captured here so the runtime path is documented before it grows.
+This is the canonical execution path for every subcommand exposed via `QCOW2Client`. There is no current direct `cmd/*` caller; `internal/storage/local` calls it today for qcow2 volume create/convert/resize/info/remove, and future node-agent runtime code will also use it.
 
-- Entry from root flow: `internal/virt/qemuimg/client.go:34 (NewClient)` — invoked by future caller from root flow `#flow-qcow2-cli` (placeholder, no current production caller; verified against tests in `client_test.go:61`)
+- Entry from root flow: `internal/virt/qemuimg/client.go:81 (NewClient)` / `:105 (QCOW2Client.Create)` / `:115 (Convert)` / `:120 (Resize)` — invoked by storage local driver and future node runtime callers
 - Local chain:
-  1. `client.go:34 (NewClient)` — fill defaults: `binary` falls back to `"qemu-img"`, `runner` falls back to `imgexec.OSRunner{}`
-  2. `client.go:46 (ExecClient.QCOW2)` — return value-typed `QCOW2Client{binary, runner}`; each call returns a fresh copy but shares the runner interface
-  3. `client.go:54-74 (QCOW2Client.{Create,Info,Convert,Snapshot,Check,Remove})` — delegate to `<sub>.New(binary, runner)`; returns `*Builder`
+  1. `client.go:81 (NewClient)` — fill defaults: `binary` falls back to `"qemu-img"`, `runner` falls back to `imgexec.OSRunner{}`
+  2. `client.go:95 (ExecClient.QCOW2)` — return value-typed `QCOW2Client{binary, runner}`; each call returns a fresh copy but shares the runner interface
+  3. `client.go:104-136 (QCOW2Client.{Create,Info,Convert,Resize,Snapshot,Check,Remove})` — delegate to `<sub>.New(binary, runner)`; returns `*Builder`
   4. `<sub>.Builder.<Setter>(...)` — fluent setters mutate builder fields (path, target, base, size, name)
   5. `<sub>.Builder.Do(ctx)` — validate non-empty / positive fields with `imgexec.InvalidRequest` (returns `%w ErrInvalidRequest`); path operands additionally reject leading `-`; on pass, assemble argv slice
   6. `<sub>.Builder.Do → b.runner.Run(ctx, b.binary, args)` — runner invocation:
@@ -94,11 +96,12 @@ Argv catalog (verified by `client_test.go`):
 | create | `["create", "-f", "qcow2", "-F", "qcow2", "-b", base, target, strconv.FormatInt(size,10)]` (`create/create.go:52`) | `error` |
 | info | `["info", "-f", "qcow2", "--output=json", path]` (`info/info.go:43`) | `(Result, error)` |
 | convert | `["convert", "-f", "qcow2", "-O", "qcow2", source, target]` (`convert/convert.go:42`) | `error` |
+| resize | `["resize", "-f", "qcow2", path, strconv.FormatInt(size,10)]` (`resize/resize.go:49`) | `error` |
 | snapshot | `["snapshot", "-c", name, path]` (`snapshot/snapshot.go:42`) | `error` |
 | check | `["check", "-f", "qcow2", "--output=json", path]` (`check/check.go:44`) | `(Result, error)` with `RawOutput` |
 | remove | (no argv; calls `os.Remove(path)` after case-insensitive `.qcow2` suffix and file-type guardrails; caller must supply a trusted storage path) | `error` |
 
-`[已验证]` 数据流证据来源：直接读取 6 个 builder 的 `Do(ctx)` 实现 + `client_test.go` 端到端 argv 断言 + `internal/exec/exec_test.go` 的 helper-process 子进程测试。
+`[已验证]` 数据流证据来源：直接读取 7 个 builder 的 `Do(ctx)` 实现 + `client_test.go` 端到端 argv/删除断言 + `internal/exec/exec_test.go` 的 helper-process 子进程测试。
 
 ## NOTES
 
