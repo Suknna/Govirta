@@ -2,7 +2,9 @@ package block
 
 import (
 	"context"
+	"io"
 
+	"github.com/suknna/govirta/internal/storage/diskformat"
 	"github.com/suknna/govirta/internal/storage/volume"
 )
 
@@ -26,6 +28,7 @@ type Capabilities struct {
 type Driver interface {
 	DriverInfo(ctx context.Context) (DriverInfo, error)
 	Create(ctx context.Context, req CreateRequest) (volume.Volume, error)
+	CreateFromReader(ctx context.Context, req CreateFromReaderRequest) (volume.Volume, error)
 	Delete(ctx context.Context, vol volume.Volume) error
 	GetActualUsedBytes(ctx context.Context) (int64, error)
 	Publish(ctx context.Context, vol volume.Volume, req PublishRequest) (volume.PublishedVolume, error)
@@ -36,6 +39,20 @@ type Driver interface {
 
 // CreateRequest carries all pool and VM identity required to create a block volume.
 type CreateRequest struct {
+	Name          string
+	PoolName      string
+	VMID          string
+	VMName        string
+	VolumeID      volume.ID
+	DiskIndex     int
+	CapacityBytes int64
+	ReadOnly      bool
+}
+
+// CreateFromReaderRequest carries source bytes and VM identity required to create a block volume copy.
+type CreateFromReaderRequest struct {
+	Reader        io.Reader
+	Format        diskformat.Format
 	Name          string
 	PoolName      string
 	VMID          string
