@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/suknna/govirta/internal/storage/block"
 	"github.com/suknna/govirta/internal/storage/diskformat"
@@ -27,6 +28,7 @@ var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var walkDir = filepath.WalkDir
 var removePath = os.Remove
+var removeAllPath = os.RemoveAll
 
 // Config configures a host-local qcow2 block driver for one storage pool.
 type Config struct {
@@ -85,7 +87,8 @@ func (d *Driver) DriverInfo(ctx context.Context) (block.DriverInfo, error) {
 }
 
 // Create allocates a new local qcow2 path and delegates image creation to qemu-img.
-// It refuses any pre-existing target path before invoking the backend process.
+// It writes through a driver-owned temporary file and commits with no-overwrite
+// link semantics so a late final-path replacement cannot be overwritten.
 func (d *Driver) Create(ctx context.Context, req block.CreateRequest) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
@@ -101,17 +104,32 @@ func (d *Driver) Create(ctx context.Context, req block.CreateRequest) (volume.Vo
 	if err := ensureCreateTargetAvailable(path); err != nil {
 		return volume.Volume{}, err
 	}
-	if err := d.qemuimg.QCOW2().Create().Target(path).SizeBytes(req.CapacityBytes).Do(ctx); err != nil {
-		cleanupErr := errors.Join(removeIfExists(path), removeDirIfEmpty(volumeDir))
+
+	tmpDir, err := makePrivateTempDir(volumeDir)
+	if err != nil {
+		cleanupErr := removeDirIfEmpty(volumeDir)
 		return volume.Volume{}, errors.Join(err, cleanupErr)
 	}
-
-	return volume.Volume{
+	tmpPath := filepath.Join(tmpDir, "output.qcow2")
+	if err := d.qemuimg.QCOW2().Create().Target(tmpPath).SizeBytes(req.CapacityBytes).Do(ctx); err != nil {
+		cleanupErr := cleanupFailedCreate(tmpDir, volumeDir)
+		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+	if err := ensureRegularFile(tmpPath); err != nil {
+		cleanupErr := cleanupFailedCreate(tmpDir, volumeDir)
+		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+	if err := commitTempImage(tmpPath, path); err != nil {
+		cleanupErr := cleanupFailedCreate(tmpDir, volumeDir)
+		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+	created := volume.Volume{
 		ID:            req.VolumeID,
 		Name:          req.Name,
 		VMID:          req.VMID,
 		VMName:        req.VMName,
 		PoolName:      req.PoolName,
+		Role:          req.Role,
 		DiskIndex:     req.DiskIndex,
 		Backend:       driverName,
 		CapacityBytes: req.CapacityBytes,
@@ -120,7 +138,12 @@ func (d *Driver) Create(ctx context.Context, req block.CreateRequest) (volume.Vo
 			pathKey:   path,
 			formatKey: string(volume.DiskFormatQCOW2),
 		},
-	}, nil
+	}
+	if err := removeAllPath(tmpDir); err != nil {
+		return created, errors.Join(volume.ErrVolumeCleanupFailed, err)
+	}
+
+	return created, nil
 }
 
 // CreateFromReader creates a standalone qcow2 root volume from explicit image bytes.
@@ -148,40 +171,57 @@ func (d *Driver) CreateFromReader(ctx context.Context, req block.CreateFromReade
 		return volume.Volume{}, err
 	}
 
-	tmpPath := path + ".tmp"
-	if err := ensureCreateTargetAvailable(tmpPath); err != nil {
-		return volume.Volume{}, err
-	}
-	if err := copyReaderToPath(ctx, req.Reader, tmpPath); err != nil {
-		cleanupErr := errors.Join(removeIfExists(tmpPath), removeDirIfEmpty(volumeDir))
+	tmpDir, err := makePrivateTempDir(volumeDir)
+	if err != nil {
+		cleanupErr := removeDirIfEmpty(volumeDir)
 		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+	tmpPath := filepath.Join(tmpDir, "output.qcow2")
+	inputTmpPath := filepath.Join(tmpDir, "input.raw")
+	cleanupTemps := func() error {
+		return cleanupFailedCreate(tmpDir, volumeDir)
 	}
 
 	if req.Format == diskformat.FormatQCOW2 {
-		if err := commitCopiedImage(tmpPath, path); err != nil {
-			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
+		if err := copyReaderToPath(ctx, req.Reader, tmpPath); err != nil {
+			cleanupErr := cleanupTemps()
 			return volume.Volume{}, errors.Join(err, cleanupErr)
 		}
 	} else {
-		if err := d.qemuimg.QCOW2().Convert().SourceFormat("raw").Source(tmpPath).Target(path).Do(ctx); err != nil {
-			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
+		if err := copyReaderToPath(ctx, req.Reader, inputTmpPath); err != nil {
+			cleanupErr := cleanupTemps()
+			return volume.Volume{}, errors.Join(err, cleanupErr)
+		}
+		if err := d.qemuimg.QCOW2().Convert().SourceFormat("raw").Source(inputTmpPath).Target(tmpPath).Do(ctx); err != nil {
+			cleanupErr := cleanupTemps()
 			return volume.Volume{}, errors.Join(err, cleanupErr)
 		}
 	}
 
-	if req.CapacityBytes > 0 {
-		if err := d.qemuimg.QCOW2().Resize().Path(path).SizeBytes(req.CapacityBytes).Do(ctx); err != nil {
-			cleanupErr := errors.Join(removeIfExists(tmpPath), removeIfExists(path), removeDirIfEmpty(volumeDir))
-			return volume.Volume{}, errors.Join(err, cleanupErr)
-		}
-	}
-
-	if err := removeIfExists(tmpPath); err != nil {
-		cleanupErr := errors.Join(removeIfExists(path), removeIfExists(tmpPath), removeDirIfEmpty(volumeDir))
+	if err := ensureRegularFile(tmpPath); err != nil {
+		cleanupErr := cleanupTemps()
 		return volume.Volume{}, errors.Join(err, cleanupErr)
 	}
+	if req.CapacityBytes > 0 {
+		if err := d.qemuimg.QCOW2().Resize().Path(tmpPath).SizeBytes(req.CapacityBytes).Do(ctx); err != nil {
+			cleanupErr := cleanupTemps()
+			return volume.Volume{}, errors.Join(err, cleanupErr)
+		}
+		if err := ensureRegularFile(tmpPath); err != nil {
+			cleanupErr := cleanupTemps()
+			return volume.Volume{}, errors.Join(err, cleanupErr)
+		}
+	}
+	if err := commitTempImage(tmpPath, path); err != nil {
+		cleanupErr := cleanupTemps()
+		return volume.Volume{}, errors.Join(err, cleanupErr)
+	}
+	created := d.newVolume(req, path)
+	if err := removeAllPath(tmpDir); err != nil {
+		return created, errors.Join(volume.ErrVolumeCleanupFailed, err)
+	}
 
-	return d.newVolume(req, path), nil
+	return created, nil
 }
 
 // Delete removes a local qcow2 file and then removes its empty VM directory.
@@ -519,9 +559,28 @@ func removeIfExists(path string) error {
 
 func removeDirIfEmpty(path string) error {
 	if err := removePath(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, syscall.ENOTEMPTY) {
+			return nil
+		}
 		return err
 	}
 	return nil
+}
+
+func makePrivateTempDir(volumeDir string) (string, error) {
+	tmpDir, err := os.MkdirTemp(volumeDir, ".govirta-tmp-*")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(tmpDir, 0o700); err != nil {
+		cleanupErr := removeAllPath(tmpDir)
+		return "", errors.Join(err, cleanupErr)
+	}
+	return tmpDir, nil
+}
+
+func cleanupFailedCreate(tmpDir, volumeDir string) error {
+	return errors.Join(removeAllPath(tmpDir), removeDirIfEmpty(volumeDir))
 }
 
 func copyReaderToPath(ctx context.Context, reader io.Reader, path string) error {
@@ -543,7 +602,18 @@ func copyReaderToPath(ctx context.Context, reader io.Reader, path string) error 
 	return ctx.Err()
 }
 
-func commitCopiedImage(tmpPath, targetPath string) error {
+func ensureRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: path must be a regular file: %s", volume.ErrInvalidRequest, path)
+	}
+	return nil
+}
+
+func commitTempImage(tmpPath, targetPath string) error {
 	return os.Link(tmpPath, targetPath)
 }
 
@@ -554,6 +624,7 @@ func (d *Driver) newVolume(req block.CreateFromReaderRequest, path string) volum
 		VMID:          req.VMID,
 		VMName:        req.VMName,
 		PoolName:      req.PoolName,
+		Role:          req.Role,
 		DiskIndex:     req.DiskIndex,
 		Backend:       driverName,
 		CapacityBytes: req.CapacityBytes,

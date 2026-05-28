@@ -38,4 +38,6 @@ var (
 	ErrVolumeInUse = volume.ErrVolumeInUse
 	// ErrVolumeNotPublished marks attachment-dependent operations before publish succeeds.
 	ErrVolumeNotPublished = volume.ErrVolumeNotPublished
+	// ErrVolumeCleanupFailed marks a backend create that committed a usable volume but failed post-commit cleanup.
+	ErrVolumeCleanupFailed = volume.ErrVolumeCleanupFailed
 )

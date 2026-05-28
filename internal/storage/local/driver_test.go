@@ -43,6 +43,11 @@ func TestNewDriverValidatesConfig(t *testing.T) {
 
 func TestCreateCreatesEmptyQCOW2AtSafePath(t *testing.T) {
 	driver, runner := newTestDriver(t)
+	runner.beforeReturn = func(args []string) {
+		if len(args) > 0 && args[0] == "create" {
+			assertPrivateTempDirMode(t, args[len(args)-2])
+		}
+	}
 
 	created, err := driver.Create(context.Background(), newCreateRequest())
 	if err != nil {
@@ -59,12 +64,26 @@ func TestCreateCreatesEmptyQCOW2AtSafePath(t *testing.T) {
 	if created.ID != volume.ID("vol-a") || created.Backend != driverName || created.State != volume.StateAvailable {
 		t.Fatalf("created volume = %+v, want normalized local volume", created)
 	}
-	wantArgs := [][]string{{"create", "-f", "qcow2", wantPath, "1024"}}
-	if calls := runner.args(); !reflect.DeepEqual(calls, wantArgs) {
-		t.Fatalf("qemu-img calls = %#v, want %#v", calls, wantArgs)
+	if created.Role != volume.RoleRoot {
+		t.Fatalf("created role = %q, want %q", created.Role, volume.RoleRoot)
 	}
+	calls := runner.args()
+	if len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want one create call", calls)
+	}
+	if len(calls[0]) != 5 {
+		t.Fatalf("qemu-img call = %#v, want 5 args", calls[0])
+	}
+	wantArgsPrefix := []string{"create", "-f", "qcow2"}
+	if !reflect.DeepEqual(calls[0][:3], wantArgsPrefix) || calls[0][4] != "1024" {
+		t.Fatalf("qemu-img call = %#v, want create qcow2 <private tmp> 1024", calls[0])
+	}
+	assertPrivateTempFile(t, calls[0][3], filepath.Dir(wantPath), "output.qcow2")
 	if _, err := os.Stat(filepath.Dir(wantPath)); err != nil {
 		t.Fatalf("volume dir stat error = %v, want nil", err)
+	}
+	if _, err := os.Stat(wantPath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deterministic tmp stat error = %v, want not exist", err)
 	}
 }
 
@@ -96,6 +115,34 @@ func TestCreateRejectsExistingTarget(t *testing.T) {
 				t.Fatalf("qemu-img calls = %#v, want none", calls)
 			}
 		})
+	}
+}
+
+func TestCreateRejectsExistingSymlinkTargetWithoutTouchingExternalFile(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	externalPath := filepath.Join(t.TempDir(), "external.qcow2")
+	writeFile(t, externalPath, "outside")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.Symlink(externalPath, path); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	_, err := driver.Create(context.Background(), newCreateRequest())
+	if !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("Create() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external target bytes = %q, want outside", got)
 	}
 }
 
@@ -171,6 +218,11 @@ func TestOperationsRejectSymlinkPoolAncestorBeforeExternalAccess(t *testing.T) {
 			}
 			if _, err := os.Stat(externalPath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("external tmp stat error = %v, want not exist", err)
+			}
+			if entries, err := os.ReadDir(externalVolumeDir); err != nil {
+				t.Fatalf("ReadDir(%s) error = %v, want nil", externalVolumeDir, err)
+			} else if len(entries) != 1 {
+				t.Fatalf("external volume dir entries = %d, want only original file", len(entries))
 			}
 		})
 	}
@@ -346,6 +398,29 @@ func TestDeleteRemovesImageAndVolumeDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("volume dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestDeleteKeepsNonEmptyVolumeDirectory(t *testing.T) {
+	driver, _ := newTestDriver(t)
+	rootPath := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	dataPath := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-1.qcow2")
+	writeFile(t, rootPath, "root")
+	writeFile(t, dataPath, "data")
+
+	if err := driver.Delete(context.Background(), newVolumeWithPath(rootPath)); err != nil {
+		t.Fatalf("Delete() error = %v, want nil", err)
+	}
+	if _, err := os.Stat(rootPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted image stat error = %v, want not exist", err)
+	}
+	if got, err := os.ReadFile(dataPath); err != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", dataPath, err)
+	} else if string(got) != "data" {
+		t.Fatalf("remaining image bytes = %q, want data", got)
+	}
+	if _, err := os.Stat(filepath.Dir(rootPath)); err != nil {
+		t.Fatalf("volume dir stat error = %v, want nil", err)
 	}
 }
 
@@ -544,6 +619,140 @@ func TestCreateFailureCleansVolumeDirectoryAndReturnsMainError(t *testing.T) {
 	}
 }
 
+func TestCreateCommitFailureJoinsCleanupError(t *testing.T) {
+	commitErrTarget := "existing"
+	cleanupErr := errors.New("remove tmp failed")
+	runner := &fakeRunner{}
+	driver := newTestDriverWithRunner(t, runner)
+	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	originalRemoveAllPath := removeAllPath
+	runner.beforeReturn = func(args []string) {
+		if len(args) > 0 && args[0] == "create" {
+			writeFile(t, target, commitErrTarget)
+			tmpDir := filepath.Dir(args[len(args)-2])
+			removeAllPath = func(path string) error {
+				if path == tmpDir {
+					return cleanupErr
+				}
+				return originalRemoveAllPath(path)
+			}
+		}
+	}
+	t.Cleanup(func() {
+		removeAllPath = originalRemoveAllPath
+	})
+
+	_, err := driver.Create(context.Background(), newCreateRequest())
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Create() error = %v, want joined exists error", err)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("Create() error = %v, want joined cleanup error %v", err, cleanupErr)
+	}
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", target, readErr)
+	}
+	if string(got) != commitErrTarget {
+		t.Fatalf("target bytes = %q, want %q", got, commitErrTarget)
+	}
+}
+
+func TestCreateCommittedTmpCleanupFailureReturnsCommittedVolumeAndError(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	cleanupErr := errors.New("remove tmp failed")
+	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	originalRemoveAllPath := removeAllPath
+	removeAllPath = func(path string) error {
+		if strings.HasPrefix(filepath.Base(path), ".govirta-tmp-") {
+			return cleanupErr
+		}
+		return originalRemoveAllPath(path)
+	}
+	t.Cleanup(func() {
+		removeAllPath = originalRemoveAllPath
+	})
+
+	created, err := driver.Create(context.Background(), newCreateRequest())
+	if !errors.Is(err, volume.ErrVolumeCleanupFailed) {
+		t.Fatalf("Create() error = %v, want wrapped %v", err, volume.ErrVolumeCleanupFailed)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("Create() error = %v, want wrapped %v", err, cleanupErr)
+	}
+	if created.ID != volume.ID("vol-a") || created.Context[pathKey] != target {
+		t.Fatalf("Create() volume = %+v, want committed volume metadata", created)
+	}
+	if calls := runner.args(); len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want one create call", calls)
+	}
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", target, readErr)
+	}
+	if string(got) != "qcow2" {
+		t.Fatalf("target bytes = %q, want committed qcow2 bytes", got)
+	}
+}
+
+func TestCreateRejectsLateTempOutputReplacement(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(t *testing.T, output string, external string)
+	}{
+		{name: "symlink", replace: func(t *testing.T, output string, external string) {
+			t.Helper()
+			if err := os.Remove(output); err != nil {
+				t.Fatalf("Remove(%s) error = %v, want nil", output, err)
+			}
+			if err := os.Symlink(external, output); err != nil {
+				t.Fatalf("Symlink(%s) error = %v, want nil", output, err)
+			}
+		}},
+		{name: "directory", replace: func(t *testing.T, output string, _ string) {
+			t.Helper()
+			if err := os.Remove(output); err != nil {
+				t.Fatalf("Remove(%s) error = %v, want nil", output, err)
+			}
+			if err := os.Mkdir(output, 0o700); err != nil {
+				t.Fatalf("Mkdir(%s) error = %v, want nil", output, err)
+			}
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			driver, runner := newTestDriver(t)
+			externalPath := filepath.Join(t.TempDir(), "external.qcow2")
+			writeFile(t, externalPath, "outside")
+			runner.beforeReturn = func(args []string) {
+				if len(args) > 0 && args[0] == "create" {
+					tc.replace(t, args[len(args)-2], externalPath)
+				}
+			}
+			target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+
+			created, err := driver.Create(context.Background(), newCreateRequest())
+			if !errors.Is(err, volume.ErrInvalidRequest) {
+				t.Fatalf("Create() error = %v, want %v", err, volume.ErrInvalidRequest)
+			}
+			if created.ID != "" {
+				t.Fatalf("Create() volume = %+v, want zero volume", created)
+			}
+			if _, statErr := os.Stat(target); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("target stat error = %v, want not exist", statErr)
+			}
+			got, readErr := os.ReadFile(externalPath)
+			if readErr != nil {
+				t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+			}
+			if string(got) != "outside" {
+				t.Fatalf("external bytes = %q, want outside", got)
+			}
+		})
+	}
+}
+
 func TestCreateFromReaderCopiesQCOW2BytesWithoutConvert(t *testing.T) {
 	driver, runner := newTestDriver(t)
 	contents := []byte("standalone qcow2 bytes")
@@ -558,6 +767,9 @@ func TestCreateFromReaderCopiesQCOW2BytesWithoutConvert(t *testing.T) {
 	if created.Context[pathKey] != wantPath || created.Context[formatKey] != string(volume.DiskFormatQCOW2) {
 		t.Fatalf("created context = %#v, want qcow2 path %q", created.Context, wantPath)
 	}
+	if created.Role != volume.RoleRoot {
+		t.Fatalf("created role = %q, want %q", created.Role, volume.RoleRoot)
+	}
 	got, err := os.ReadFile(wantPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v, want nil", wantPath, err)
@@ -569,12 +781,17 @@ func TestCreateFromReaderCopiesQCOW2BytesWithoutConvert(t *testing.T) {
 		t.Fatalf("qemu-img calls = %#v, want none", calls)
 	}
 	if _, err := os.Stat(wantPath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("tmp stat error = %v, want not exist", err)
+		t.Fatalf("deterministic tmp stat error = %v, want not exist", err)
 	}
 }
 
 func TestCreateFromReaderConvertsRawToQCOW2(t *testing.T) {
 	driver, runner := newTestDriver(t)
+	runner.beforeReturn = func(args []string) {
+		if len(args) > 0 && args[0] == "convert" {
+			assertPrivateTempDirMode(t, args[len(args)-1])
+		}
+	}
 	req := newCreateFromReaderRequest(strings.NewReader("raw bytes"), diskformat.FormatRaw)
 
 	if _, err := driver.CreateFromReader(context.Background(), req); err != nil {
@@ -582,19 +799,40 @@ func TestCreateFromReaderConvertsRawToQCOW2(t *testing.T) {
 	}
 
 	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
-	tmp := target + ".tmp"
-	wantArgs := [][]string{{"convert", "-f", "raw", "-O", "qcow2", tmp, target}}
-	if calls := runner.args(); !reflect.DeepEqual(calls, wantArgs) {
-		t.Fatalf("qemu-img calls = %#v, want %#v", calls, wantArgs)
+	calls := runner.args()
+	if len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want one convert call", calls)
+	}
+	if len(calls[0]) != 7 {
+		t.Fatalf("qemu-img call = %#v, want 7 args", calls[0])
+	}
+	wantArgsPrefix := []string{"convert", "-f", "raw", "-O", "qcow2"}
+	if !reflect.DeepEqual(calls[0][:5], wantArgsPrefix) {
+		t.Fatalf("qemu-img call = %#v, want convert raw to qcow2", calls[0])
+	}
+	inputTmp := calls[0][5]
+	tmp := calls[0][6]
+	assertPrivateTempFile(t, inputTmp, filepath.Dir(target), "input.raw")
+	assertPrivateTempFile(t, tmp, filepath.Dir(target), "output.qcow2")
+	if filepath.Dir(inputTmp) != filepath.Dir(tmp) {
+		t.Fatalf("input/output temp dirs = %q/%q, want same private dir", filepath.Dir(inputTmp), filepath.Dir(tmp))
 	}
 	assertNoBackingArgs(t, runner.args())
-	if _, err := os.Stat(tmp); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("tmp stat error = %v, want not exist", err)
+	if _, err := os.Stat(target + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deterministic tmp stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(target + ".input.tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deterministic input tmp stat error = %v, want not exist", err)
 	}
 }
 
 func TestCreateFromReaderResizesRequestedCapacity(t *testing.T) {
 	driver, runner := newTestDriver(t)
+	runner.beforeReturn = func(args []string) {
+		if len(args) > 0 && args[0] == "resize" {
+			assertPrivateTempDirMode(t, args[len(args)-2])
+		}
+	}
 	req := newCreateFromReaderRequest(strings.NewReader("qcow2 bytes"), diskformat.FormatQCOW2)
 	req.CapacityBytes = 4096
 
@@ -603,10 +841,18 @@ func TestCreateFromReaderResizesRequestedCapacity(t *testing.T) {
 	}
 
 	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
-	wantArgs := [][]string{{"resize", "-f", "qcow2", target, "4096"}}
-	if calls := runner.args(); !reflect.DeepEqual(calls, wantArgs) {
-		t.Fatalf("qemu-img calls = %#v, want %#v", calls, wantArgs)
+	calls := runner.args()
+	if len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want one resize call", calls)
 	}
+	if len(calls[0]) != 5 {
+		t.Fatalf("qemu-img call = %#v, want 5 args", calls[0])
+	}
+	wantArgsPrefix := []string{"resize", "-f", "qcow2"}
+	if !reflect.DeepEqual(calls[0][:3], wantArgsPrefix) || calls[0][4] != "4096" {
+		t.Fatalf("qemu-img call = %#v, want resize qcow2 <private tmp> 4096", calls[0])
+	}
+	assertPrivateTempFile(t, calls[0][3], filepath.Dir(target), "output.qcow2")
 	assertNoBackingArgs(t, runner.args())
 }
 
@@ -783,37 +1029,126 @@ func TestCreateFromReaderCleanupFailureJoinsPrimaryError(t *testing.T) {
 	}
 }
 
-func TestCreateFromReaderCommittedTmpCleanupFailureReturnsError(t *testing.T) {
-	driver, runner := newTestDriver(t)
+func TestCreateFromReaderCommitFailureJoinsCleanupError(t *testing.T) {
 	cleanupErr := errors.New("remove tmp failed")
+	driver, runner := newTestDriver(t)
 	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
-	tmp := target + ".tmp"
-	originalRemovePath := removePath
-	removePath = func(path string) error {
-		if path == tmp {
+	reader := &createTargetReader{t: t, target: target, reader: strings.NewReader("qcow2 bytes")}
+	originalRemoveAllPath := removeAllPath
+	removeAllPath = func(path string) error {
+		if strings.HasPrefix(filepath.Base(path), ".govirta-tmp-") {
 			return cleanupErr
 		}
-		return originalRemovePath(path)
+		return originalRemoveAllPath(path)
 	}
 	t.Cleanup(func() {
-		removePath = originalRemovePath
-		if err := originalRemovePath(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("Remove(%s) cleanup error = %v", tmp, err)
-		}
-		if err := originalRemovePath(filepath.Dir(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("Remove(%s) cleanup error = %v", filepath.Dir(target), err)
-		}
+		removeAllPath = originalRemoveAllPath
 	})
 
-	_, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(strings.NewReader("qcow2 bytes"), diskformat.FormatQCOW2))
+	_, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(reader, diskformat.FormatQCOW2))
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("CreateFromReader() error = %v, want joined exists error", err)
+	}
 	if !errors.Is(err, cleanupErr) {
-		t.Fatalf("CreateFromReader() error = %v, want wrapped %v", err, cleanupErr)
+		t.Fatalf("CreateFromReader() error = %v, want joined cleanup error %v", err, cleanupErr)
 	}
 	if calls := runner.args(); len(calls) != 0 {
 		t.Fatalf("qemu-img calls = %#v, want none", calls)
 	}
-	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("target stat error = %v, want not exist after rollback cleanup", err)
+}
+
+func TestCreateFromReaderCommittedTmpCleanupFailureReturnsCommittedVolumeAndError(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	cleanupErr := errors.New("remove tmp failed")
+	target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	originalRemoveAllPath := removeAllPath
+	removeAllPath = func(path string) error {
+		if strings.HasPrefix(filepath.Base(path), ".govirta-tmp-") {
+			return cleanupErr
+		}
+		return originalRemoveAllPath(path)
+	}
+	t.Cleanup(func() {
+		removeAllPath = originalRemoveAllPath
+	})
+
+	created, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(strings.NewReader("qcow2 bytes"), diskformat.FormatQCOW2))
+	if !errors.Is(err, volume.ErrVolumeCleanupFailed) {
+		t.Fatalf("CreateFromReader() error = %v, want wrapped %v", err, volume.ErrVolumeCleanupFailed)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("CreateFromReader() error = %v, want wrapped %v", err, cleanupErr)
+	}
+	if created.ID != volume.ID("vol-a") || created.Context[pathKey] != target {
+		t.Fatalf("CreateFromReader() volume = %+v, want committed volume metadata", created)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", target, readErr)
+	}
+	if string(got) != "qcow2 bytes" {
+		t.Fatalf("target bytes = %q, want committed qcow2 bytes", got)
+	}
+}
+
+func TestCreateFromReaderRejectsLateConvertOutputReplacement(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(t *testing.T, output string, external string)
+	}{
+		{name: "symlink", replace: func(t *testing.T, output string, external string) {
+			t.Helper()
+			if err := os.Remove(output); err != nil {
+				t.Fatalf("Remove(%s) error = %v, want nil", output, err)
+			}
+			if err := os.Symlink(external, output); err != nil {
+				t.Fatalf("Symlink(%s) error = %v, want nil", output, err)
+			}
+		}},
+		{name: "directory", replace: func(t *testing.T, output string, _ string) {
+			t.Helper()
+			if err := os.Remove(output); err != nil {
+				t.Fatalf("Remove(%s) error = %v, want nil", output, err)
+			}
+			if err := os.Mkdir(output, 0o700); err != nil {
+				t.Fatalf("Mkdir(%s) error = %v, want nil", output, err)
+			}
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			driver, runner := newTestDriver(t)
+			externalPath := filepath.Join(t.TempDir(), "external.qcow2")
+			writeFile(t, externalPath, "outside")
+			runner.beforeReturn = func(args []string) {
+				if len(args) > 0 && args[0] == "convert" {
+					tc.replace(t, args[len(args)-1], externalPath)
+				}
+			}
+			target := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+
+			created, err := driver.CreateFromReader(context.Background(), newCreateFromReaderRequest(strings.NewReader("raw"), diskformat.FormatRaw))
+			if !errors.Is(err, volume.ErrInvalidRequest) {
+				t.Fatalf("CreateFromReader() error = %v, want %v", err, volume.ErrInvalidRequest)
+			}
+			if created.ID != "" {
+				t.Fatalf("CreateFromReader() volume = %+v, want zero volume", created)
+			}
+			if _, statErr := os.Stat(target); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("target stat error = %v, want not exist", statErr)
+			}
+			got, readErr := os.ReadFile(externalPath)
+			if readErr != nil {
+				t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+			}
+			if string(got) != "outside" {
+				t.Fatalf("external bytes = %q, want outside", got)
+			}
+		})
 	}
 }
 
@@ -843,6 +1178,7 @@ func newCreateRequest() block.CreateRequest {
 		VMID:          "vm-a",
 		VMName:        "vm-a",
 		VolumeID:      volume.ID("vol-a"),
+		Role:          volume.RoleRoot,
 		DiskIndex:     0,
 		CapacityBytes: 1024,
 	}
@@ -876,6 +1212,25 @@ type fakeRunner struct {
 	beforeReturn func(args []string)
 }
 
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+type createTargetReader struct {
+	t       *testing.T
+	target  string
+	reader  *strings.Reader
+	created bool
+}
+
+func (r *createTargetReader) Read(p []byte) (int, error) {
+	if !r.created {
+		r.created = true
+		writeFile(r.t, r.target, "existing")
+	}
+	return r.reader.Read(p)
+}
+
 type fakeDirEntry struct {
 	name string
 	dir  bool
@@ -891,14 +1246,24 @@ func (r *fakeRunner) Run(ctx context.Context, binary string, args []string) (qem
 		return qemuimg.RunResult{}, err
 	}
 	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(args) > 0 && args[0] == "info" {
+		return qemuimg.RunResult{Stdout: `{"filename":"disk.qcow2","format":"qcow2","virtual-size":1024,"actual-size":512}`}, nil
+	}
+	if len(args) > 0 && args[0] == "create" {
+		if err := os.WriteFile(args[len(args)-2], []byte("qcow2"), 0o600); err != nil {
+			return qemuimg.RunResult{Stderr: err.Error()}, err
+		}
+	}
+	if len(args) > 0 && args[0] == "convert" {
+		if err := os.WriteFile(args[len(args)-1], []byte("qcow2"), 0o600); err != nil {
+			return qemuimg.RunResult{Stderr: err.Error()}, err
+		}
+	}
 	if r.beforeReturn != nil {
 		r.beforeReturn(args)
 	}
 	if r.err != nil {
 		return qemuimg.RunResult{Stderr: r.err.Error()}, r.err
-	}
-	if len(args) > 0 && args[0] == "info" {
-		return qemuimg.RunResult{Stdout: `{"filename":"disk.qcow2","format":"qcow2","virtual-size":1024,"actual-size":512}`}, nil
 	}
 	return qemuimg.RunResult{}, nil
 }
@@ -912,6 +1277,7 @@ func newCreateFromReaderRequest(reader io.Reader, format diskformat.Format) bloc
 		VMID:          "vm-a",
 		VMName:        "vm-a",
 		VolumeID:      volume.ID("vol-a"),
+		Role:          volume.RoleRoot,
 		DiskIndex:     0,
 		CapacityBytes: 0,
 	}
@@ -925,6 +1291,35 @@ func assertNoBackingArgs(t *testing.T, calls [][]string) {
 				t.Fatalf("qemu-img call %v contains forbidden backing/rebase arg %q", call, arg)
 			}
 		}
+	}
+}
+
+func assertPrivateTempFile(t *testing.T, path, volumeDir, wantBase string) {
+	t.Helper()
+	if path == filepath.Join(volumeDir, filepath.Base(volumeDir)+".tmp") {
+		t.Fatalf("temp path = %q, want private temp dir path", path)
+	}
+	if filepath.Base(path) != wantBase {
+		t.Fatalf("temp path base = %q, want %q", filepath.Base(path), wantBase)
+	}
+	tmpDir := filepath.Dir(path)
+	if filepath.Dir(tmpDir) != volumeDir {
+		t.Fatalf("temp dir parent = %q, want volume dir %q", filepath.Dir(tmpDir), volumeDir)
+	}
+	if !strings.HasPrefix(filepath.Base(tmpDir), ".govirta-tmp-") {
+		t.Fatalf("temp dir base = %q, want .govirta-tmp-*", filepath.Base(tmpDir))
+	}
+}
+
+func assertPrivateTempDirMode(t *testing.T, path string) {
+	t.Helper()
+	tmpDir := filepath.Dir(path)
+	info, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatalf("Stat(%s) error = %v, want nil", tmpDir, err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("temp dir mode = %o, want 0700", got)
 	}
 }
 

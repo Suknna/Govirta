@@ -180,6 +180,40 @@ func TestGetRejectsSymlinkImageRootWithoutReadingExternalFile(t *testing.T) {
 	}
 }
 
+func TestGetRejectsSymlinkImageLeafWithoutReadingExternalFile(t *testing.T) {
+	driver := newTestDriver(t)
+	externalPath := filepath.Join(t.TempDir(), "external.qcow2")
+	writeFile(t, externalPath, "outside")
+	path, _, err := driver.imagePath("leaf", diskformat.FormatQCOW2)
+	if err != nil {
+		t.Fatalf("imagePath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.Symlink(externalPath, path); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	r, err := driver.Get(context.Background(), image.GetRequest{ImageID: "leaf"})
+	if !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Get() error = %v, want ErrInvalidImage", err)
+	}
+	if r != nil {
+		if closeErr := r.Close(); closeErr != nil {
+			t.Fatalf("reader Close() error = %v", closeErr)
+		}
+		t.Fatal("Get() reader != nil, want nil")
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external image bytes = %q, want outside", got)
+	}
+}
+
 func TestDeleteRejectsSymlinkImageRootWithoutDeletingExternalFile(t *testing.T) {
 	driver := newTestDriver(t)
 	externalRoot := t.TempDir()
@@ -192,7 +226,7 @@ func TestDeleteRejectsSymlinkImageRootWithoutDeletingExternalFile(t *testing.T) 
 		t.Fatalf("Symlink() error = %v", err)
 	}
 
-	err := driver.Delete(context.Background(), image.DeleteRequest{ImageID: "escape"})
+	err := driver.Delete(context.Background(), image.DeleteRequest{ImageID: "escape", Format: diskformat.FormatRaw})
 	if !errors.Is(err, image.ErrInvalidImage) {
 		t.Fatalf("Delete() error = %v, want ErrInvalidImage", err)
 	}
@@ -202,6 +236,37 @@ func TestDeleteRejectsSymlinkImageRootWithoutDeletingExternalFile(t *testing.T) 
 	}
 	if string(got) != "outside" {
 		t.Fatalf("external image bytes = %q, want outside", got)
+	}
+}
+
+func TestDeleteRejectsSymlinkImageLeafWithoutDeletingExternalFile(t *testing.T) {
+	driver := newTestDriver(t)
+	externalPath := filepath.Join(t.TempDir(), "external.raw")
+	writeFile(t, externalPath, "outside")
+	path, _, err := driver.imagePath("leaf-delete", diskformat.FormatRaw)
+	if err != nil {
+		t.Fatalf("imagePath() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.Symlink(externalPath, path); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	err = driver.Delete(context.Background(), image.DeleteRequest{ImageID: "leaf-delete", Format: diskformat.FormatRaw})
+	if !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("Delete() error = %v, want ErrInvalidImage", err)
+	}
+	got, readErr := os.ReadFile(externalPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s) error = %v, want nil", externalPath, readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("external image bytes = %q, want outside", got)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("Lstat(%s) error = %v, want symlink retained", path, err)
 	}
 }
 
@@ -243,7 +308,7 @@ func TestOperationsRejectSymlinkPoolAncestorBeforeExternalAccess(t *testing.T) {
 			return err
 		}},
 		{name: "delete", run: func(ctx context.Context, driver *Driver) error {
-			return driver.Delete(ctx, image.DeleteRequest{ImageID: "escape"})
+			return driver.Delete(ctx, image.DeleteRequest{ImageID: "escape", Format: diskformat.FormatQCOW2})
 		}},
 		{name: "get actual used bytes", run: func(ctx context.Context, driver *Driver) error {
 			_, err := driver.GetActualUsedBytes(ctx)
@@ -300,7 +365,7 @@ func TestDeleteRemovesImageAndEmptyDir(t *testing.T) {
 	}
 	imageDir := filepath.Dir(path)
 
-	if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "delete-me"}); err != nil {
+	if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "delete-me", Format: diskformat.FormatRaw}); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
@@ -308,6 +373,67 @@ func TestDeleteRemovesImageAndEmptyDir(t *testing.T) {
 	}
 	if _, err := os.Stat(imageDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("image dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestDeleteRejectsMissingOrInvalidFormatWithoutDeletingImage(t *testing.T) {
+	driver := newTestDriver(t)
+	ctx := context.Background()
+	writeImage(t, driver, "format-required", diskformat.FormatRaw, "keep")
+	path, _, err := driver.imagePath("format-required", diskformat.FormatRaw)
+	if err != nil {
+		t.Fatalf("imagePath() error = %v", err)
+	}
+
+	for _, format := range []diskformat.Format{"", diskformat.Format("vmdk")} {
+		t.Run(string(format), func(t *testing.T) {
+			if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "format-required", Format: format}); !errors.Is(err, image.ErrInvalidImage) {
+				t.Fatalf("Delete() error = %v, want ErrInvalidImage", err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s) error = %v, want nil", path, err)
+			}
+			if string(got) != "keep" {
+				t.Fatalf("image bytes = %q, want keep", got)
+			}
+		})
+	}
+}
+
+func TestDeleteOnlyDeletesExplicitFormat(t *testing.T) {
+	driver := newTestDriver(t)
+	ctx := context.Background()
+	rawPath, _, err := driver.imagePath("dual", diskformat.FormatRaw)
+	if err != nil {
+		t.Fatalf("raw imagePath() error = %v", err)
+	}
+	qcow2Path, _, err := driver.imagePath("dual", diskformat.FormatQCOW2)
+	if err != nil {
+		t.Fatalf("qcow2 imagePath() error = %v", err)
+	}
+	writeFile(t, rawPath, "raw")
+	writeFile(t, qcow2Path, "qcow2")
+
+	if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "dual", Format: diskformat.FormatRaw}); err != nil {
+		t.Fatalf("Delete(raw) error = %v, want nil", err)
+	}
+	if _, err := os.Stat(rawPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("raw stat error = %v, want not exist", err)
+	}
+	if got, err := os.ReadFile(qcow2Path); err != nil || string(got) != "qcow2" {
+		t.Fatalf("qcow2 after Delete(raw) = %q, %v; want retained qcow2", got, err)
+	}
+
+	writeFile(t, rawPath, "raw")
+	if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "dual", Format: diskformat.FormatQCOW2}); err != nil {
+		t.Fatalf("Delete(qcow2) error = %v, want nil", err)
+	}
+	if _, err := os.Stat(qcow2Path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("qcow2 stat error = %v, want not exist", err)
+	}
+	if got, err := os.ReadFile(rawPath); err != nil || string(got) != "raw" {
+		t.Fatalf("raw after Delete(qcow2) = %q, %v; want retained raw", got, err)
 	}
 }
 
@@ -329,8 +455,8 @@ func TestDeleteRemovesCommittedImageStaleTempAndEmptyDir(t *testing.T) {
 		}
 		return originalRemoveCommittedTemp(path)
 	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("Close() error = %v, want nil after committed target link", err)
+	if err := w.Close(); !errors.Is(err, image.ErrImageCleanupFailed) {
+		t.Fatalf("Close() error = %v, want ErrImageCleanupFailed", err)
 	}
 	removeCommittedTemp = originalRemoveCommittedTemp
 	t.Cleanup(func() { removeCommittedTemp = originalRemoveCommittedTemp })
@@ -342,7 +468,7 @@ func TestDeleteRemovesCommittedImageStaleTempAndEmptyDir(t *testing.T) {
 	if used != 8 {
 		t.Fatalf("GetActualUsedBytes() before Delete = %d, want target and stale tmp usage", used)
 	}
-	if err := driver.Delete(context.Background(), image.DeleteRequest{ImageID: "cleanup-fail"}); err != nil {
+	if err := driver.Delete(context.Background(), image.DeleteRequest{ImageID: "cleanup-fail", Format: diskformat.FormatQCOW2}); err != nil {
 		t.Fatalf("Delete() error = %v, want nil", err)
 	}
 	if _, err := os.Stat(internalWriter.target); !errors.Is(err, fs.ErrNotExist) {
@@ -384,7 +510,10 @@ func TestDeleteReturnsDiagnosticErrorWhenStaleTempRemovalFails(t *testing.T) {
 	}
 	t.Cleanup(func() { removeCommittedTemp = originalRemoveCommittedTemp })
 
-	err = driver.Delete(ctx, image.DeleteRequest{ImageID: "stale-error"})
+	err = driver.Delete(ctx, image.DeleteRequest{ImageID: "stale-error", Format: diskformat.FormatRaw})
+	if !errors.Is(err, image.ErrImageCleanupFailed) {
+		t.Fatalf("Delete() error = %v, want ErrImageCleanupFailed", err)
+	}
 	if !errors.Is(err, staleErr) {
 		t.Fatalf("Delete() error = %v, want wrapped %v", err, staleErr)
 	}
@@ -411,7 +540,7 @@ func TestUnsafeImageIDRejectedAndCannotEscapeStorageRoot(t *testing.T) {
 			if _, err := driver.Get(ctx, image.GetRequest{ImageID: imageID}); !errors.Is(err, image.ErrInvalidImage) {
 				t.Fatalf("Get() error = %v, want ErrInvalidImage", err)
 			}
-			if err := driver.Delete(ctx, image.DeleteRequest{ImageID: imageID}); !errors.Is(err, image.ErrInvalidImage) {
+			if err := driver.Delete(ctx, image.DeleteRequest{ImageID: imageID, Format: diskformat.FormatQCOW2}); !errors.Is(err, image.ErrInvalidImage) {
 				t.Fatalf("Delete() error = %v, want ErrInvalidImage", err)
 			}
 		})
@@ -434,7 +563,7 @@ func TestCanceledContextReturnsBeforeFilesystemMutation(t *testing.T) {
 	if _, err := driver.Get(ctx, image.GetRequest{ImageID: "ctx"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Get() error = %v, want context.Canceled", err)
 	}
-	if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "ctx"}); !errors.Is(err, context.Canceled) {
+	if err := driver.Delete(ctx, image.DeleteRequest{ImageID: "ctx", Format: diskformat.FormatQCOW2}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Delete() error = %v, want context.Canceled", err)
 	}
 	if _, err := driver.GetActualUsedBytes(ctx); !errors.Is(err, context.Canceled) {
@@ -549,8 +678,8 @@ func TestClosePreservesCommittedImageWhenTempCleanupFails(t *testing.T) {
 		removeCommittedTemp = originalRemoveCommittedTemp
 	})
 
-	if err := w.Close(); err != nil {
-		t.Fatalf("Close() error = %v, want nil after committed target link", err)
+	if err := w.Close(); !errors.Is(err, image.ErrImageCleanupFailed) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("Close() error = %v, want cleanup failure wrapping %v", err, cleanupErr)
 	}
 	got, err := os.ReadFile(internalWriter.target)
 	if err != nil {

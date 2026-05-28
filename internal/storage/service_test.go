@@ -43,7 +43,7 @@ func TestCreateVolumeValidation(t *testing.T) {
 }
 
 func TestCreateRootVolumeAndCreateDataVolumeSetRoles(t *testing.T) {
-	service, _ := newTestVolumeService(t)
+	service, driver := newTestVolumeService(t)
 
 	root, err := service.CreateRootVolume(context.Background(), CreateRootVolumeRequest{
 		VMID:          "vm-a",
@@ -59,6 +59,9 @@ func TestCreateRootVolumeAndCreateDataVolumeSetRoles(t *testing.T) {
 	if root.Role != volume.RoleRoot {
 		t.Fatalf("root role = %q, want %q", root.Role, volume.RoleRoot)
 	}
+	if driver.lastCreate.Role != volume.RoleRoot {
+		t.Fatalf("root Create() role = %q, want %q", driver.lastCreate.Role, volume.RoleRoot)
+	}
 
 	data, err := service.CreateDataVolume(context.Background(), CreateDataVolumeRequest{
 		VMID:          "vm-a",
@@ -73,6 +76,9 @@ func TestCreateRootVolumeAndCreateDataVolumeSetRoles(t *testing.T) {
 	}
 	if data.Role != volume.RoleData {
 		t.Fatalf("data role = %q, want %q", data.Role, volume.RoleData)
+	}
+	if driver.lastCreate.Role != volume.RoleData {
+		t.Fatalf("data Create() role = %q, want %q", driver.lastCreate.Role, volume.RoleData)
 	}
 }
 
@@ -101,6 +107,48 @@ func TestCreateVolumeSameIdentityDifferentNameConflicts(t *testing.T) {
 	}
 	if driver.createCalls != 1 {
 		t.Fatalf("create driver calls = %d, want 1", driver.createCalls)
+	}
+}
+
+func TestCreateVolumeReturnsCommittedVolumeOnCleanupFailure(t *testing.T) {
+	service, driver := newTestVolumeService(t)
+	cleanupErr := errors.Join(volume.ErrVolumeCleanupFailed, errors.New("remove committed temp failed"))
+	driver.createErr = cleanupErr
+
+	created, err := service.CreateRootVolume(context.Background(), CreateRootVolumeRequest{
+		VMID:          "vm-a",
+		VMName:        "vm-a",
+		PoolName:      "pool-a",
+		Name:          "root",
+		DiskIndex:     0,
+		CapacityBytes: 10,
+	})
+	if !errors.Is(err, volume.ErrVolumeCleanupFailed) {
+		t.Fatalf("CreateRootVolume() error = %v, want %v", err, volume.ErrVolumeCleanupFailed)
+	}
+	if created.ID != volume.ID("vm-a-root-0") || created.Name != "root" || created.Role != volume.RoleRoot {
+		t.Fatalf("CreateRootVolume() volume = %+v, want committed root volume", created)
+	}
+}
+
+func TestCreateVolumeDropsVolumeOnOrdinaryFailure(t *testing.T) {
+	service, driver := newTestVolumeService(t)
+	createErr := errors.New("create failed")
+	driver.createErr = createErr
+
+	created, err := service.CreateRootVolume(context.Background(), CreateRootVolumeRequest{
+		VMID:          "vm-a",
+		VMName:        "vm-a",
+		PoolName:      "pool-a",
+		Name:          "root",
+		DiskIndex:     0,
+		CapacityBytes: 10,
+	})
+	if !errors.Is(err, createErr) {
+		t.Fatalf("CreateRootVolume() error = %v, want %v", err, createErr)
+	}
+	if created.ID != "" {
+		t.Fatalf("CreateRootVolume() volume = %+v, want zero volume", created)
 	}
 }
 
@@ -257,11 +305,11 @@ func TestImageServiceForwardsImageLifecycleRequests(t *testing.T) {
 		t.Fatalf("GetImage() forwarded request = calls:%d req:%+v, want cirros", driver.getCalls, driver.lastGet)
 	}
 
-	if err := service.DeleteImage(context.Background(), DeleteImageRequest{PoolName: "image-pool", ImageID: "cirros"}); err != nil {
+	if err := service.DeleteImage(context.Background(), DeleteImageRequest{PoolName: "image-pool", ImageID: "cirros", Format: diskformat.FormatQCOW2}); err != nil {
 		t.Fatalf("DeleteImage() error = %v, want nil", err)
 	}
-	if driver.deleteCalls != 1 || driver.lastDelete.ImageID != "cirros" {
-		t.Fatalf("DeleteImage() forwarded request = calls:%d req:%+v, want cirros", driver.deleteCalls, driver.lastDelete)
+	if driver.deleteCalls != 1 || driver.lastDelete.ImageID != "cirros" || driver.lastDelete.Format != diskformat.FormatQCOW2 {
+		t.Fatalf("DeleteImage() forwarded request = calls:%d req:%+v, want qcow2 cirros", driver.deleteCalls, driver.lastDelete)
 	}
 }
 
@@ -310,6 +358,37 @@ func TestCreateRootVolumeFromReaderSetsRoleAndDeterministicID(t *testing.T) {
 	}
 	if driver.createFromReaderCalls != 1 || driver.lastCreateFromReader.Format != diskformat.FormatQCOW2 || driver.lastCreateFromReader.Reader == nil {
 		t.Fatalf("CreateFromReader() forwarded request = calls:%d req:%+v, want qcow2 reader", driver.createFromReaderCalls, driver.lastCreateFromReader)
+	}
+	if driver.lastCreateFromReader.Role != volume.RoleRoot {
+		t.Fatalf("CreateFromReader() role = %q, want %q", driver.lastCreateFromReader.Role, volume.RoleRoot)
+	}
+}
+
+func TestCreateRootVolumeFromReaderReturnsCommittedVolumeOnCleanupFailure(t *testing.T) {
+	service, driver := newTestVolumeService(t)
+	cleanupErr := errors.Join(volume.ErrVolumeCleanupFailed, errors.New("remove committed temp failed"))
+	driver.createFromReaderErr = cleanupErr
+
+	created, err := service.CreateRootVolumeFromReader(context.Background(), newCreateRootVolumeFromReaderRequest(func(req *CreateRootVolumeFromReaderRequest) {}))
+	if !errors.Is(err, volume.ErrVolumeCleanupFailed) {
+		t.Fatalf("CreateRootVolumeFromReader() error = %v, want %v", err, volume.ErrVolumeCleanupFailed)
+	}
+	if created.ID != volume.ID("vm-a-root-0") || created.Name != "root" || created.Role != volume.RoleRoot {
+		t.Fatalf("CreateRootVolumeFromReader() volume = %+v, want committed root volume", created)
+	}
+}
+
+func TestCreateRootVolumeFromReaderDropsVolumeOnOrdinaryFailure(t *testing.T) {
+	service, driver := newTestVolumeService(t)
+	createErr := errors.New("create from reader failed")
+	driver.createFromReaderErr = createErr
+
+	created, err := service.CreateRootVolumeFromReader(context.Background(), newCreateRootVolumeFromReaderRequest(func(req *CreateRootVolumeFromReaderRequest) {}))
+	if !errors.Is(err, createErr) {
+		t.Fatalf("CreateRootVolumeFromReader() error = %v, want %v", err, createErr)
+	}
+	if created.ID != "" {
+		t.Fatalf("CreateRootVolumeFromReader() volume = %+v, want zero volume", created)
 	}
 }
 
@@ -418,7 +497,10 @@ type storageLifecycleDriver struct {
 	deleteCalls           int
 	publishCalls          int
 	unpublishCalls        int
+	lastCreate            block.CreateRequest
 	lastCreateFromReader  block.CreateFromReaderRequest
+	createErr             error
+	createFromReaderErr   error
 }
 
 func (d *storageLifecycleDriver) DriverInfo(ctx context.Context) (block.DriverInfo, error) {
@@ -433,16 +515,18 @@ func (d *storageLifecycleDriver) Create(ctx context.Context, req block.CreateReq
 		return volume.Volume{}, err
 	}
 	d.createCalls++
+	d.lastCreate = req
 	return volume.Volume{
 		ID:            req.VolumeID,
 		Name:          req.Name,
 		VMID:          req.VMID,
 		VMName:        req.VMName,
 		PoolName:      req.PoolName,
+		Role:          req.Role,
 		DiskIndex:     req.DiskIndex,
 		CapacityBytes: req.CapacityBytes,
 		State:         volume.StateAvailable,
-	}, nil
+	}, d.createErr
 }
 
 func (d *storageLifecycleDriver) CreateFromReader(ctx context.Context, req block.CreateFromReaderRequest) (volume.Volume, error) {
@@ -457,10 +541,11 @@ func (d *storageLifecycleDriver) CreateFromReader(ctx context.Context, req block
 		VMID:          req.VMID,
 		VMName:        req.VMName,
 		PoolName:      req.PoolName,
+		Role:          req.Role,
 		DiskIndex:     req.DiskIndex,
 		CapacityBytes: req.CapacityBytes,
 		State:         volume.StateAvailable,
-	}, nil
+	}, d.createFromReaderErr
 }
 
 func (d *storageLifecycleDriver) Delete(ctx context.Context, vol volume.Volume) error {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -93,14 +94,17 @@ func (s *VolumeService) CreateVolume(ctx context.Context, req CreateVolumeReques
 		VMID:          req.VMID,
 		VMName:        req.VMName,
 		VolumeID:      volID,
+		Role:          req.Spec.Role,
 		DiskIndex:     req.Spec.DiskIndex,
 		CapacityBytes: req.Spec.CapacityBytes,
 		ReadOnly:      req.Spec.ReadOnly,
 	})
 	if err != nil {
+		if errors.Is(err, volume.ErrVolumeCleanupFailed) {
+			return created, err
+		}
 		return volume.Volume{}, err
 	}
-	created.Role = req.Spec.Role
 	return created, nil
 }
 
@@ -141,14 +145,17 @@ func (s *VolumeService) CreateRootVolumeFromReader(ctx context.Context, req Crea
 		VMID:          req.VMID,
 		VMName:        req.VMName,
 		VolumeID:      volID,
+		Role:          volume.RoleRoot,
 		DiskIndex:     req.DiskIndex,
 		CapacityBytes: req.CapacityBytes,
 		ReadOnly:      req.ReadOnly,
 	})
 	if err != nil {
+		if errors.Is(err, volume.ErrVolumeCleanupFailed) {
+			return created, err
+		}
 		return volume.Volume{}, err
 	}
-	created.Role = volume.RoleRoot
 	return created, nil
 }
 

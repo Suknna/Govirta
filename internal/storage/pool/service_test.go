@@ -32,14 +32,14 @@ func (d fakeDriver) Create(ctx context.Context, req block.CreateRequest) (volume
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
-	return volume.Volume{ID: req.VolumeID, Name: req.Name, PoolName: req.PoolName, CapacityBytes: req.CapacityBytes}, nil
+	return volume.Volume{ID: req.VolumeID, Name: req.Name, PoolName: req.PoolName, Role: req.Role, CapacityBytes: req.CapacityBytes}, nil
 }
 
 func (d fakeDriver) CreateFromReader(ctx context.Context, req block.CreateFromReaderRequest) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
-	return volume.Volume{ID: req.VolumeID, Name: req.Name, PoolName: req.PoolName, CapacityBytes: req.CapacityBytes}, nil
+	return volume.Volume{ID: req.VolumeID, Name: req.Name, PoolName: req.PoolName, Role: req.Role, CapacityBytes: req.CapacityBytes}, nil
 }
 
 func (d fakeDriver) Delete(ctx context.Context, vol volume.Volume) error {
@@ -561,6 +561,62 @@ func TestCreateVolumeAdmitsCapacityAndWritesIndex(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeCommittedCleanupFailureWritesIndexAndReturnsError(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	driver := &lifecycleDriver{createErr: errors.Join(volume.ErrVolumeCleanupFailed, cleanupErr)}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	req := newCreateRequest("vol-a", "vol-a", 50)
+
+	created, err := service.CreateVolume(context.Background(), "pool-a", req)
+	if !errors.Is(err, volume.ErrVolumeCleanupFailed) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("CreateVolume() error = %v, want cleanup sentinel and cleanup error", err)
+	}
+	if created.ID != "vol-a" || created.Name != "vol-a" || created.State != volume.StateAvailable {
+		t.Fatalf("CreateVolume() = %+v, want indexed available volume", created)
+	}
+	registered, err := service.GetPool("pool-a")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v, want nil", err)
+	}
+	if _, exists := registered.volumes["vol-a"]; !exists {
+		t.Fatalf("indexed volume missing after cleanup failure")
+	}
+	usage, err := service.GetPoolUsage(context.Background(), "pool-a")
+	if err != nil {
+		t.Fatalf("GetPoolUsage() error = %v, want nil", err)
+	}
+	if usage.AllocatedBytes != 50 {
+		t.Fatalf("AllocatedBytes = %d, want 50", usage.AllocatedBytes)
+	}
+	retried, err := service.CreateVolume(context.Background(), "pool-a", req)
+	if err != nil {
+		t.Fatalf("CreateVolume() retry error = %v, want nil", err)
+	}
+	if retried.ID != "vol-a" || driver.createCalls != 1 {
+		t.Fatalf("retry volume/calls = %+v/%d, want existing volume and one driver call", retried, driver.createCalls)
+	}
+}
+
+func TestCreateVolumeRejectsMismatchedPoolNameBeforeDriver(t *testing.T) {
+	driver := &lifecycleDriver{}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	req := newCreateRequest("vol-a", "vol-a", 50)
+	req.PoolName = "pool-b"
+	if _, err := service.CreateVolume(context.Background(), "pool-a", req); !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("CreateVolume() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if driver.createCalls != 0 {
+		t.Fatalf("create driver calls = %d, want 0", driver.createCalls)
+	}
+}
+
 func TestCreateVolumeFromReaderAdmitsCapacityAndWritesIndex(t *testing.T) {
 	driver := &lifecycleDriver{}
 	service := NewService()
@@ -578,6 +634,62 @@ func TestCreateVolumeFromReaderAdmitsCapacityAndWritesIndex(t *testing.T) {
 	}
 	if driver.createFromReaderCalls != 1 {
 		t.Fatalf("create from reader driver calls = %d, want 1", driver.createFromReaderCalls)
+	}
+}
+
+func TestCreateVolumeFromReaderCommittedCleanupFailureWritesIndexAndReturnsError(t *testing.T) {
+	cleanupErr := errors.New("reader cleanup failed")
+	driver := &lifecycleDriver{createFromReaderErr: errors.Join(volume.ErrVolumeCleanupFailed, cleanupErr)}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	req := newCreateFromReaderRequest("vol-a", "vol-a", 50)
+
+	created, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req)
+	if !errors.Is(err, volume.ErrVolumeCleanupFailed) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("CreateVolumeFromReader() error = %v, want cleanup sentinel and cleanup error", err)
+	}
+	if created.ID != "vol-a" || created.Name != "vol-a" || created.State != volume.StateAvailable {
+		t.Fatalf("CreateVolumeFromReader() = %+v, want indexed available volume", created)
+	}
+	registered, err := service.GetPool("pool-a")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v, want nil", err)
+	}
+	if _, exists := registered.volumes["vol-a"]; !exists {
+		t.Fatalf("indexed volume missing after cleanup failure")
+	}
+	usage, err := service.GetPoolUsage(context.Background(), "pool-a")
+	if err != nil {
+		t.Fatalf("GetPoolUsage() error = %v, want nil", err)
+	}
+	if usage.AllocatedBytes != 50 {
+		t.Fatalf("AllocatedBytes = %d, want 50", usage.AllocatedBytes)
+	}
+	retried, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req)
+	if err != nil {
+		t.Fatalf("CreateVolumeFromReader() retry error = %v, want nil", err)
+	}
+	if retried.ID != "vol-a" || driver.createFromReaderCalls != 1 {
+		t.Fatalf("retry volume/calls = %+v/%d, want existing volume and one driver call", retried, driver.createFromReaderCalls)
+	}
+}
+
+func TestCreateVolumeFromReaderRejectsMismatchedPoolNameBeforeDriver(t *testing.T) {
+	driver := &lifecycleDriver{}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	req := newCreateFromReaderRequest("vol-a", "vol-a", 50)
+	req.PoolName = "pool-b"
+	if _, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req); !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("CreateVolumeFromReader() error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if driver.createFromReaderCalls != 0 {
+		t.Fatalf("create from reader driver calls = %d, want 0", driver.createFromReaderCalls)
 	}
 }
 
@@ -599,6 +711,13 @@ func TestCreateVolumeFromReaderDuplicateSameSpecIsIdempotent(t *testing.T) {
 	}
 	if second.ID != first.ID || second.Name != first.Name || second.CapacityBytes != first.CapacityBytes {
 		t.Fatalf("second volume = %+v, want %+v", second, first)
+	}
+	if second.Role != volume.RoleRoot {
+		t.Fatalf("second role = %q, want %q", second.Role, volume.RoleRoot)
+	}
+	req.Role = volume.RoleData
+	if _, err := service.CreateVolumeFromReader(context.Background(), "pool-a", req); !errors.Is(err, volume.ErrVolumeConflict) {
+		t.Fatalf("CreateVolumeFromReader() role conflict error = %v, want %v", err, volume.ErrVolumeConflict)
 	}
 	if driver.createFromReaderCalls != 1 {
 		t.Fatalf("create from reader driver calls = %d, want 1", driver.createFromReaderCalls)
@@ -695,7 +814,9 @@ func TestCreateVolumeRejectsFilePool(t *testing.T) {
 		t.Fatalf("RegisterPool() error = %v, want nil", err)
 	}
 
-	_, err := service.CreateVolume(context.Background(), "file-pool", newCreateRequest("vol-a", "vol-a", 50))
+	req := newCreateRequest("vol-a", "vol-a", 50)
+	req.PoolName = "file-pool"
+	_, err := service.CreateVolume(context.Background(), "file-pool", req)
 	if !errors.Is(err, volume.ErrUnsupported) {
 		t.Fatalf("CreateVolume(file pool) error = %v, want %v", err, volume.ErrUnsupported)
 	}
@@ -960,6 +1081,41 @@ func TestPutImageCloseFailureCancelsAndReleasesCapacity(t *testing.T) {
 	}
 }
 
+func TestPutImageCommittedCleanupFailureKeepsReadyImage(t *testing.T) {
+	cleanupErr := fmt.Errorf("%w: remove temp failed", image.ErrImageCleanupFailed)
+	service := NewService()
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, &fakeImageDriver{nextWriterCloseErr: cleanupErr})); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 40))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if _, err := writer.Write([]byte("image-bytes")); err != nil {
+		t.Fatalf("Write() error = %v, want nil", err)
+	}
+	if err := writer.Close(); !errors.Is(err, image.ErrImageCleanupFailed) {
+		t.Fatalf("Close() error = %v, want ErrImageCleanupFailed", err)
+	}
+
+	reader, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"})
+	if err != nil {
+		t.Fatalf("GetImage() after cleanup failure error = %v, want nil", err)
+	}
+	got, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		t.Fatalf("ReadAll() error = %v, want nil", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("reader Close() error = %v, want nil", closeErr)
+	}
+	if string(got) != "image-bytes" {
+		t.Fatalf("GetImage() bytes = %q, want image-bytes", got)
+	}
+}
+
 func TestPutImageCanceledContextDoesNotCallDriver(t *testing.T) {
 	service := NewService()
 	imageDriver := &fakeImageDriver{}
@@ -979,7 +1135,8 @@ func TestPutImageCanceledContextDoesNotCallDriver(t *testing.T) {
 
 func TestDeleteImageRemovesReadyImageAndFreesAllocation(t *testing.T) {
 	service := NewService()
-	if err := service.RegisterPool(newTestFilePool("file-pool", 100, &fakeImageDriver{})); err != nil {
+	imageDriver := &fakeImageDriver{}
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
 		t.Fatalf("RegisterPool() error = %v, want nil", err)
 	}
 	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 80))
@@ -990,11 +1147,14 @@ func TestDeleteImageRemovesReadyImageAndFreesAllocation(t *testing.T) {
 		t.Fatalf("Close() error = %v, want nil", err)
 	}
 
-	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a"}); err != nil {
+	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a", Format: diskformat.FormatQCOW2}); err != nil {
 		t.Fatalf("DeleteImage() error = %v, want nil", err)
 	}
 	if _, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"}); !errors.Is(err, image.ErrImageNotFound) {
 		t.Fatalf("GetImage() deleted image error = %v, want %v", err, image.ErrImageNotFound)
+	}
+	if imageDriver.lastDelete.Format != diskformat.FormatQCOW2 {
+		t.Fatalf("DeleteImage() driver format = %q, want %q", imageDriver.lastDelete.Format, diskformat.FormatQCOW2)
 	}
 	writer, err = service.PutImage(context.Background(), "file-pool", newPutRequest("image-b", 100))
 	if err != nil {
@@ -1002,6 +1162,46 @@ func TestDeleteImageRemovesReadyImageAndFreesAllocation(t *testing.T) {
 	}
 	if err := writer.Cancel(); err != nil {
 		t.Fatalf("Cancel() image-b error = %v, want nil", err)
+	}
+}
+
+func TestDeleteImageRejectsFormatMismatchBeforeDeleting(t *testing.T) {
+	service := NewService()
+	imageDriver := &fakeImageDriver{}
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	req := newPutRequest("image-a", 40)
+	req.Format = diskformat.FormatRaw
+	writer, err := service.PutImage(context.Background(), "file-pool", req)
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+
+	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a", Format: diskformat.FormatQCOW2}); !errors.Is(err, image.ErrInvalidImage) {
+		t.Fatalf("DeleteImage() error = %v, want %v", err, image.ErrInvalidImage)
+	}
+	if imageDriver.deleteCalls != 0 {
+		t.Fatalf("image driver Delete calls = %d, want 0", imageDriver.deleteCalls)
+	}
+
+	registered, err := service.GetPool("file-pool")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v, want nil", err)
+	}
+	record, exists := registered.images["image-a"]
+	if !exists {
+		t.Fatalf("image record missing after rejected DeleteImage")
+	}
+	if record.State != ImageStateReady {
+		t.Fatalf("image state = %q, want %q", record.State, ImageStateReady)
+	}
+	if record.Format != diskformat.FormatRaw {
+		t.Fatalf("image format = %q, want %q", record.Format, diskformat.FormatRaw)
 	}
 }
 
@@ -1021,7 +1221,7 @@ func TestDeleteImageInProgressRejectsDuplicatePut(t *testing.T) {
 
 	deleteDone := make(chan error, 1)
 	go func() {
-		deleteDone <- service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a"})
+		deleteDone <- service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a", Format: diskformat.FormatQCOW2})
 	}()
 	<-imageDriver.deleteStarted
 
@@ -1055,7 +1255,7 @@ func TestDeleteImageFailureRestoresReadyRecord(t *testing.T) {
 		t.Fatalf("Close() error = %v, want nil", err)
 	}
 
-	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a"}); !errors.Is(err, deleteErr) {
+	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a", Format: diskformat.FormatQCOW2}); !errors.Is(err, deleteErr) {
 		t.Fatalf("DeleteImage() error = %v, want %v", err, deleteErr)
 	}
 	reader, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"})
@@ -1064,6 +1264,39 @@ func TestDeleteImageFailureRestoresReadyRecord(t *testing.T) {
 	}
 	if err := reader.Close(); err != nil {
 		t.Fatalf("reader Close() error = %v, want nil", err)
+	}
+}
+
+func TestDeleteImageCommittedCleanupFailureDeletesMetadataAndFreesAllocation(t *testing.T) {
+	cleanupErr := fmt.Errorf("%w: remove temp failed", image.ErrImageCleanupFailed)
+	imageDriver := &fakeImageDriver{deleteErr: cleanupErr, deleteErrCommitted: true}
+	service := NewService()
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, imageDriver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 100))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if _, err := writer.Write([]byte("image-bytes")); err != nil {
+		t.Fatalf("Write() error = %v, want nil", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+
+	if err := service.DeleteImage(context.Background(), "file-pool", image.DeleteRequest{ImageID: "image-a", Format: diskformat.FormatQCOW2}); !errors.Is(err, image.ErrImageCleanupFailed) {
+		t.Fatalf("DeleteImage() error = %v, want ErrImageCleanupFailed", err)
+	}
+	if _, err := service.GetImage(context.Background(), "file-pool", image.GetRequest{ImageID: "image-a"}); !errors.Is(err, image.ErrImageNotFound) {
+		t.Fatalf("GetImage() deleted image error = %v, want %v", err, image.ErrImageNotFound)
+	}
+	writer, err = service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 100))
+	if err != nil {
+		t.Fatalf("PutImage() same ID after cleanup failure error = %v, want nil", err)
+	}
+	if err := writer.Cancel(); err != nil {
+		t.Fatalf("Cancel() image-a error = %v, want nil", err)
 	}
 }
 
@@ -1085,6 +1318,43 @@ func TestCreateVolumeDuplicateSameSpecIsIdempotent(t *testing.T) {
 	}
 	if second.ID != first.ID || second.Name != first.Name || second.CapacityBytes != first.CapacityBytes {
 		t.Fatalf("second volume = %+v, want %+v", second, first)
+	}
+	if driver.createCalls != 1 {
+		t.Fatalf("create driver calls = %d, want 1", driver.createCalls)
+	}
+}
+
+func TestCreateVolumeRoleIsStoredAndPartOfIdempotency(t *testing.T) {
+	driver := &lifecycleDriver{}
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, driver)); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	req := newCreateRequest("vol-a", "vol-a", 50)
+	req.Role = volume.RoleData
+	created, err := service.CreateVolume(context.Background(), "pool-a", req)
+	if err != nil {
+		t.Fatalf("CreateVolume() error = %v, want nil", err)
+	}
+	if created.Role != volume.RoleData {
+		t.Fatalf("created role = %q, want %q", created.Role, volume.RoleData)
+	}
+
+	registered, err := service.GetPool("pool-a")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v, want nil", err)
+	}
+	if stored := registered.volumes["vol-a"]; stored.Role != volume.RoleData {
+		t.Fatalf("stored role = %q, want %q", stored.Role, volume.RoleData)
+	}
+
+	if _, err := service.CreateVolume(context.Background(), "pool-a", req); err != nil {
+		t.Fatalf("CreateVolume() idempotent error = %v, want nil", err)
+	}
+	req.Role = volume.RoleRoot
+	if _, err := service.CreateVolume(context.Background(), "pool-a", req); !errors.Is(err, volume.ErrVolumeConflict) {
+		t.Fatalf("CreateVolume() role conflict error = %v, want %v", err, volume.ErrVolumeConflict)
 	}
 	if driver.createCalls != 1 {
 		t.Fatalf("create driver calls = %d, want 1", driver.createCalls)
@@ -1513,6 +1783,8 @@ type lifecycleDriver struct {
 	publishCalls          int
 	unpublishCalls        int
 	createID              volume.ID
+	createErr             error
+	createFromReaderErr   error
 	publishStarted        chan struct{}
 	releasePublish        chan struct{}
 }
@@ -1542,7 +1814,7 @@ func (d *lifecycleDriver) Create(ctx context.Context, req block.CreateRequest) (
 		DiskIndex:     req.DiskIndex,
 		CapacityBytes: req.CapacityBytes,
 		State:         volume.StateAvailable,
-	}, nil
+	}, d.createErr
 }
 
 func (d *lifecycleDriver) CreateFromReader(ctx context.Context, req block.CreateFromReaderRequest) (volume.Volume, error) {
@@ -1563,7 +1835,7 @@ func (d *lifecycleDriver) CreateFromReader(ctx context.Context, req block.Create
 		DiskIndex:     req.DiskIndex,
 		CapacityBytes: req.CapacityBytes,
 		State:         volume.StateAvailable,
-	}, nil
+	}, d.createFromReaderErr
 }
 
 func (d *lifecycleDriver) Delete(ctx context.Context, vol volume.Volume) error {
@@ -1634,6 +1906,7 @@ func newCreateRequest(name string, id volume.ID, capacityBytes int64) block.Crea
 		VMID:          "vm-a",
 		VMName:        "vm-a",
 		VolumeID:      id,
+		Role:          volume.RoleRoot,
 		DiskIndex:     0,
 		CapacityBytes: capacityBytes,
 	}
@@ -1648,6 +1921,7 @@ func newCreateFromReaderRequest(name string, id volume.ID, capacityBytes int64) 
 		VMID:          "vm-a",
 		VMName:        "vm-a",
 		VolumeID:      id,
+		Role:          volume.RoleRoot,
 		DiskIndex:     0,
 		CapacityBytes: capacityBytes,
 	}
@@ -1666,7 +1940,9 @@ type fakeImageDriver struct {
 	deleteErr           error
 	deleteStarted       chan struct{}
 	releaseDelete       chan struct{}
+	lastDelete          image.DeleteRequest
 	images              map[string][]byte
+	deleteErrCommitted  bool
 }
 
 func (d *fakeImageDriver) DriverInfo(ctx context.Context) (image.DriverInfo, error) {
@@ -1703,6 +1979,7 @@ func (d *fakeImageDriver) Delete(ctx context.Context, req image.DeleteRequest) e
 		return err
 	}
 	d.deleteCalls++
+	d.lastDelete = req
 	if d.deleteStarted != nil {
 		close(d.deleteStarted)
 	}
@@ -1710,6 +1987,10 @@ func (d *fakeImageDriver) Delete(ctx context.Context, req image.DeleteRequest) e
 		<-d.releaseDelete
 	}
 	if d.deleteErr != nil {
+		if !d.deleteErrCommitted {
+			return d.deleteErr
+		}
+		delete(d.images, req.ImageID)
 		return d.deleteErr
 	}
 	delete(d.images, req.ImageID)
@@ -1736,6 +2017,13 @@ func (w *fakeImageWriter) Write(p []byte) (int, error) {
 }
 
 func (w *fakeImageWriter) Close() error {
+	if errors.Is(w.closeErr, image.ErrImageCleanupFailed) {
+		if w.driver.images == nil {
+			w.driver.images = make(map[string][]byte)
+		}
+		w.driver.images[w.imageID] = append([]byte(nil), w.data.Bytes()...)
+		return w.closeErr
+	}
 	if w.closeErr != nil {
 		return w.closeErr
 	}

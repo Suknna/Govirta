@@ -28,6 +28,8 @@ var walkDir = filepath.WalkDir
 
 var removeCommittedTemp = os.Remove
 
+const noFollowSupported = true
+
 var _ image.Driver = (*Driver)(nil)
 
 // Config configures a host-local file image driver for one storage pool.
@@ -124,7 +126,7 @@ func (d *Driver) Get(ctx context.Context, req image.GetRequest) (io.ReadCloser, 
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.Open(path)
+	file, err := openRegularImage(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s", image.ErrImageNotFound, req.ImageID)
@@ -139,7 +141,7 @@ func (d *Driver) Delete(ctx context.Context, req image.DeleteRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !safeName(req.ImageID) {
+	if !safeName(req.ImageID) || !req.Format.Valid() {
 		return image.ErrInvalidImage
 	}
 	if err := d.ensureExistingImageRoot(d.imageRoot()); err != nil {
@@ -148,8 +150,20 @@ func (d *Driver) Delete(ctx context.Context, req image.DeleteRequest) error {
 		}
 		return err
 	}
-	path, err := d.existingImagePath(req.ImageID)
+	path, imageDir, err := d.imagePath(req.ImageID, req.Format)
 	if err != nil {
+		return err
+	}
+	if err := ensureExistingImageDir(imageDir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", image.ErrImageNotFound, req.ImageID)
+		}
+		return err
+	}
+	if err := ensureDeletableImageFile(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", image.ErrImageNotFound, req.ImageID)
+		}
 		return err
 	}
 	if err := os.Remove(path); err != nil {
@@ -158,10 +172,19 @@ func (d *Driver) Delete(ctx context.Context, req image.DeleteRequest) error {
 		}
 		return err
 	}
-	if err := removeCommittedTemp(path + ".tmp"); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove stale committed image temp %s: %w", path+".tmp", err)
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("%w: image path still exists after delete: %s", image.ErrInvalidImage, path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
-	return removeDirIfEmpty(filepath.Dir(path))
+	cleanupErr := errors.Join(
+		cleanupCommittedTemp(path+".tmp"),
+		cleanupImageDir(filepath.Dir(path)),
+	)
+	if cleanupErr != nil {
+		return errors.Join(image.ErrImageCleanupFailed, cleanupErr)
+	}
+	return nil
 }
 
 // GetActualUsedBytes walks the driver image root and sums regular file sizes.
@@ -249,9 +272,7 @@ func (w *imageWriter) Close() error {
 	}
 	removeErr := removeCommittedTemp(w.tmp)
 	if removeErr != nil {
-		// The no-overwrite link above is the commit point. Returning a cleanup
-		// error here would make upper layers roll back metadata for an image that
-		// is already durable at target, so tmp cleanup is intentionally best effort.
+		return fmt.Errorf("%w: remove committed image temp %s: %w", image.ErrImageCleanupFailed, w.tmp, removeErr)
 	}
 	return nil
 }
@@ -302,7 +323,7 @@ func (d *Driver) existingImagePath(imageID string) (string, error) {
 		}
 		info, err := os.Lstat(path)
 		if err == nil {
-			if info.IsDir() || !info.Mode().IsRegular() {
+			if info.Mode()&os.ModeSymlink != 0 || info.IsDir() || !info.Mode().IsRegular() {
 				return "", image.ErrInvalidImage
 			}
 			return path, nil
@@ -404,6 +425,41 @@ func ensureExistingImageDirPath(path string) error {
 	return nil
 }
 
+func openRegularImage(path string) (*os.File, error) {
+	flags := os.O_RDONLY
+	if noFollowSupported {
+		flags |= syscall.O_NOFOLLOW
+	}
+	file, err := os.OpenFile(path, flags, 0)
+	if err != nil {
+		if noFollowSupported && errors.Is(err, syscall.ELOOP) {
+			return nil, image.ErrInvalidImage
+		}
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		closeErr := file.Close()
+		return nil, errors.Join(err, closeErr)
+	}
+	if !info.Mode().IsRegular() {
+		closeErr := file.Close()
+		return nil, errors.Join(image.ErrInvalidImage, closeErr)
+	}
+	return file, nil
+}
+
+func ensureDeletableImageFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.IsDir() || !info.Mode().IsRegular() {
+		return image.ErrInvalidImage
+	}
+	return nil
+}
+
 func cleanStorageRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" || hasControlRune(root) || strings.ContainsRune(root, 0) {
 		return "", volume.ErrInvalidRequest
@@ -453,6 +509,20 @@ func cleanupPendingImage(tmp, imageDir string) error {
 	removeTmpErr := os.Remove(tmp)
 	removeDirErr := removeDirIfEmpty(imageDir)
 	return errors.Join(removeTmpErr, removeDirErr)
+}
+
+func cleanupCommittedTemp(path string) error {
+	if err := removeCommittedTemp(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove stale committed image temp %s: %w", path, err)
+	}
+	return nil
+}
+
+func cleanupImageDir(path string) error {
+	if err := removeDirIfEmpty(path); err != nil {
+		return fmt.Errorf("remove empty image dir %s: %w", path, err)
+	}
+	return nil
 }
 
 func removeDirIfEmpty(path string) error {

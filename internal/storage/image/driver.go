@@ -15,6 +15,8 @@ var (
 	ErrImageExists = errors.New("image already exists")
 	// ErrImageNotFound marks lookup or delete requests for unknown images.
 	ErrImageNotFound = errors.New("image not found")
+	// ErrImageCleanupFailed marks post-commit cleanup failures for image writes.
+	ErrImageCleanupFailed = errors.New("image cleanup failed")
 )
 
 // DriverInfo describes an image backend implementation.
@@ -60,4 +62,5 @@ type GetRequest struct {
 // DeleteRequest identifies an image delete operation inside a file pool.
 type DeleteRequest struct {
 	ImageID string
+	Format  diskformat.Format
 }
