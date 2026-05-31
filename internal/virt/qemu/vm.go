@@ -10,6 +10,7 @@ import (
 	"github.com/suknna/govirta/internal/virt/qemu/blockdev"
 	"github.com/suknna/govirta/internal/virt/qemu/chardev"
 	"github.com/suknna/govirta/internal/virt/qemu/cpu"
+	"github.com/suknna/govirta/internal/virt/qemu/device"
 	"github.com/suknna/govirta/internal/virt/qemu/display"
 	"github.com/suknna/govirta/internal/virt/qemu/firmware"
 	"github.com/suknna/govirta/internal/virt/qemu/machine"
@@ -166,6 +167,8 @@ type Builder struct {
 	memory     *Memory
 	ordered    []Argument
 	display    display.Display
+	noNIC      bool
+	network    bool
 	noReboot   bool
 	noShutdown bool
 	msg        *Msg
@@ -244,11 +247,16 @@ func (b *Builder) AddDevice(v Device) *Builder {
 		b.ordered = append(b.ordered, typedArg("-device", func() (string, error) { return "", errors.New("device is required") }))
 		return b
 	}
+	switch v.(type) {
+	case device.VirtioNetPCI, *device.VirtioNetPCI:
+		b.network = true
+	}
 	b.ordered = append(b.ordered, typedArg("-device", v.Arg))
 	return b
 }
 
 func (b *Builder) AddNetdev(v netdev.Tap) *Builder {
+	b.network = true
 	b.ordered = append(b.ordered, typedArg("-netdev", v.Arg))
 	return b
 }
@@ -280,10 +288,13 @@ func (b *Builder) AddArgument(v Argument) *Builder {
 }
 
 func (b *Builder) Display(v display.Display) *Builder { b.display = v; return b }
-func (b *Builder) NoReboot() *Builder                 { b.noReboot = true; return b }
-func (b *Builder) NoShutdown() *Builder               { b.noShutdown = true; return b }
-func (b *Builder) Msg(v Msg) *Builder                 { b.msg = &v; return b }
-func (b *Builder) PidFile(path string) *Builder       { b.pidFile = path; return b }
+
+// NoNIC renders an explicit -nic none so callers do not rely on QEMU network defaults.
+func (b *Builder) NoNIC() *Builder              { b.noNIC = true; return b }
+func (b *Builder) NoReboot() *Builder           { b.noReboot = true; return b }
+func (b *Builder) NoShutdown() *Builder         { b.noShutdown = true; return b }
+func (b *Builder) Msg(v Msg) *Builder           { b.msg = &v; return b }
+func (b *Builder) PidFile(path string) *Builder { b.pidFile = path; return b }
 
 func (b *Builder) Build() (VM, error) {
 	if b.err != nil {
@@ -321,6 +332,9 @@ func (b *Builder) Build() (VM, error) {
 	if b.machine != nil && !b.machine.Profile.IsSupported() {
 		return VM{}, fmt.Errorf("%w: unsupported machine profile", ErrInvalidVM)
 	}
+	if b.noNIC && b.network {
+		return VM{}, fmt.Errorf("%w: NoNIC cannot be combined with explicit network devices", ErrInvalidVM)
+	}
 	for _, entry := range b.ordered {
 		if !validArgument(entry) {
 			if err := argumentError(entry); err != nil {
@@ -357,6 +371,9 @@ func (v VM) Argv() []string {
 	}
 	for _, entry := range b.ordered {
 		argv = entry.appendArgv(argv)
+	}
+	if b.noNIC {
+		argv = append(argv, "-nic", "none")
 	}
 	if b.display != "" {
 		argv = append(argv, "-display", string(b.display))

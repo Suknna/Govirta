@@ -307,6 +307,7 @@ Govirta/
 - Do not add raw primitive state/type variables when a custom typed constant set is appropriate for API contracts, state machines, or persisted/serialized domain values.
 - Do not couple the QEMU process lifecycle to the orchestrator process. Do not spawn QEMU with a parent-death signal (`SysProcAttr.Pdeathsig`), do not keep QEMU in a process group where orchestrator termination signals propagate to it, and do not make QEMU depend on orchestrator-held stdio/pipes/QMP connections for survival. An orchestrator crash or restart must leave running guests untouched.
 - Do not let any upper layer become an independent source of truth that can drift from actual resources, and do not give each frontend (CLI vs web) its own private, unreconciled view of VM/storage/network state. Do not report, cache, or persist a resource state that contradicts the real qcow2 file, bridge/TAP, or QEMU process + QMP state; the running resource is the fact standard and every surface must reflect it consistently.
+- Do not use `git push --no-verify` to bypass the main-branch full Lima acceptance gate; pushing `main` must pass the configured hook and `scripts/acceptance.sh full`.
 
 ## UNIQUE STYLES
 
@@ -335,10 +336,20 @@ go test -race -count=1 ./internal/storage/...
 
 Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not build `cmd/qemucli`; update the script if qemucli becomes a release binary.
 
+## ACCEPTANCE TESTS
+
+- Fast macOS verification: run `scripts/verify.sh` for the local CI-equivalent loop before broader acceptance.
+- Linux-only acceptance: run `scripts/acceptance.sh full`; it executes acceptance tests with `go test -tags acceptance ./test/acceptance/...` inside the Lima guest.
+- Lima acceptance uses a short generated `LIMA_HOME` under the parent `.l/<repo_key>` to avoid Lima socket path limits, boots an ephemeral Ubuntu arm64 VM with nested KVM, runs the acceptance suite, deletes the VM, and preserves the gitignored persistent repo cache under project `.lima/cache/`.
+- `lima/govirta.yaml` must keep `vmType: "vz"` and `nestedVirtualization: true`; this path is verified on Apple M3 + macOS 26.5 + Lima 2.1.1.
+- Initial acceptance is no-network (`-nic none`); bridge/TAP acceptance waits for the real netlink manager before becoming part of the required gate.
+- Setup required before pushing: `git config core.hooksPath .githooks`.
+- Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
+
 ## NOTES
 
-- Remote acceptance environment from project memory: `root@192.168.139.206`, Rocky Linux 8.10 aarch64, QEMU `/usr/libexec/qemu-kvm`, qemu-img `/usr/bin/qemu-img`, bridge `govirta0`, tap `gv-tap0`, firmware `/usr/share/edk2/aarch64/QEMU_EFI.fd`.
-- Cross-compile remote QEMU tests locally because Go is not installed on the acceptance host: `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c ./internal/virt/qemu -o .tmp/govirta-qemu.test`, then copy and run remotely with `GOVIRTA_QEMU_INTEGRATION=1` and the known QEMU/qemu-img/firmware/TAP env vars.
+- Lima local acceptance is the authoritative hardware-backed path: `scripts/acceptance.sh full` uses a short generated `LIMA_HOME` under parent `.l/<repo_key>` to avoid Lima socket path limits, boots an ephemeral Ubuntu arm64 VM with nested KVM, runs acceptance tests, deletes the VM, and preserves project `.lima/cache/`.
+- Verified nested KVM evidence: cirros booted with `qemu-system-aarch64 -machine virt -accel kvm -cpu host` and the kernel logged `smccc: KVM: hypervisor services detected`.
 - Development temporary artifacts belong under project `.tmp/`; do not use global `/tmp` for debugging artifacts.
 - Storage metadata is in memory only: after restart, callers must explicitly re-register pools and image catalog state; drivers do not scan storage roots or write metadata files.
 - File/image pool overcommit ratio is `1.0`; block pool overcommit ratio is `1.5`.

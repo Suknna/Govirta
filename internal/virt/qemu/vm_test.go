@@ -72,7 +72,7 @@ func TestVMArgvBuildsRequiredQEMUCommand(t *testing.T) {
 		"-cpu", "host",
 		"-smp", "cpus=4,cores=4,threads=1,sockets=1",
 		"-m", "size=8192",
-		"-blockdev", "driver=qcow2,node-name=root,file.driver=file,file.filename=/var/lib/vm/root.qcow2,cache.direct=off,aio=threads",
+		"-blockdev", "driver=qcow2,node-name=root,file.driver=file,file.filename=/var/lib/vm/root.qcow2,file.cache.direct=off,file.aio=threads",
 		"-device", "virtio-blk-pci,drive=root,bootindex=1,id=rootdev",
 		"-netdev", "tap,id=net0,ifname=tap0,script=no,downscript=no,vhost=on",
 		"-device", "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56,id=nic0",
@@ -88,6 +88,69 @@ func TestVMArgvBuildsRequiredQEMUCommand(t *testing.T) {
 	}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("Argv() =\n%s\nwant\n%s", strings.Join(argv, " "), strings.Join(want, " "))
+	}
+}
+
+func TestVMArgvRendersExplicitNoNIC(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchAArch64).
+		Machine(machine.ProfileAArch64VirtKVM).
+		CPU(cpu.ModelHost).
+		SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 1}).
+		Memory(qemu.MiB(256)).
+		NoNIC().
+		Display(display.None).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	for i := 0; i < len(argv)-1; i++ {
+		if argv[i] == "-nic" && argv[i+1] == "none" {
+			return
+		}
+	}
+	t.Fatalf("Argv() = %#v, want adjacent -nic none", argv)
+}
+
+func TestBuildRejectsNoNICWithExplicitNetworkConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		make func() (qemu.VM, error)
+	}{
+		{
+			name: "netdev",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchAArch64).
+					NoNIC().
+					AddNetdev(netdev.Tap{ID: "net0", IfName: "tap0"}).
+					Build()
+			},
+		},
+		{
+			name: "virtio_net_device",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchAArch64).
+					NoNIC().
+					AddDevice(device.VirtioNetPCI{ID: "nic0", Netdev: netdev.Ref("net0")}).
+					Build()
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.make()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+			if !strings.Contains(err.Error(), "NoNIC cannot be combined with explicit network devices") {
+				t.Fatalf("Build() error = %q, want NoNIC conflict message", err.Error())
+			}
+		})
 	}
 }
 
