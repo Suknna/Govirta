@@ -1,0 +1,72 @@
+vmType: "vz"
+nestedVirtualization: true
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+cpus: 2
+memory: "2GiB"
+disk: "12GiB"
+mountType: "virtiofs"
+mounts:
+  # {{.Dir}} is the lima/ config directory, so ../ resolves to the repo root.
+  - location: "{{.Dir}}/.."
+    mountPoint: "/govirta-src"
+    writable: false
+  - location: "{{.Dir}}/../.lima/cache"
+    mountPoint: "/govirta-cache"
+    writable: true
+provision:
+  - mode: "system"
+    script: |
+      #!/bin/sh
+      set -eu
+
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      # QEMU/EFI intentionally track Ubuntu 24.04 packages; Go is pinned below by version and SHA256.
+      apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        qemu-efi-aarch64 \
+        qemu-system-arm \
+        qemu-utils
+
+      if getent group kvm >/dev/null 2>&1; then
+        usermod -aG kvm "{{.User}}"
+      fi
+  - mode: "user"
+    script: |
+      #!/bin/sh
+      set -eu
+
+      mkdir -p \
+        /govirta-cache/toolchain \
+        /govirta-cache/gocache \
+        /govirta-cache/gomodcache \
+        /govirta-cache/images \
+        "$HOME/.local"
+
+      go_archive="go1.26.0.linux-arm64.tar.gz"
+      go_sha256="bd03b743eb6eb4193ea3c3fd3956546bf0e3ca5b7076c8226334afe6b75704cd"
+      go_url="https://go.dev/dl/${go_archive}"
+      go_archive_path="/govirta-cache/toolchain/${go_archive}"
+
+      verify_go_archive() {
+        printf '%s  %s\n' "$go_sha256" "$go_archive_path" | sha256sum -c -
+      }
+
+      if [ -f "$go_archive_path" ] && ! verify_go_archive; then
+        rm -f "$go_archive_path"
+      fi
+
+      if [ ! -f "$go_archive_path" ]; then
+        curl -fsSL "$go_url" -o "$go_archive_path"
+        verify_go_archive
+      fi
+
+      if [ ! -x "$HOME/.local/go/bin/go" ]; then
+        rm -rf "$HOME/.local/go"
+        tar -C "$HOME/.local" -xzf "$go_archive_path"
+      fi
+
+      "$HOME/.local/go/bin/go" version
