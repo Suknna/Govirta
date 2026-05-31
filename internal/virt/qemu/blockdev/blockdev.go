@@ -34,10 +34,10 @@ func (d Qcow2) Validate() error {
 	if err := qopt.ValidateValue("file.filename", d.File.Filename); err != nil {
 		return err
 	}
-	if err := qopt.ValidateEnum("cache.direct", string(d.Cache.Direct), d.Cache.Direct.Valid()); err != nil {
+	if err := qopt.ValidateEnum("file.cache.direct", string(d.Cache.Direct), d.Cache.Direct.Valid()); err != nil {
 		return err
 	}
-	if err := qopt.ValidateEnum("aio", string(d.AIO), d.AIO.Valid()); err != nil {
+	if err := qopt.ValidateEnum("file.aio", string(d.AIO), d.AIO.Valid()); err != nil {
 		return err
 	}
 	return nil
@@ -52,7 +52,7 @@ func (d Qcow2) Arg() (string, error) {
 		qopt.Required("node-name", d.NodeName),
 		qopt.Required("file.driver", "file"),
 		qopt.Required("file.filename", d.File.Filename),
-		qopt.Optional("cache.direct", string(d.Cache.Direct)),
-		qopt.Optional("aio", string(d.AIO)),
+		qopt.Optional("file.cache.direct", string(d.Cache.Direct)),
+		qopt.Optional("file.aio", string(d.AIO)),
 	)
 }
