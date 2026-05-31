@@ -37,6 +37,7 @@ type GetImageRequest struct {
 type DeleteImageRequest struct {
 	PoolName string
 	ImageID  string
+	Format   diskformat.Format
 }
 
 // PutImage opens a writer for a new image in the named file pool.
@@ -73,5 +74,5 @@ func (s *ImageService) DeleteImage(ctx context.Context, req DeleteImageRequest) 
 	if req.PoolName == "" {
 		return pool.ErrPoolRequired
 	}
-	return s.pools.DeleteImage(ctx, req.PoolName, image.DeleteRequest{ImageID: req.ImageID})
+	return s.pools.DeleteImage(ctx, req.PoolName, image.DeleteRequest{ImageID: req.ImageID, Format: req.Format})
 }

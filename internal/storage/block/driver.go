@@ -44,6 +44,7 @@ type CreateRequest struct {
 	VMID          string
 	VMName        string
 	VolumeID      volume.ID
+	Role          volume.Role
 	DiskIndex     int
 	CapacityBytes int64
 	ReadOnly      bool
@@ -58,6 +59,7 @@ type CreateFromReaderRequest struct {
 	VMID          string
 	VMName        string
 	VolumeID      volume.ID
+	Role          volume.Role
 	DiskIndex     int
 	CapacityBytes int64
 	ReadOnly      bool

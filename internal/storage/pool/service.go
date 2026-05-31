@@ -51,16 +51,15 @@ func (s *Service) RegisterPool(p *Pool) error {
 		return ErrPoolAlreadyExists
 	}
 
-	p.mu.Lock()
-	if p.Config.Type == PoolTypeBlock && p.volumes == nil {
-		p.volumes = make(map[volume.ID]volume.Volume)
+	owned := p.clone()
+	if owned.Config.Type == PoolTypeBlock && owned.volumes == nil {
+		owned.volumes = make(map[volume.ID]volume.Volume)
 	}
-	if p.Config.Type == PoolTypeFile && p.images == nil {
-		p.images = make(map[string]ImageRecord)
+	if owned.Config.Type == PoolTypeFile && owned.images == nil {
+		owned.images = make(map[string]ImageRecord)
 	}
-	p.mu.Unlock()
 
-	s.pools[p.Config.Name] = p
+	s.pools[p.Config.Name] = &owned
 	return nil
 }
 
@@ -160,6 +159,9 @@ func (s *Service) CreateVolume(ctx context.Context, poolName string, req block.C
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
+	if err := validateCreateVolumeRequest(poolName, req); err != nil {
+		return volume.Volume{}, err
+	}
 
 	p, err := s.getPool(poolName)
 	if err != nil {
@@ -192,20 +194,27 @@ func (s *Service) CreateVolume(ctx context.Context, poolName string, req block.C
 
 	created, err := driver.Create(ctx, req)
 	if err != nil {
-		return volume.Volume{}, fmt.Errorf("create volume %q in pool %q: %w", req.Name, poolName, err)
+		if !errors.Is(err, volume.ErrVolumeCleanupFailed) {
+			return volume.Volume{}, fmt.Errorf("create volume %q in pool %q: %w", req.Name, poolName, err)
+		}
 	}
 	created = normalizeCreatedVolume(created, req)
 
-	if p.volumes == nil {
-		p.volumes = make(map[volume.ID]volume.Volume)
+	if metadataErr := recordCreatedVolumeLocked(p, created); metadataErr != nil {
+		return cloneVolume(created), fmt.Errorf("create volume %q in pool %q: %w", req.Name, poolName, errors.Join(err, metadataErr))
 	}
-	p.volumes[created.ID] = cloneVolume(created)
+	if err != nil {
+		return cloneVolume(created), fmt.Errorf("create volume %q in pool %q: %w", req.Name, poolName, err)
+	}
 	return cloneVolume(created), nil
 }
 
 // CreateVolumeFromReader creates or returns an idempotent existing volume from source bytes within a named block pool.
 func (s *Service) CreateVolumeFromReader(ctx context.Context, poolName string, req block.CreateFromReaderRequest) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
+	}
+	if err := validateCreateVolumeFromReaderRequest(poolName, req); err != nil {
 		return volume.Volume{}, err
 	}
 
@@ -240,14 +249,18 @@ func (s *Service) CreateVolumeFromReader(ctx context.Context, poolName string, r
 
 	created, err := driver.CreateFromReader(ctx, req)
 	if err != nil {
-		return volume.Volume{}, fmt.Errorf("create volume %q from reader in pool %q: %w", req.Name, poolName, err)
+		if !errors.Is(err, volume.ErrVolumeCleanupFailed) {
+			return volume.Volume{}, fmt.Errorf("create volume %q from reader in pool %q: %w", req.Name, poolName, err)
+		}
 	}
 	created = normalizeCreatedVolumeFromReader(created, req)
 
-	if p.volumes == nil {
-		p.volumes = make(map[volume.ID]volume.Volume)
+	if metadataErr := recordCreatedVolumeLocked(p, created); metadataErr != nil {
+		return cloneVolume(created), fmt.Errorf("create volume %q from reader in pool %q: %w", req.Name, poolName, errors.Join(err, metadataErr))
 	}
-	p.volumes[created.ID] = cloneVolume(created)
+	if err != nil {
+		return cloneVolume(created), fmt.Errorf("create volume %q from reader in pool %q: %w", req.Name, poolName, err)
+	}
 	return cloneVolume(created), nil
 }
 
@@ -262,6 +275,50 @@ func reserveCapacityLocked(p *Pool, bytes int64) error {
 		return ErrPoolCapacityExceeded
 	}
 	return nil
+}
+
+func recordCreatedVolumeLocked(p *Pool, created volume.Volume) error {
+	if _, exists := p.volumes[created.ID]; exists {
+		return volume.ErrVolumeConflict
+	}
+	if _, exists := findVolumeByNameLocked(p.volumes, created.Name); exists {
+		return volume.ErrVolumeConflict
+	}
+	if p.volumes == nil {
+		p.volumes = make(map[volume.ID]volume.Volume)
+	}
+	p.volumes[created.ID] = cloneVolume(created)
+	return nil
+}
+
+func validateCreateVolumeRequest(poolName string, req block.CreateRequest) error {
+	if req.PoolName != poolName {
+		return volume.ErrInvalidRequest
+	}
+	if req.VolumeID == "" || req.Name == "" || req.VMID == "" || req.VMName == "" || req.DiskIndex < 0 || req.CapacityBytes <= 0 {
+		return volume.ErrInvalidRequest
+	}
+	if !validVolumeRole(req.Role) {
+		return volume.ErrInvalidRequest
+	}
+	return nil
+}
+
+func validateCreateVolumeFromReaderRequest(poolName string, req block.CreateFromReaderRequest) error {
+	if req.PoolName != poolName {
+		return volume.ErrInvalidRequest
+	}
+	if req.Reader == nil || !req.Format.Valid() || req.VolumeID == "" || req.Name == "" || req.VMID == "" || req.VMName == "" || req.DiskIndex < 0 || req.CapacityBytes <= 0 {
+		return volume.ErrInvalidRequest
+	}
+	if !validVolumeRole(req.Role) {
+		return volume.ErrInvalidRequest
+	}
+	return nil
+}
+
+func validVolumeRole(role volume.Role) bool {
+	return role == volume.RoleRoot || role == volume.RoleData
 }
 
 // PublishVolume prepares runtime access to a volume and records the attachment state.
@@ -471,7 +528,7 @@ func (s *Service) DeleteImage(ctx context.Context, poolName string, req image.De
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if req.ImageID == "" {
+	if req.ImageID == "" || !req.Format.Valid() {
 		return image.ErrInvalidImage
 	}
 
@@ -490,6 +547,10 @@ func (s *Service) DeleteImage(ctx context.Context, poolName string, req image.De
 		p.mu.Unlock()
 		return image.ErrImageNotFound
 	}
+	if req.Format != record.Format {
+		p.mu.Unlock()
+		return image.ErrInvalidImage
+	}
 	deletingRecord := record
 	deletingRecord.State = ImageStateDeleting
 	p.images[req.ImageID] = deletingRecord
@@ -498,6 +559,11 @@ func (s *Service) DeleteImage(ctx context.Context, poolName string, req image.De
 	if err := driver.Delete(ctx, req); err != nil {
 		p.mu.Lock()
 		current, exists := p.images[req.ImageID]
+		if errors.Is(err, image.ErrImageCleanupFailed) {
+			metadataErr := deleteDeletingImageLocked(p, req.ImageID, deletingRecord)
+			p.mu.Unlock()
+			return errors.Join(err, metadataErr)
+		}
 		if exists && imageRecordsMatch(current, deletingRecord) {
 			record.State = ImageStateReady
 			p.images[req.ImageID] = record
@@ -507,11 +573,20 @@ func (s *Service) DeleteImage(ctx context.Context, poolName string, req image.De
 	}
 
 	p.mu.Lock()
-	current, exists := p.images[req.ImageID]
-	if exists && imageRecordsMatch(current, deletingRecord) {
-		delete(p.images, req.ImageID)
-	}
+	metadataErr := deleteDeletingImageLocked(p, req.ImageID, deletingRecord)
 	p.mu.Unlock()
+	return metadataErr
+}
+
+func deleteDeletingImageLocked(p *Pool, imageID string, deletingRecord ImageRecord) error {
+	current, exists := p.images[imageID]
+	if !exists {
+		return nil
+	}
+	if !imageRecordsMatch(current, deletingRecord) {
+		return image.ErrInvalidImage
+	}
+	delete(p.images, imageID)
 	return nil
 }
 
@@ -536,6 +611,7 @@ func createRequestMatchesVolume(req block.CreateRequest, vol volume.Volume) bool
 		vol.PoolName == req.PoolName &&
 		vol.VMID == req.VMID &&
 		vol.VMName == req.VMName &&
+		vol.Role == req.Role &&
 		vol.DiskIndex == req.DiskIndex &&
 		vol.CapacityBytes == req.CapacityBytes &&
 		vol.ID == req.VolumeID
@@ -546,6 +622,7 @@ func createFromReaderRequestMatchesVolume(req block.CreateFromReaderRequest, vol
 		vol.PoolName == req.PoolName &&
 		vol.VMID == req.VMID &&
 		vol.VMName == req.VMName &&
+		vol.Role == req.Role &&
 		vol.DiskIndex == req.DiskIndex &&
 		vol.CapacityBytes == req.CapacityBytes &&
 		vol.ID == req.VolumeID
@@ -557,6 +634,7 @@ func normalizeCreatedVolume(vol volume.Volume, req block.CreateRequest) volume.V
 	vol.PoolName = req.PoolName
 	vol.VMID = req.VMID
 	vol.VMName = req.VMName
+	vol.Role = req.Role
 	vol.DiskIndex = req.DiskIndex
 	vol.CapacityBytes = req.CapacityBytes
 	if vol.State == "" {
@@ -571,6 +649,7 @@ func normalizeCreatedVolumeFromReader(vol volume.Volume, req block.CreateFromRea
 	vol.PoolName = req.PoolName
 	vol.VMID = req.VMID
 	vol.VMName = req.VMName
+	vol.Role = req.Role
 	vol.DiskIndex = req.DiskIndex
 	vol.CapacityBytes = req.CapacityBytes
 	if vol.State == "" {
@@ -613,6 +692,10 @@ func (w *pendingImageWriter) Close() error {
 	defer w.mu.Unlock()
 
 	if err := w.writer.Close(); err != nil {
+		if errors.Is(err, image.ErrImageCleanupFailed) {
+			readyErr := w.markReady()
+			return errors.Join(err, readyErr)
+		}
 		cancelErr := w.writer.Cancel()
 		w.pool.mu.Lock()
 		delete(w.pool.images, w.imageID)
@@ -620,6 +703,10 @@ func (w *pendingImageWriter) Close() error {
 		return errors.Join(err, cancelErr)
 	}
 
+	return w.markReady()
+}
+
+func (w *pendingImageWriter) markReady() error {
 	w.pool.mu.Lock()
 	record, exists := w.pool.images[w.imageID]
 	if !exists || record.State != ImageStatePending {
