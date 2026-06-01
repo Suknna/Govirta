@@ -1,12 +1,12 @@
 # PROJECT AGENTS KNOWLEDGE BASE
 
-**Generated:** 2026-05-28
-**Commit:** 6c06c5f
+**Generated:** 2026-06-01
+**Commit:** 981938d
 **Branch:** main
 
 <!--
 Verified-against:
-  base_commit: 6c06c5f
+  base_commit: 981938d
   files:
     - cmd/govirtad/main.go
     - cmd/govirtlet/main.go
@@ -23,6 +23,24 @@ Verified-against:
     - internal/hostnet/link/linux/info_linux.go
     - internal/hostnet/link/linux/validate_linux.go
     - internal/hostnet/link/linux/errors_linux.go
+    - internal/hostnet/route/route.go
+    - internal/hostnet/route/constants.go
+    - internal/hostnet/route/forwarding.go
+    - internal/hostnet/route/noop.go
+    - internal/hostnet/route/noop_test.go
+    - internal/hostnet/route/routeerr/errors.go
+    - internal/hostnet/route/linux/manager_linux.go
+    - internal/hostnet/route/linux/handle_linux.go
+    - internal/hostnet/route/linux/info_linux.go
+    - internal/hostnet/route/linux/validate_linux.go
+    - internal/hostnet/route/linux/errors_linux.go
+    - internal/hostnet/route/linux/sysctl_linux.go
+    - internal/hostnet/route/linux/fake_handle_test.go
+    - internal/hostnet/route/linux/forwarding_test.go
+    - internal/hostnet/route/linux/validation_test.go
+    - internal/hostnet/route/linux/route_test.go
+    - internal/hostnet/route/linux/list_get_test.go
+    - internal/hostnet/route/linux/errors_test.go
     - internal/network/bridge/bridge.go
     - internal/scheduler/scheduler.go
     - internal/types/types.go
@@ -40,6 +58,10 @@ Verified-against:
     - internal/virt/qemu/vm.go
     - internal/virt/qemuimg/client.go
     - scripts/verify.sh
+    - scripts/acceptance.sh
+    - test/acceptance/doc.go
+    - test/acceptance/harness.go
+    - test/acceptance/hostnet_route_test.go
     - go.mod
     - README.md
     - docs/architecture.md
@@ -73,6 +95,17 @@ Verified-against:
         - internal/hostnet/link/linux/info_linux.go
         - internal/hostnet/link/linux/validate_linux.go
         - internal/hostnet/link/linux/errors_linux.go
+    - anchor: flow-hostnet-route
+      sources:
+        - internal/hostnet/route/route.go
+        - internal/hostnet/route/constants.go
+        - internal/hostnet/route/forwarding.go
+        - internal/hostnet/route/linux/manager_linux.go
+        - internal/hostnet/route/linux/handle_linux.go
+        - internal/hostnet/route/linux/info_linux.go
+        - internal/hostnet/route/linux/validate_linux.go
+        - internal/hostnet/route/linux/errors_linux.go
+        - internal/hostnet/route/linux/sysctl_linux.go
     - anchor: flow-govirtctl-version
       sources:
         - cmd/govirtctl/main.go
@@ -103,13 +136,13 @@ Verified-against:
 
 ## OVERVIEW
 
-Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/netlink + zerolog, with OpenStack-style internal storage abstractions now present under `internal/storage`.
+Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route netlink primitives + zerolog, with OpenStack-style internal storage abstractions now present under `internal/storage`.
 
 ## CURRENT PHASE
 
 Govirta is in the single-node cold-operation closure phase. Prioritize the local QEMU/qemu-img/QMP/network/storage path before distributed scheduling, API orchestration, Kubernetes integration, live migration, hot-plug, or multi-node behavior.
 
-Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
+Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP and host route primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
 
 Current implementation priority:
 
@@ -118,7 +151,7 @@ Current implementation priority:
 3. storage pool / image / root-volume lifecycle
 4. VM create/start/stop/delete
 5. QMP `query-status` / `system_powerdown` / `quit`
-6. Local TAP/bridge networking
+6. Local TAP/bridge/route networking primitives
 7. Cold snapshots
 8. Cold disk expansion
 9. Cold CPU/memory/disk/NIC modification
@@ -148,6 +181,7 @@ Govirta/
 │   ├── apiserver/       # API server boundary，目前 no-op skeleton
 │   ├── controlplane/    # control plane composition
 │   ├── hostnet/link/    # host bridge/TAP primitive boundary and Linux netlink implementation
+│   ├── hostnet/route/   # host IPv4 route primitive boundary, forwarding checks, and Linux netlink implementation
 │   ├── network/bridge/  # Linux bridge boundary
 │   ├── node/            # compute node agent composition
 │   ├── scheduler/       # placement boundary
@@ -167,6 +201,7 @@ Govirta/
 | CLI 版本输出 | `cmd/govirtctl/main.go` → `internal/version/version.go` | 当前只打印版本 |
 | QEMU argv 示例 | `cmd/qemucli/main.go` → `internal/virt/qemu` | `qemucli` 只打印 argv，不启动 QEMU |
 | host bridge/TAP primitives | `internal/hostnet/link` → `internal/hostnet/link/linux` | `link.Manager` contract；Linux 通过 netlink ensure/get/list/delete bridge 和 TAP |
+| host route primitives | `internal/hostnet/route` → `internal/hostnet/route/linux` | `route.Manager` contract；Linux 通过 netlink add/replace/delete/list/get IPv4 routes，并只读检查 `/proc/sys/net/ipv4/ip_forward` |
 | VM-facing storage | `internal/storage/` (详见 `internal/storage/AGENTS.md`) | `VolumeService` / `ImageService` / `pool.Service` |
 | QEMU 配置/参数 | `internal/virt/qemu/` (详见 `internal/virt/qemu/AGENTS.md`) | typed argv builder；黄金测试在 `vm_test.go` |
 | qemu-img | `internal/virt/qemuimg/` (详见 `internal/virt/qemuimg/AGENTS.md`) | Create/Info/Convert/Resize/Snapshot/Check/Remove + runner |
@@ -195,6 +230,16 @@ Govirta/
 | `linklinux.Manager.EnsureTap` | method | `internal/hostnet/link/linux/manager_linux.go:80` | validate spec → require bridge → create/reconcile TAP → set MAC/MTU/master/up → return observed info |
 | `linkerr` sentinels | vars | `internal/hostnet/link/linkerr/errors.go:6` | stable host link error classes for invalid/not-found/conflict/permission/incomplete/unsupported |
 | `linklinux.translateError` | func | `internal/hostnet/link/linux/errors_linux.go:15` | maps netlink/syscall failures to `linkerr` sentinel classes while preserving cause |
+| `route.Manager` | interface | `internal/hostnet/route/route.go:19` | host route primitive API：`GetIPv4Forwarding` / `CheckIPv4Forwarding` / `AddRoute` / `ReplaceRoute` / `DeleteRoute` / `ListRoutes` / `GetRoute` |
+| `routelinux.Manager` | struct | `internal/hostnet/route/linux/manager_linux.go:18` | Linux netlink + `/proc/sys/net/ipv4/ip_forward` implementation of `route.Manager` |
+| `routelinux.NewManager` | func | `internal/hostnet/route/linux/manager_linux.go:27` | 构造真实 handle-backed route manager |
+| `routelinux.Manager.GetIPv4Forwarding` | method | `internal/hostnet/route/linux/manager_linux.go:59` | read `/proc/sys/net/ipv4/ip_forward` and return observed forwarding state without mutation |
+| `routelinux.Manager.CheckIPv4Forwarding` | method | `internal/hostnet/route/linux/manager_linux.go:87` | validate expected state, read observed forwarding state, return `routeerr.ErrNotReady` on mismatch |
+| `routelinux.Manager.AddRoute` | method | `internal/hostnet/route/linux/manager_linux.go:107` | validate explicit `RouteSpec` → netlink `RouteAdd` → re-read matching observed `RouteInfo` |
+| `routelinux.Manager.ReplaceRoute` | method | `internal/hostnet/route/linux/manager_linux.go:114` | validate explicit `RouteSpec` → netlink `RouteReplace` → cleanup stale managed route metrics → re-read observed `RouteInfo` |
+| `routelinux.Manager.DeleteRoute` | method | `internal/hostnet/route/linux/manager_linux.go:125` | validate explicit `RouteSpec` → netlink `RouteDel`; missing route is idempotent success |
+| `routelinux.Manager.ListRoutes` | method | `internal/hostnet/route/linux/manager_linux.go:149` | validate explicit `RouteFilter` → netlink `RouteListFiltered` → Go-side exact filtering + stable sorting |
+| `routelinux.Manager.GetRoute` | method | `internal/hostnet/route/linux/manager_linux.go:182` | validate `RouteQuery` → netlink `RouteGet` path selection → observed primary `RouteInfo` |
 | `storage.VolumeService` | struct | `internal/storage/service.go:14` | VM-facing block volume API；所有操作显式 PoolName |
 | `storage.ImageService` | struct | `internal/storage/image_service.go:12` | file image byte-stream API；Put/Get/Delete |
 | `pool.Service` | struct | `internal/storage/pool/service.go:16` | pool registry, capacity accounting, in-memory indexes |
@@ -207,7 +252,7 @@ Govirta/
 
 ## CALL GRAPHS & DATA FLOW
 
-主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
+主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP/route primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
 
 ### Flow: govirtad control plane boot {#flow-govirtad-boot}
 
@@ -293,6 +338,21 @@ Govirta/
 - Boundaries: Linux-only netlink kernel boundary plus `/dev/net/tun` semantics through netlink tuntap creation; QEMU only consumes the resulting TAP name later
 - Sinks: host TAP link enslaved to bridge; errors classify through `linkerr` via `translateError`
 
+### Flow: hostnet route primitives {#flow-hostnet-route}
+
+- Trigger: `internal/hostnet/route.Manager` methods (caller wants to inspect IPv4 forwarding or manage a host IPv4 route)
+- Cross-module chain:
+  1. `internal/hostnet/route/route.go:19 (Manager)` — root contract requires caller context and explicit forwarding expectation, `RouteSpec`, `RouteFilter`, or `RouteQuery`
+  2. `internal/hostnet/route/linux/manager_linux.go:59 (Manager.GetIPv4Forwarding)` / `:87 (CheckIPv4Forwarding)` — validate context/state and read `/proc/sys/net/ipv4/ip_forward`; never write sysctl state
+  3. `internal/hostnet/route/linux/manager_linux.go:107 (AddRoute)` / `:114 (ReplaceRoute)` / `:125 (DeleteRoute)` — validate explicit `RouteSpec`, resolve link name, build netlink route identity, then call `RouteAdd` / `RouteReplace` / `RouteDel`
+  4. `internal/hostnet/route/linux/manager_linux.go:149 (ListRoutes)` — validate explicit `RouteFilter`, build netlink filter, call `RouteListFiltered`, and apply exact Go-side filtering where netlink cannot express the full filter
+  5. `internal/hostnet/route/linux/manager_linux.go:182 (GetRoute)` — validate `RouteQuery`, call `RouteGet`, and treat the first result as Linux path-selection output
+  6. `internal/hostnet/route/linux/info_linux.go:210 (netlinkRouteInfo)` — resolve link index back to `link.Name` and translate observed netlink fields into `RouteInfo`; protocol `0` maps to `RouteProtocolUnspecified` for observed path-selection results
+  7. `internal/hostnet/route/linux/errors_linux.go:13 (translateError)` — map netlink/syscall/route sentinel failures to stable `routeerr` classes while preserving causes
+- Data: `route.RouteSpec` / `RouteFilter` / `RouteQuery` / `IPv4ForwardingState` → netlink `Route*` or `/proc` read → observed `route.RouteInfo` / `IPv4ForwardingInfo`
+- Boundaries: Linux-only netlink kernel route table and read-only `/proc/sys/net/ipv4/ip_forward`; no shell commands and no sysctl writes inside the route package
+- Sinks: host IPv4 route table mutations for add/replace/delete; read-only forwarding readiness and route observations; errors classify through `routeerr`
+
 ### Flow: storage block volume lifecycle {#flow-storage-volume}
 
 - Trigger: `internal/storage/service.go:80 (VolumeService.CreateVolume)` / `:171 (PublishVolume)` / `:206 (DeleteVolume)` (future VM orchestration caller)
@@ -344,6 +404,7 @@ Govirta/
 - All errors must propagate to the caller. Do not ignore errors with `_ = err`, blank assignments, best-effort cleanup that discards failures, or silent fallback paths. When an operation has both a primary error and cleanup/rollback errors, compose them with Go stdlib `errors.Join` so callers can inspect every failure with `errors.Is` / `errors.As`.
 - Storage APIs require explicit pool, format, and source choices when behavior affects storage outcomes; no implicit default storage pool or format inference.
 - All externally provided APIs, including Go package APIs, HTTP APIs, and gRPC APIs, must require callers to pass every behavior-affecting parameter explicitly. Do not infer, auto-fill, default, or decide missing API parameters on behalf of callers.
+- `internal/hostnet/route` may read/check IPv4 forwarding but must not enable, disable, or persist it. Node installation, operations tooling, and acceptance setup own `net.ipv4.ip_forward` configuration.
 - Image-derived root volumes must always be full independent copies of source image bytes. Do not use qcow2 backing-file links, reflink-style logical sharing, or any image-to-root-disk link semantics in the current project scope.
 - Context/knowledge-base references must not be dangling: every `AGENTS.md` cross-reference, `#flow-*` anchor, docs path, and symbol reference added to this knowledge base must resolve to an existing section, file, or source symbol at the time it is written.
 - Control-plane persistent data storage follows the Kubernetes-inspired architecture and permanently considers only etcd. This is a fixed long-term decision on par with the no-libvirt rule: never introduce SQLite, PostgreSQL, MySQL, embedded KV stores, or any alternative metadata database. etcd is the sole persistence backend the project will ever target.
@@ -408,6 +469,7 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - Lima acceptance uses a short generated `LIMA_HOME` under the parent `.l/<repo_key>` to avoid Lima socket path limits, boots an ephemeral Ubuntu arm64 VM with nested KVM, runs the acceptance suite, deletes the VM, and preserves the gitignored persistent repo cache under project `.lima/cache/`.
 - `lima/govirta.yaml` must keep `vmType: "vz"` and `nestedVirtualization: true`; this path is verified on Apple M3 + macOS 26.5 + Lima 2.1.1.
 - Full acceptance includes the hostnet bridge/TAP path: `TestHostnetLinkBridgeTapEndToEnd` creates a real bridge + TAP with `internal/hostnet/link/linux`, direct-kernel boots CirrOS with QEMU, waits for QMP running state and serial login marker, then verifies host-to-guest ping over the bridge/TAP path.
+- Full acceptance includes the hostnet route path: `TestHostnetRoutePrimitives` creates a real dummy link, checks IPv4 forwarding readiness, exercises add/list/get/replace/delete route primitives through `internal/hostnet/route/linux`, and relies on `scripts/acceptance.sh` to enable `net.ipv4.ip_forward=1` for the guest test run.
 - `test/log/*.log` is gitignored; keep `test/log/.gitkeep` tracked and do not commit generated acceptance logs.
 - Setup required before pushing: `git config core.hooksPath .githooks`.
 - Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
@@ -419,4 +481,5 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - Development temporary artifacts belong under project `.tmp/`; do not use global `/tmp` for debugging artifacts.
 - Storage metadata is in memory only: after restart, callers must explicitly re-register pools and image catalog state; drivers do not scan storage roots or write metadata files.
 - File/image pool overcommit ratio is `1.0`; block pool overcommit ratio is `1.5`.
+- VM external networking still requires NAT/firewall/DNS/default-route orchestration beyond the current bridge/TAP/route primitives. The route package proves host IPv4 route management and forwarding readiness only; it does not provide end-to-end guest internet access.
 - Call-graph evidence: AFT outline/zoom and direct source/test reads; LSP call hierarchy was not used end-to-end. `[降级]` LSP；`[已验证]` 源码与测试断言。
