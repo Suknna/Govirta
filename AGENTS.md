@@ -15,6 +15,14 @@ Verified-against:
     - internal/controlplane/service.go
     - internal/apiserver/server.go
     - internal/node/agent.go
+    - internal/hostnet/link/link.go
+    - internal/hostnet/link/constants.go
+    - internal/hostnet/link/linkerr/errors.go
+    - internal/hostnet/link/linux/manager_linux.go
+    - internal/hostnet/link/linux/handle_linux.go
+    - internal/hostnet/link/linux/info_linux.go
+    - internal/hostnet/link/linux/validate_linux.go
+    - internal/hostnet/link/linux/errors_linux.go
     - internal/network/bridge/bridge.go
     - internal/scheduler/scheduler.go
     - internal/types/types.go
@@ -48,6 +56,23 @@ Verified-against:
         - internal/node/agent.go
         - internal/virt/qmp/client.go
         - internal/network/bridge/bridge.go
+    - anchor: flow-hostnet-bridge
+      sources:
+        - internal/hostnet/link/link.go
+        - internal/hostnet/link/linux/manager_linux.go
+        - internal/hostnet/link/linux/handle_linux.go
+        - internal/hostnet/link/linux/info_linux.go
+        - internal/hostnet/link/linux/validate_linux.go
+        - internal/hostnet/link/linux/errors_linux.go
+    - anchor: flow-hostnet-tap
+      sources:
+        - internal/hostnet/link/link.go
+        - internal/hostnet/link/constants.go
+        - internal/hostnet/link/linux/manager_linux.go
+        - internal/hostnet/link/linux/handle_linux.go
+        - internal/hostnet/link/linux/info_linux.go
+        - internal/hostnet/link/linux/validate_linux.go
+        - internal/hostnet/link/linux/errors_linux.go
     - anchor: flow-govirtctl-version
       sources:
         - cmd/govirtctl/main.go
@@ -122,6 +147,7 @@ Govirta/
 ├── internal/            # 所有 Go 内部模块边界；无 pkg/
 │   ├── apiserver/       # API server boundary，目前 no-op skeleton
 │   ├── controlplane/    # control plane composition
+│   ├── hostnet/link/    # host bridge/TAP primitive boundary and Linux netlink implementation
 │   ├── network/bridge/  # Linux bridge boundary
 │   ├── node/            # compute node agent composition
 │   ├── scheduler/       # placement boundary
@@ -140,6 +166,7 @@ Govirta/
 | 节点入口 | `cmd/govirtlet/main.go` → `internal/node/agent.go` → `internal/virt/qmp` + `internal/network/bridge` | 当前 QMP/bridge 仍为 skeleton 注入 |
 | CLI 版本输出 | `cmd/govirtctl/main.go` → `internal/version/version.go` | 当前只打印版本 |
 | QEMU argv 示例 | `cmd/qemucli/main.go` → `internal/virt/qemu` | `qemucli` 只打印 argv，不启动 QEMU |
+| host bridge/TAP primitives | `internal/hostnet/link` → `internal/hostnet/link/linux` | `link.Manager` contract；Linux 通过 netlink ensure/get/list/delete bridge 和 TAP |
 | VM-facing storage | `internal/storage/` (详见 `internal/storage/AGENTS.md`) | `VolumeService` / `ImageService` / `pool.Service` |
 | QEMU 配置/参数 | `internal/virt/qemu/` (详见 `internal/virt/qemu/AGENTS.md`) | typed argv builder；黄金测试在 `vm_test.go` |
 | qemu-img | `internal/virt/qemuimg/` (详见 `internal/virt/qemuimg/AGENTS.md`) | Create/Info/Convert/Resize/Snapshot/Check/Remove + runner |
@@ -160,6 +187,14 @@ Govirta/
 | `qmp.SocketClient.Connect` | method | `internal/virt/qmp/client.go:76` | 连接 QMP unix socket 并完成 capabilities handshake |
 | `qmp.NoopClient.Connect` | method | `internal/virt/qmp/client.go:279` | skeleton composition test 用 no-op QMP 边界 |
 | `bridge.NoopManager.Ensure` | method | `internal/network/bridge/bridge.go:25` | bridge 创建边界，未调用 netlink |
+| `link.Manager` | interface | `internal/hostnet/link/link.go:14` | host link primitive API：`EnsureBridge` / `EnsureTap` / `Delete` / `Exists` / `Get` / `List` |
+| `link.BridgeSpec` / `link.TapSpec` | structs | `internal/hostnet/link/link.go:52` / `:66` | 显式描述 bridge gateway/MTU/MAC 与 TAP owner/bridge/MTU/MAC/VNetHeader |
+| `linklinux.Manager` | struct | `internal/hostnet/link/linux/manager_linux.go:15` | Linux netlink-backed implementation of `link.Manager` |
+| `linklinux.NewManager` | func | `internal/hostnet/link/linux/manager_linux.go:21` | 构造真实 `netlink` handle-backed manager |
+| `linklinux.Manager.EnsureBridge` | method | `internal/hostnet/link/linux/manager_linux.go:33` | validate spec → parse CIDR → create/reconcile bridge → set MAC/MTU/address/up → return observed info |
+| `linklinux.Manager.EnsureTap` | method | `internal/hostnet/link/linux/manager_linux.go:80` | validate spec → require bridge → create/reconcile TAP → set MAC/MTU/master/up → return observed info |
+| `linkerr` sentinels | vars | `internal/hostnet/link/linkerr/errors.go:6` | stable host link error classes for invalid/not-found/conflict/permission/incomplete/unsupported |
+| `linklinux.translateError` | func | `internal/hostnet/link/linux/errors_linux.go:15` | maps netlink/syscall failures to `linkerr` sentinel classes while preserving cause |
 | `storage.VolumeService` | struct | `internal/storage/service.go:14` | VM-facing block volume API；所有操作显式 PoolName |
 | `storage.ImageService` | struct | `internal/storage/image_service.go:12` | file image byte-stream API；Put/Get/Delete |
 | `pool.Service` | struct | `internal/storage/pool/service.go:16` | pool registry, capacity accounting, in-memory indexes |
@@ -172,7 +207,7 @@ Govirta/
 
 ## CALL GRAPHS & DATA FLOW
 
-主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
+主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
 
 ### Flow: govirtad control plane boot {#flow-govirtad-boot}
 
@@ -227,6 +262,36 @@ Govirta/
 - Data: `qemu.Arch` → `*Builder` → `VM` → `[]string` argv → 单行字符串
 - Boundaries: 同步、单进程；不调用 `os/exec`，不启动 QEMU
 - Sinks: stdout 一行 QEMU 命令字符串；错误走 stderr + exit 1
+
+### Flow: hostnet bridge ensure {#flow-hostnet-bridge}
+
+- Trigger: `internal/hostnet/link/linux/manager_linux.go:33 (Manager.EnsureBridge)` (caller wants a named host bridge ready for guest TAP attachment)
+- Cross-module chain:
+  1. `internal/hostnet/link/link.go:19 (Manager.EnsureBridge)` — root contract requires explicit `BridgeSpec` and caller context
+  2. `internal/hostnet/link/linux/validate_linux.go:25 (validateBridgeSpec)` — require non-nil/non-canceled context, valid name, explicit CIDR, positive MTU, locally administered unicast MAC
+  3. `internal/hostnet/link/linux/manager_linux.go:37 (EnsureBridge)` — parse `GatewayCIDR` with netlink before host mutation
+  4. `internal/hostnet/link/linux/manager_linux.go:42 (EnsureBridge → ensureBridgeLink)` — lookup existing link; existing non-bridge is `linkerr.ErrConflict`; absent link becomes `netlink.Bridge` via `LinkAdd`
+  5. `internal/hostnet/link/linux/manager_linux.go:46 (configureCreatedLink)` — set bridge MAC, MTU, address via `AddrReplace`, and admin state up; if a newly created link cannot be configured, rollback uses `LinkDel` and joins rollback errors
+  6. `internal/hostnet/link/linux/manager_linux.go:77 (EnsureBridge → currentLinkInfo)` — re-read observed kernel state instead of trusting requested spec
+  7. `internal/hostnet/link/linux/info_linux.go:49 (linkInfo)` — return `LinkInfo` with kind, index, MTU, MAC, admin state, master name, and sorted CIDR addresses
+- Data: `link.BridgeSpec{Name,GatewayCIDR,MTU,MAC}` → netlink `Bridge` + `Addr` → observed `link.LinkInfo`
+- Boundaries: Linux-only netlink kernel boundary through `realHandle` (`internal/hostnet/link/linux/handle_linux.go:24`); no shell commands
+- Sinks: host bridge link, gateway address, MAC/MTU/admin state; errors classify through `linkerr` via `translateError`
+
+### Flow: hostnet TAP ensure {#flow-hostnet-tap}
+
+- Trigger: `internal/hostnet/link/linux/manager_linux.go:80 (Manager.EnsureTap)` (caller wants a TAP attached to an existing bridge for QEMU `-netdev tap`)
+- Cross-module chain:
+  1. `internal/hostnet/link/link.go:25 (Manager.EnsureTap)` — root contract requires explicit `TapSpec`, including owner UID/GID and VNetHeader mode
+  2. `internal/hostnet/link/linux/validate_linux.go:45 (validateTapSpec)` — require explicit TAP name, bridge name, owner UID/GID, MTU, MAC, and `VNetHeaderEnabled` or `VNetHeaderDisabled`
+  3. `internal/hostnet/link/linux/manager_linux.go:87 (EnsureTap)` — lookup bridge by name; a non-bridge master is `linkerr.ErrConflict`
+  4. `internal/hostnet/link/linux/manager_linux.go:96 (EnsureTap → ensureTapLink)` — lookup existing TAP; reject non-TAP, wrong tuntap mode, owner UID/GID mismatch, unsupported VNetHeader observation, or VNetHeader mismatch
+  5. `internal/hostnet/link/linux/manager_linux.go:292 (ensureTapLink)` — for absent TAP, create `netlink.Tuntap` with `TUNTAP_NO_PI`, optional `TUNTAP_VNET_HDR`, explicit owner/group, MTU, and MAC
+  6. `internal/hostnet/link/linux/manager_linux.go:100 (configureCreatedLink)` — set TAP MAC, MTU, bridge master, and admin state up; rollback newly created TAP on configuration failure
+  7. `internal/hostnet/link/linux/manager_linux.go:131 (EnsureTap → currentLinkInfo)` — return observed kernel state through `linkInfo`, including `MasterName`
+- Data: `link.TapSpec{Name,BridgeName,OwnerUID,OwnerGID,MTU,MAC,VNetHeader}` → netlink `Tuntap` → observed `link.LinkInfo`
+- Boundaries: Linux-only netlink kernel boundary plus `/dev/net/tun` semantics through netlink tuntap creation; QEMU only consumes the resulting TAP name later
+- Sinks: host TAP link enslaved to bridge; errors classify through `linkerr` via `translateError`
 
 ### Flow: storage block volume lifecycle {#flow-storage-volume}
 
@@ -296,7 +361,7 @@ Govirta/
 - Do not start fire-and-forget goroutines; every goroutine needs owner, shutdown path, and `ctx.Done()` for long-running work.
 - Do not use `panic` for expected business errors, string-match errors, swallow errors silently, or use `goto` as normal control flow.
 - Do not discard, suppress, overwrite, or log-and-continue errors that affect correctness, cleanup, rollback, persistence, storage, networking, process execution, or API responses; return them upward and use `errors.Join` when multiple errors must be preserved.
-- Do not let QEMU packages create host bridge/TAP resources; host networking belongs under `internal/network/bridge`.
+- Do not let QEMU packages create host bridge/TAP resources; host link primitives belong under `internal/hostnet/link`.
 - Do not spend implementation effort on distributed scheduling, Kubernetes integration, live migration, hot-plug, or multi-node control before the single-node cold-operation closure is complete.
 - Do not implement cold snapshot, cold resize, or cold config modification against a running VM; these operations must require a stopped/offline VM until a later hot-operation phase is explicitly designed.
 - Do not add qemu-nbd, qemu-storage-daemon, qemu-io, CSI sidecars, gRPC storage services, or libvirt-derived storage abstractions in the current phase.
@@ -339,10 +404,11 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 ## ACCEPTANCE TESTS
 
 - Fast macOS verification: run `scripts/verify.sh` for the local CI-equivalent loop before broader acceptance.
-- Linux-only acceptance: run `scripts/acceptance.sh full`; it executes acceptance tests with `go test -tags acceptance ./test/acceptance/...` inside the Lima guest.
+- Linux-only acceptance: run `scripts/acceptance.sh full`; it executes acceptance tests with `go test -v -tags acceptance -count=1 ./test/acceptance/...` inside the Lima guest and archives stdout/stderr under `test/log/<timestamp>-acceptance-full.log`.
 - Lima acceptance uses a short generated `LIMA_HOME` under the parent `.l/<repo_key>` to avoid Lima socket path limits, boots an ephemeral Ubuntu arm64 VM with nested KVM, runs the acceptance suite, deletes the VM, and preserves the gitignored persistent repo cache under project `.lima/cache/`.
 - `lima/govirta.yaml` must keep `vmType: "vz"` and `nestedVirtualization: true`; this path is verified on Apple M3 + macOS 26.5 + Lima 2.1.1.
-- Initial acceptance is no-network (`-nic none`); bridge/TAP acceptance waits for the real netlink manager before becoming part of the required gate.
+- Full acceptance includes the hostnet bridge/TAP path: `TestHostnetLinkBridgeTapEndToEnd` creates a real bridge + TAP with `internal/hostnet/link/linux`, direct-kernel boots CirrOS with QEMU, waits for QMP running state and serial login marker, then verifies host-to-guest ping over the bridge/TAP path.
+- `test/log/*.log` is gitignored; keep `test/log/.gitkeep` tracked and do not commit generated acceptance logs.
 - Setup required before pushing: `git config core.hooksPath .githooks`.
 - Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
 

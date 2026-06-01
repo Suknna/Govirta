@@ -25,6 +25,9 @@ const (
 	envQEMUImg           = "GOVIRTA_ACCEPTANCE_QEMU_IMG"
 	envFirmware          = "GOVIRTA_ACCEPTANCE_FIRMWARE"
 	envCirros            = "GOVIRTA_ACCEPTANCE_CIRROS"
+	envCirrosKernel      = "GOVIRTA_ACCEPTANCE_CIRROS_KERNEL"
+	envCirrosInitramfs   = "GOVIRTA_ACCEPTANCE_CIRROS_INITRAMFS"
+	envLimaGuest         = "GOVIRTA_ACCEPTANCE_LIMA_GUEST"
 )
 
 type acceptanceEnv struct {
@@ -32,6 +35,12 @@ type acceptanceEnv struct {
 	QEMUImg  string
 	Firmware string
 	Cirros   string
+}
+
+type hostnetAcceptanceEnv struct {
+	acceptanceEnv
+	Kernel    string
+	Initramfs string
 }
 
 type serialMarkerGroup struct {
@@ -56,6 +65,21 @@ func requireAcceptanceEnv(t *testing.T) acceptanceEnv {
 		QEMUImg:  requireExecutableEnv(t, envQEMUImg),
 		Firmware: requireFileEnv(t, envFirmware),
 		Cirros:   requireFileEnv(t, envCirros),
+	}
+}
+
+func requireHostnetAcceptanceEnv(t *testing.T) hostnetAcceptanceEnv {
+	t.Helper()
+
+	env := requireAcceptanceEnv(t)
+	if os.Getenv(envLimaGuest) != "1" {
+		t.Fatalf("%s=1 is required for host networking acceptance tests", envLimaGuest)
+	}
+
+	return hostnetAcceptanceEnv{
+		acceptanceEnv: env,
+		Kernel:        requireFileEnv(t, envCirrosKernel),
+		Initramfs:     requireFileEnv(t, envCirrosInitramfs),
 	}
 }
 
@@ -109,6 +133,84 @@ func runCommand(ctx context.Context, name string, args ...string) ([]byte, []byt
 
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), commandError(name, args, stdout.Bytes(), stderr.Bytes(), err)
+}
+
+func pingUntilSuccess(t *testing.T, ctx context.Context, ip string) bool {
+	t.Helper()
+
+	deadline := time.Now().Add(60 * time.Second)
+	var lastStdout []byte
+	var lastStderr []byte
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			lastErr = err
+			break
+		}
+
+		stdout, stderr, err := runCommand(ctx, "ping", "-c", "3", "-W", "1", ip)
+		lastStdout = stdout
+		lastStderr = stderr
+		lastErr = err
+		if err == nil {
+			return true
+		}
+
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	t.Logf("ping %s did not succeed: %v\nlast stdout:\n%s\nlast stderr:\n%s", ip, lastErr, lastStdout, lastStderr)
+	return false
+}
+
+func logNetworkDiagnostics(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{name: "ip", args: []string{"addr", "show"}},
+		{name: "ip", args: []string{"route", "show"}},
+		{name: "ip", args: []string{"link", "show", "type", "bridge"}},
+		{name: "ip", args: []string{"link", "show", "gvtap0"}},
+	}
+	for _, command := range commands {
+		stdout, stderr, err := runCommand(ctx, command.name, command.args...)
+		t.Logf("%s %s: %v\nstdout:\n%s\nstderr:\n%s", command.name, strings.Join(command.args, " "), err, stdout, stderr)
+	}
+}
+
+func startQEMUCommand(cmd *exec.Cmd) (*bytes.Buffer, error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return &stderr, err
+	}
+
+	return &stderr, nil
+}
+
+func writeSerialCommand(ctx context.Context, serialPath string, command string) error {
+	conn, err := dialUnixSocket(ctx, serialPath)
+	if err != nil {
+		return fmt.Errorf("dial serial socket %q: %w", serialPath, err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return fmt.Errorf("set serial write deadline: %w", err)
+	}
+	if _, err := conn.Write([]byte(command + "\n")); err != nil {
+		return fmt.Errorf("write serial command %q: %w", command, err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	return nil
 }
 
 func waitForQMPStatus(t *testing.T, ctx context.Context, socketPath string, want qmp.State) qmp.Status {
