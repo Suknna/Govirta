@@ -1,7 +1,7 @@
 # internal/hostnet/route Design
 
 Date: 2026-06-01
-Status: Approved design, pending implementation plan
+Status: Implemented and verified in branch `hostnet-route`
 
 ## Summary
 

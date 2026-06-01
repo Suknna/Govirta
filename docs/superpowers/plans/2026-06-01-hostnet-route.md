@@ -10,6 +10,12 @@
 
 ---
 
+## Execution result
+
+Implemented in branch `hostnet-route` on 2026-06-01. The implementation added the root route contract, Linux netlink route manager, fake-backed Linux tests, real Linux acceptance coverage, and AGENTS knowledge-base updates. Final verification ran `scripts/verify.sh` and `scripts/acceptance.sh full`; the passing acceptance log is archived under `test/log/` as a gitignored run artifact.
+
+The task checkboxes below are intentionally preserved as the original implementation plan rather than rewritten as a progress tracker. See git history for the executed commits.
+
 ## Source file structure and size plan
 
 Expected handwritten source file sizes stay below the 500-line soft limit. If an implementation file approaches 500 lines during execution, do not split mid-task; finish the planned task and record the split as a follow-up plan correction.
