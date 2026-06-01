@@ -20,6 +20,8 @@ coverage.out
 .opencode/
 .pomelo_mem/
 .tmp/
+test/log/*.log
+!test/log/.gitkeep
 
 # Worktrees
 .worktrees/

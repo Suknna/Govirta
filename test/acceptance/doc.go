@@ -11,4 +11,10 @@
 //   - GOVIRTA_ACCEPTANCE_QEMU_IMG: qemu-img binary to execute.
 //   - GOVIRTA_ACCEPTANCE_FIRMWARE: firmware image passed to QEMU.
 //   - GOVIRTA_ACCEPTANCE_CIRROS: Cirros guest image used as test input.
+//   - GOVIRTA_ACCEPTANCE_CIRROS_KERNEL: Cirros kernel used for direct boot.
+//   - GOVIRTA_ACCEPTANCE_CIRROS_INITRAMFS: Cirros initramfs used for direct boot.
+//
+// scripts/acceptance.sh runs the suite inside a Lima guest and additionally sets
+// GOVIRTA_ACCEPTANCE_LIMA_GUEST=1.
+// Host-side acceptance logs are archived under test/log/*.log.
 package acceptance
