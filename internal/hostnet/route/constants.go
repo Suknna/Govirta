@@ -52,6 +52,8 @@ const (
 	RouteProtocolBoot RouteProtocol = "boot"
 	// RouteProtocolDHCP reports routes installed from DHCP configuration.
 	RouteProtocolDHCP RouteProtocol = "dhcp"
+	// RouteProtocolUnspecified reports Linux path-selection results without protocol metadata.
+	RouteProtocolUnspecified RouteProtocol = "unspecified"
 
 	// DestinationCIDR selects an explicit IPv4 prefix destination.
 	DestinationCIDR DestinationMode = "cidr"

@@ -185,6 +185,24 @@ func logNetworkDiagnostics(t *testing.T, ctx context.Context) {
 	}
 }
 
+func logRouteDiagnostics(t *testing.T, ctx context.Context, probe string, linkName string) {
+	t.Helper()
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{name: "ip", args: []string{"route", "show", "table", "main"}},
+		{name: "ip", args: []string{"route", "get", probe}},
+		{name: "sysctl", args: []string{"net.ipv4.ip_forward"}},
+		{name: "ip", args: []string{"link", "show", linkName}},
+	}
+	for _, command := range commands {
+		stdout, stderr, err := runCommand(ctx, command.name, command.args...)
+		t.Logf("%s %s: %v\nstdout:\n%s\nstderr:\n%s", command.name, strings.Join(command.args, " "), err, stdout, stderr)
+	}
+}
+
 func startQEMUCommand(cmd *exec.Cmd) (*bytes.Buffer, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

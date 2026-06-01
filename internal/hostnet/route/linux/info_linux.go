@@ -256,6 +256,8 @@ func netlinkRouteInfo(h handle, observed netlink.Route) (route.RouteInfo, error)
 
 func routeProtocolFromNetlink(protocol netlink.RouteProtocol) (route.RouteProtocol, error) {
 	switch protocol {
+	case 0:
+		return route.RouteProtocolUnspecified, nil
 	case unix.RTPROT_STATIC:
 		return route.RouteProtocolStatic, nil
 	case unix.RTPROT_KERNEL:

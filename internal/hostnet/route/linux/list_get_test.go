@@ -74,6 +74,7 @@ func TestObservedProtocolMappings(t *testing.T) {
 		want     route.RouteProtocol
 		wantErr  error
 	}{
+		{protocol: 0, want: route.RouteProtocolUnspecified},
 		{protocol: unix.RTPROT_KERNEL, want: route.RouteProtocolKernel},
 		{protocol: unix.RTPROT_BOOT, want: route.RouteProtocolBoot},
 		{protocol: unix.RTPROT_DHCP, want: route.RouteProtocolDHCP},

@@ -150,8 +150,12 @@ run_acceptance() {
 			printf "missing required guest tool: ping\n" >&2
 			exit 1
 		fi
+		if [ ! -x "$HOME/.local/go/bin/go" ]; then
+			printf "missing required guest tool: %s\n" "$HOME/.local/go/bin/go" >&2
+			exit 1
+		fi
+		sudo sysctl -w net.ipv4.ip_forward=1
 		sudo -E env \
-			PATH="$HOME/.local/go/bin:$PATH" \
 			GOCACHE=/govirta-cache/gocache \
 			GOMODCACHE=/govirta-cache/gomodcache \
 			GOVIRTA_ACCEPTANCE=1 \
@@ -162,7 +166,7 @@ run_acceptance() {
 			GOVIRTA_ACCEPTANCE_CIRROS=/govirta-cache/images/cirros-aarch64.qcow2 \
 			GOVIRTA_ACCEPTANCE_CIRROS_KERNEL=/govirta-cache/images/cirros-0.6.2-aarch64-kernel \
 			GOVIRTA_ACCEPTANCE_CIRROS_INITRAMFS=/govirta-cache/images/cirros-0.6.2-aarch64-initramfs \
-			go test -v -tags acceptance -count=1 ./test/acceptance/...
+			"$HOME/.local/go/bin/go" test -v -tags acceptance -count=1 ./test/acceptance/...
 	'
 }
 
