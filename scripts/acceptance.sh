@@ -3,13 +3,15 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 instance_name="govirta-acceptance"
-# 始终基于主仓库根目录计算 Lima 短路径，避免 worktree 内运行时路径漂移
-main_repo_root=$(cd -- "$repo_root" && git rev-parse --git-common-dir | sed 's|/\.git$||')
-# git-common-dir 可能返回相对路径，规范化为绝对路径
-case "$main_repo_root" in
+# 始终基于主仓库根目录计算 Lima 短路径，避免 worktree 内运行时路径漂移。
+# `git rev-parse --git-common-dir` 在主仓库可能返回相对 `.git`，在 worktree
+# 返回主仓库的绝对 `.git` 路径；先规范化 common dir，再取其父目录。
+git_common_dir=$(cd -- "$repo_root" && git rev-parse --git-common-dir)
+case "$git_common_dir" in
   /*) ;;
-  *)  main_repo_root=$(cd -- "$repo_root" && cd -- "$main_repo_root" && pwd) ;;
+  *)  git_common_dir=$(cd -- "$repo_root" && cd -- "$git_common_dir" && pwd) ;;
 esac
+main_repo_root=$(dirname -- "$git_common_dir")
 repo_parent=$(dirname -- "$main_repo_root")
 repo_key=$(printf '%s' "$main_repo_root" | cksum | cut -d ' ' -f 1)
 lima_home="${GOVIRTA_LIMA_HOME:-$repo_parent/.l/$repo_key}"

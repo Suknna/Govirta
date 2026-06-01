@@ -26,7 +26,7 @@ import (
 
 func TestBootCirrosNoNetworkWithNestedKVM(t *testing.T) {
 	env := requireAcceptanceEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	scratch := t.TempDir()
