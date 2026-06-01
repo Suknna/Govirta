@@ -103,6 +103,13 @@ func TestValidationRejectsInvalidRouteSpecFields(t *testing.T) {
 			want: routeerr.ErrInvalidRequest,
 		},
 		{
+			name: "default route as cidr",
+			edit: func(spec *route.RouteSpec) {
+				spec.Destination = route.Destination{Mode: route.DestinationCIDR, CIDR: netip.MustParsePrefix("0.0.0.0/0")}
+			},
+			want: routeerr.ErrInvalidRequest,
+		},
+		{
 			name: "gateway any",
 			edit: func(spec *route.RouteSpec) { spec.Gateway = route.Gateway{Mode: route.GatewayAny} },
 			want: routeerr.ErrInvalidRequest,
@@ -232,6 +239,28 @@ func TestValidationAllowsExplicitRouteFilterModes(t *testing.T) {
 
 	if err := validateRouteFilter(filter); err != nil {
 		t.Fatalf("validateRouteFilter error = %v, want nil", err)
+	}
+}
+
+func TestValidationRejectsDefaultRouteAsCIDRFilter(t *testing.T) {
+	filter := route.RouteFilter{
+		Family: route.FamilyIPv4,
+		Table:  route.RouteTableMain,
+		Link: route.LinkFilter{
+			Mode: route.LinkAny,
+		},
+		Destination: route.Destination{
+			Mode: route.DestinationCIDR,
+			CIDR: netip.MustParsePrefix("0.0.0.0/0"),
+		},
+		Gateway: route.Gateway{
+			Mode: route.GatewayAny,
+		},
+		Metric: route.AnyMetric(),
+	}
+
+	if err := validateRouteFilter(filter); !errors.Is(err, routeerr.ErrInvalidRequest) {
+		t.Fatalf("validateRouteFilter error = %v, want ErrInvalidRequest", err)
 	}
 }
 

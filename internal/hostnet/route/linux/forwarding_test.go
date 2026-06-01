@@ -73,6 +73,28 @@ func TestGetIPv4ForwardingMapsMissingProcPathToUnsupported(t *testing.T) {
 	}
 }
 
+func TestGetIPv4ForwardingReturnsCanceledContextDirectly(t *testing.T) {
+	manager := &Manager{forwarding: fakeForwardingReader{value: "1\n"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := manager.GetIPv4Forwarding(ctx)
+	if err != context.Canceled {
+		t.Fatalf("GetIPv4Forwarding error = %v, want direct context.Canceled", err)
+	}
+}
+
+func TestCheckIPv4ForwardingReturnsCanceledContextDirectly(t *testing.T) {
+	manager := &Manager{forwarding: fakeForwardingReader{value: "1\n"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := manager.CheckIPv4Forwarding(ctx, route.IPv4ForwardingEnabled)
+	if err != context.Canceled {
+		t.Fatalf("CheckIPv4Forwarding error = %v, want direct context.Canceled", err)
+	}
+}
+
 func TestCheckIPv4ForwardingReportsNotReady(t *testing.T) {
 	manager := &Manager{forwarding: fakeForwardingReader{value: "0\n"}}
 

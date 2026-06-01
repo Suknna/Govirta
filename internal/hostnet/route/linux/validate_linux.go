@@ -168,7 +168,7 @@ func validateFilterDestination(destination route.Destination) error {
 }
 
 func validateIPv4Prefix(prefix netip.Prefix) error {
-	if !prefix.IsValid() || !prefix.Addr().Is4() {
+	if !prefix.IsValid() || !prefix.Addr().Is4() || prefix.Bits() == 0 {
 		return routeerr.ErrInvalidRequest
 	}
 

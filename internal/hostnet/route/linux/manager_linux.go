@@ -37,11 +37,14 @@ func (m *Manager) forwardingReader() forwardingReader {
 // GetIPv4Forwarding returns the observed Linux IPv4 forwarding state.
 func (m *Manager) GetIPv4Forwarding(ctx context.Context) (route.IPv4ForwardingInfo, error) {
 	if err := checkContext(ctx); err != nil {
-		return route.IPv4ForwardingInfo{}, translateError("get IPv4 forwarding", err)
+		return route.IPv4ForwardingInfo{}, err
 	}
 
 	value, err := m.forwardingReader().ReadIPv4Forwarding(ctx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return route.IPv4ForwardingInfo{}, err
+		}
 		if errors.Is(err, os.ErrNotExist) {
 			return route.IPv4ForwardingInfo{}, fmt.Errorf("get IPv4 forwarding: %w: %w", routeerr.ErrUnsupported, err)
 		}
@@ -62,7 +65,7 @@ func (m *Manager) GetIPv4Forwarding(ctx context.Context) (route.IPv4ForwardingIn
 // CheckIPv4Forwarding verifies the observed Linux IPv4 forwarding state.
 func (m *Manager) CheckIPv4Forwarding(ctx context.Context, expected route.IPv4ForwardingState) (route.IPv4ForwardingInfo, error) {
 	if err := checkContext(ctx); err != nil {
-		return route.IPv4ForwardingInfo{}, translateError("check IPv4 forwarding", err)
+		return route.IPv4ForwardingInfo{}, err
 	}
 	if err := validateForwardingState(expected); err != nil {
 		return route.IPv4ForwardingInfo{}, translateError("check IPv4 forwarding", err)
