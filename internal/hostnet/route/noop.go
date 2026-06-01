@@ -2,67 +2,84 @@ package route
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/suknna/govirta/internal/hostnet/route/routeerr"
 )
 
+// NoopManager is a route Manager implementation for composition tests.
+//
+// It validates only nil or canceled contexts and reports routeerr.ErrUnsupported
+// for live host route operations.
 type NoopManager struct{}
 
+var _ Manager = NoopManager{}
+
+// NewNoopManager returns a no-op host route manager.
 func NewNoopManager() NoopManager { return NoopManager{} }
 
 func (NoopManager) GetIPv4Forwarding(ctx context.Context) (IPv4ForwardingInfo, error) {
-	if err := noopRouteOperationError(ctx, "get IPv4 forwarding"); err != nil {
+	if err := noopRouteOperationError(ctx); err != nil {
 		return IPv4ForwardingInfo{}, err
 	}
-	return IPv4ForwardingInfo{}, nil
+
+	return IPv4ForwardingInfo{}, routeerr.ErrUnsupported
 }
 
 func (NoopManager) CheckIPv4Forwarding(ctx context.Context, _ IPv4ForwardingState) (IPv4ForwardingInfo, error) {
-	if err := noopRouteOperationError(ctx, "check IPv4 forwarding"); err != nil {
+	if err := noopRouteOperationError(ctx); err != nil {
 		return IPv4ForwardingInfo{}, err
 	}
-	return IPv4ForwardingInfo{}, nil
+
+	return IPv4ForwardingInfo{}, routeerr.ErrUnsupported
 }
 
 func (NoopManager) AddRoute(ctx context.Context, _ RouteSpec) (RouteInfo, error) {
-	if err := noopRouteOperationError(ctx, "add route"); err != nil {
+	if err := noopRouteOperationError(ctx); err != nil {
 		return RouteInfo{}, err
 	}
-	return RouteInfo{}, nil
+
+	return RouteInfo{}, routeerr.ErrUnsupported
 }
 
 func (NoopManager) ReplaceRoute(ctx context.Context, _ RouteSpec) (RouteInfo, error) {
-	if err := noopRouteOperationError(ctx, "replace route"); err != nil {
+	if err := noopRouteOperationError(ctx); err != nil {
 		return RouteInfo{}, err
 	}
-	return RouteInfo{}, nil
+
+	return RouteInfo{}, routeerr.ErrUnsupported
 }
 
 func (NoopManager) DeleteRoute(ctx context.Context, _ RouteSpec) error {
-	return noopRouteOperationError(ctx, "delete route")
+	if err := noopRouteOperationError(ctx); err != nil {
+		return err
+	}
+
+	return routeerr.ErrUnsupported
 }
 
 func (NoopManager) ListRoutes(ctx context.Context, _ RouteFilter) ([]RouteInfo, error) {
-	if err := noopRouteOperationError(ctx, "list routes"); err != nil {
+	if err := noopRouteOperationError(ctx); err != nil {
 		return nil, err
 	}
-	return nil, nil
+
+	return nil, routeerr.ErrUnsupported
 }
 
 func (NoopManager) GetRoute(ctx context.Context, _ RouteQuery) (RouteInfo, error) {
-	if err := noopRouteOperationError(ctx, "get route"); err != nil {
+	if err := noopRouteOperationError(ctx); err != nil {
 		return RouteInfo{}, err
 	}
-	return RouteInfo{}, nil
+
+	return RouteInfo{}, routeerr.ErrUnsupported
 }
 
-func noopRouteOperationError(ctx context.Context, operation string) error {
+func noopRouteOperationError(ctx context.Context) error {
 	if ctx == nil {
-		return fmt.Errorf("%s: %w", operation, routeerr.ErrInvalidRequest)
+		return routeerr.ErrInvalidRequest
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return fmt.Errorf("%s: %w", operation, routeerr.ErrUnsupported)
+
+	return nil
 }
