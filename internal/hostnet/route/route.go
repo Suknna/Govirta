@@ -55,8 +55,8 @@ type Manager interface {
 	// ListRoutes returns observed host IPv4 routes that match filter.
 	//
 	// Filters must use explicit modes for destination, gateway, link, and metric
-	// matching. Implementations may return partial results with
-	// routeerr.ErrIncompleteList when the platform reports incomplete enumeration.
+	// matching. When the platform reports incomplete enumeration, implementations
+	// return routeerr.ErrIncompleteList instead of returning a partial success.
 	ListRoutes(ctx context.Context, filter RouteFilter) ([]RouteInfo, error)
 
 	// GetRoute returns the kernel path selection for query.Destination.
@@ -119,9 +119,10 @@ type RouteSpec struct {
 
 // RouteFilter selects which observed host routes ListRoutes returns.
 //
-// All behavior-affecting filter dimensions must be explicit. DestinationAny,
-// GatewayAny, LinkAny, and MetricAny select all values for their dimension;
-// concrete modes select only matching observed route fields.
+// Family and Table must be explicitly set. All behavior-affecting filter
+// dimensions must be explicit. DestinationAny, GatewayAny, LinkAny, and
+// MetricAny select all values for their dimension; concrete modes select only
+// matching observed route fields.
 type RouteFilter struct {
 	Family      Family
 	Table       RouteTable

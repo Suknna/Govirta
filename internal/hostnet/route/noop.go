@@ -17,6 +17,7 @@ var _ Manager = NoopManager{}
 // NewNoopManager returns a no-op host route manager.
 func NewNoopManager() NoopManager { return NoopManager{} }
 
+// GetIPv4Forwarding validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) GetIPv4Forwarding(ctx context.Context) (IPv4ForwardingInfo, error) {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return IPv4ForwardingInfo{}, err
@@ -25,6 +26,7 @@ func (NoopManager) GetIPv4Forwarding(ctx context.Context) (IPv4ForwardingInfo, e
 	return IPv4ForwardingInfo{}, routeerr.ErrUnsupported
 }
 
+// CheckIPv4Forwarding validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) CheckIPv4Forwarding(ctx context.Context, _ IPv4ForwardingState) (IPv4ForwardingInfo, error) {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return IPv4ForwardingInfo{}, err
@@ -33,6 +35,7 @@ func (NoopManager) CheckIPv4Forwarding(ctx context.Context, _ IPv4ForwardingStat
 	return IPv4ForwardingInfo{}, routeerr.ErrUnsupported
 }
 
+// AddRoute validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) AddRoute(ctx context.Context, _ RouteSpec) (RouteInfo, error) {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return RouteInfo{}, err
@@ -41,6 +44,7 @@ func (NoopManager) AddRoute(ctx context.Context, _ RouteSpec) (RouteInfo, error)
 	return RouteInfo{}, routeerr.ErrUnsupported
 }
 
+// ReplaceRoute validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) ReplaceRoute(ctx context.Context, _ RouteSpec) (RouteInfo, error) {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return RouteInfo{}, err
@@ -49,6 +53,7 @@ func (NoopManager) ReplaceRoute(ctx context.Context, _ RouteSpec) (RouteInfo, er
 	return RouteInfo{}, routeerr.ErrUnsupported
 }
 
+// DeleteRoute validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) DeleteRoute(ctx context.Context, _ RouteSpec) error {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return err
@@ -57,6 +62,7 @@ func (NoopManager) DeleteRoute(ctx context.Context, _ RouteSpec) error {
 	return routeerr.ErrUnsupported
 }
 
+// ListRoutes validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) ListRoutes(ctx context.Context, _ RouteFilter) ([]RouteInfo, error) {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return nil, err
@@ -65,6 +71,7 @@ func (NoopManager) ListRoutes(ctx context.Context, _ RouteFilter) ([]RouteInfo, 
 	return nil, routeerr.ErrUnsupported
 }
 
+// GetRoute validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) GetRoute(ctx context.Context, _ RouteQuery) (RouteInfo, error) {
 	if err := noopRouteOperationError(ctx); err != nil {
 		return RouteInfo{}, err
