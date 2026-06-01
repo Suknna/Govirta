@@ -161,6 +161,15 @@ func TestValidationAllowsExplicitZeroMetric(t *testing.T) {
 	}
 }
 
+func TestMetricFitsIntRejectsOverflowForNarrowInt(t *testing.T) {
+	if metricFitsInt(1<<31, 32) {
+		t.Fatalf("metricFitsInt accepted value beyond signed 32-bit int")
+	}
+	if !metricFitsInt(1<<31, 64) {
+		t.Fatalf("metricFitsInt rejected uint32 value on signed 64-bit int")
+	}
+}
+
 func TestValidationAllowsRouteShapeMatrix(t *testing.T) {
 	tests := []struct {
 		name string

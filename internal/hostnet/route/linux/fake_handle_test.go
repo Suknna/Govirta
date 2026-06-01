@@ -16,6 +16,7 @@ type fakeHandle struct {
 	routes       []netlink.Route
 	routeGet     []netlink.Route
 	calls        []string
+	addedRoutes  []netlink.Route
 
 	linkByNameErr           error
 	linkByIndexErr          error
@@ -25,6 +26,7 @@ type fakeHandle struct {
 	routeListFilteredErr    error
 	routeGetErr             error
 	lastRouteListFilterMask uint64
+	lastAddedRouteFamily    int
 }
 
 func newFakeHandle() *fakeHandle {
@@ -75,6 +77,8 @@ func (f *fakeHandle) RouteAdd(route *netlink.Route) error {
 		}
 	}
 	f.routes = append(f.routes, cloneRoute(*route))
+	f.addedRoutes = append(f.addedRoutes, cloneRoute(*route))
+	f.lastAddedRouteFamily = route.Family
 	return nil
 }
 
@@ -83,14 +87,17 @@ func (f *fakeHandle) RouteReplace(route *netlink.Route) error {
 	if f.routeReplaceErr != nil {
 		return f.routeReplaceErr
 	}
-	next := f.routes[:0]
-	for _, existing := range f.routes {
-		if sameRouteSelector(existing, *route) {
-			continue
+	for i, existing := range f.routes {
+		if sameRouteIdentity(existing, *route) {
+			f.routes[i] = cloneRoute(*route)
+			f.addedRoutes = append(f.addedRoutes, cloneRoute(*route))
+			f.lastAddedRouteFamily = route.Family
+			return nil
 		}
-		next = append(next, existing)
 	}
-	f.routes = append(next, cloneRoute(*route))
+	f.routes = append(f.routes, cloneRoute(*route))
+	f.addedRoutes = append(f.addedRoutes, cloneRoute(*route))
+	f.lastAddedRouteFamily = route.Family
 	return nil
 }
 
@@ -163,36 +170,19 @@ func routeMatchesNetlinkFilter(candidate, filter netlink.Route, mask uint64) boo
 	if mask&netlink.RT_FILTER_OIF != 0 && candidate.LinkIndex != filter.LinkIndex {
 		return false
 	}
-	if mask&netlink.RT_FILTER_DST != 0 && !sameIPNet(candidate.Dst, filter.Dst) {
+	if mask&netlink.RT_FILTER_DST != 0 && !sameNetIPNet(candidate.Dst, filter.Dst) {
 		return false
 	}
 	if mask&netlink.RT_FILTER_GW != 0 && !candidate.Gw.Equal(filter.Gw) {
-		return false
-	}
-	if mask&netlink.RT_FILTER_PRIORITY != 0 && candidate.Priority != filter.Priority {
 		return false
 	}
 	return true
 }
 
 func sameRouteSelector(left, right netlink.Route) bool {
-	return left.Table == right.Table &&
-		left.LinkIndex == right.LinkIndex &&
-		sameIPNet(left.Dst, right.Dst) &&
-		left.Gw.Equal(right.Gw)
+	return sameNetlinkRouteSelector(left, right)
 }
 
 func sameRouteIdentity(left, right netlink.Route) bool {
-	return sameRouteSelector(left, right) &&
-		left.Type == right.Type &&
-		left.Scope == right.Scope &&
-		left.Protocol == right.Protocol &&
-		left.Priority == right.Priority
-}
-
-func sameIPNet(left, right *net.IPNet) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return left.IP.Equal(right.IP) && string(left.Mask) == string(right.Mask)
+	return sameNetlinkRouteIdentity(left, right)
 }

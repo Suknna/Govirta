@@ -26,9 +26,9 @@ func TestListRoutesReturnsSortedRoutesForAnyFilters(t *testing.T) {
 	}
 	got := routeInfoKeys(infos)
 	want := []string{
-		"cidr/10.0.0.0/8|gvbr0|ipv4/192.168.100.1|0000000050|main|global|static",
-		"cidr/198.51.100.0/24|gvrt0|none|0000000000|main|link|static",
-		"default|eth0|ipv4/192.168.1.1|0000000100|main|global|static",
+		"main|cidr/10.0.0.0/8|gvbr0|ipv4/192.168.100.1|0000000050|global|static",
+		"main|cidr/198.51.100.0/24|gvrt0|none|0000000000|link|static",
+		"main|default|eth0|ipv4/192.168.1.1|0000000100|global|static",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("route keys = %#v, want %#v", got, want)
@@ -120,7 +120,8 @@ func TestObservedTypeMappings(t *testing.T) {
 	}{
 		{routeType: unix.RTN_UNICAST, want: route.RouteTypeUnicast},
 		{routeType: unix.RTN_BLACKHOLE, wantErr: routeerr.ErrUnsupported},
-		{routeType: 0, wantErr: routeerr.ErrInvalidObservedState},
+		{routeType: unix.RTN_UNREACHABLE, wantErr: routeerr.ErrUnsupported},
+		{routeType: 250, wantErr: routeerr.ErrInvalidObservedState},
 	}
 	for _, tt := range tests {
 		got, err := routeTypeFromNetlink(tt.routeType)
@@ -255,9 +256,24 @@ func TestNetlinkFilterMaskIncludesExpressibleFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("netlinkFilterForRouteFilter error = %v, want nil", err)
 	}
-	want := uint64(netlink.RT_FILTER_TABLE | netlink.RT_FILTER_OIF | netlink.RT_FILTER_DST | netlink.RT_FILTER_GW | netlink.RT_FILTER_PRIORITY)
+	want := uint64(netlink.RT_FILTER_TABLE | netlink.RT_FILTER_OIF | netlink.RT_FILTER_DST | netlink.RT_FILTER_GW)
 	if mask != want {
 		t.Fatalf("mask = %d, want %d", mask, want)
+	}
+}
+
+func TestMetricFilterUsesGoSideFiltering(t *testing.T) {
+	manager, fake := managerWithListRoutes(t)
+
+	infos, err := manager.ListRoutes(context.Background(), filterWith(func(f *route.RouteFilter) { f.Metric = route.FilterMetric(100) }))
+	if err != nil {
+		t.Fatalf("ListRoutes error = %v, want nil", err)
+	}
+	if fake.lastRouteListFilterMask&netlink.RT_FILTER_PRIORITY != 0 {
+		t.Fatalf("filter mask = %d, want no RT_FILTER_PRIORITY", fake.lastRouteListFilterMask)
+	}
+	if len(infos) != 1 || infos[0].Metric.Value != 100 {
+		t.Fatalf("infos = %#v, want one route with metric 100", infos)
 	}
 }
 

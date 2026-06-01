@@ -112,8 +112,12 @@ func (m *Manager) AddRoute(ctx context.Context, spec route.RouteSpec) (route.Rou
 
 // ReplaceRoute creates or replaces a Linux IPv4 route and returns observed kernel state.
 func (m *Manager) ReplaceRoute(ctx context.Context, spec route.RouteSpec) (route.RouteInfo, error) {
-	return applyRoute(ctx, m.routeHandle(), "replace route", spec, func(nlRoute *netlink.Route) error {
-		return m.routeHandle().RouteReplace(nlRoute)
+	h := m.routeHandle()
+	return applyRoute(ctx, h, "replace route", spec, func(nlRoute *netlink.Route) error {
+		if err := h.RouteReplace(nlRoute); err != nil {
+			return err
+		}
+		return cleanupStaleRoutesAfterReplace(h, spec)
 	})
 }
 

@@ -4,10 +4,12 @@ package linux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"sort"
+	"strconv"
 
 	linkpkg "github.com/suknna/govirta/internal/hostnet/link"
 	"github.com/suknna/govirta/internal/hostnet/route"
@@ -30,6 +32,7 @@ func netlinkRouteForSpec(h handle, spec route.RouteSpec) (netlink.Route, error) 
 	}
 
 	return netlink.Route{
+		Family:    netlink.FAMILY_V4,
 		LinkIndex: observedLink.Attrs().Index,
 		Dst:       destination,
 		Gw:        gatewayIP(spec.Gateway),
@@ -91,8 +94,78 @@ func observedRouteForSpec(h handle, operation string, spec route.RouteSpec) (rou
 	return route.RouteInfo{}, translateError(operation, routeerr.ErrNotFound)
 }
 
+func cleanupStaleRoutesAfterReplace(h handle, spec route.RouteSpec) error {
+	nlFilter, err := netlinkRouteForSpec(h, spec)
+	if err != nil {
+		return err
+	}
+	nlRoutes, err := h.RouteListFiltered(netlink.FAMILY_V4, &nlFilter, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF|netlink.RT_FILTER_DST|netlink.RT_FILTER_GW)
+	if err != nil {
+		return translateError("replace route cleanup", err)
+	}
+
+	var cleanupErrs []error
+	for _, nlRoute := range nlRoutes {
+		if !staleManagedNetlinkRoute(nlRoute, nlFilter) {
+			continue
+		}
+		candidate := cloneNetlinkRoute(nlRoute)
+		if err := h.RouteDel(&candidate); err != nil {
+			cleanupErrs = append(cleanupErrs, translateError("replace route cleanup", err))
+		}
+	}
+
+	return errors.Join(cleanupErrs...)
+}
+
+func staleManagedNetlinkRoute(candidate, target netlink.Route) bool {
+	return candidate.Family == target.Family &&
+		candidate.Table == target.Table &&
+		candidate.LinkIndex == target.LinkIndex &&
+		sameNetIPNet(candidate.Dst, target.Dst) &&
+		candidate.Gw.Equal(target.Gw) &&
+		candidate.Type == unix.RTN_UNICAST &&
+		candidate.Protocol == unix.RTPROT_STATIC &&
+		candidate.Scope == target.Scope &&
+		!sameNetlinkRouteIdentity(candidate, target)
+}
+
+func cloneNetlinkRoute(route netlink.Route) netlink.Route {
+	cloned := route
+	if route.Dst != nil {
+		cloned.Dst = &net.IPNet{IP: append(net.IP(nil), route.Dst.IP...), Mask: append(net.IPMask(nil), route.Dst.Mask...)}
+	}
+	if route.Gw != nil {
+		cloned.Gw = append(net.IP(nil), route.Gw...)
+	}
+	return cloned
+}
+
+func sameNetlinkRouteIdentity(left, right netlink.Route) bool {
+	return sameNetlinkRouteSelector(left, right) &&
+		left.Type == right.Type &&
+		left.Scope == right.Scope &&
+		left.Protocol == right.Protocol &&
+		left.Priority == right.Priority
+}
+
+func sameNetlinkRouteSelector(left, right netlink.Route) bool {
+	return left.Family == right.Family &&
+		left.Table == right.Table &&
+		left.LinkIndex == right.LinkIndex &&
+		sameNetIPNet(left.Dst, right.Dst) &&
+		left.Gw.Equal(right.Gw)
+}
+
+func sameNetIPNet(left, right *net.IPNet) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.IP.Equal(right.IP) && string(left.Mask) == string(right.Mask)
+}
+
 func netlinkFilterForRouteFilter(h handle, filter route.RouteFilter) (netlink.Route, uint64, error) {
-	nlFilter := netlink.Route{Table: routeTableToNetlink(filter.Table)}
+	nlFilter := netlink.Route{Family: netlink.FAMILY_V4, Table: routeTableToNetlink(filter.Table)}
 	mask := uint64(netlink.RT_FILTER_TABLE)
 
 	if filter.Link.Mode == route.LinkName {
@@ -116,11 +189,6 @@ func netlinkFilterForRouteFilter(h handle, filter route.RouteFilter) (netlink.Ro
 	if filter.Gateway.Mode == route.GatewayIPv4 {
 		nlFilter.Gw = gatewayIP(filter.Gateway)
 		mask |= netlink.RT_FILTER_GW
-	}
-
-	if filter.Metric.Mode == route.MetricValue {
-		nlFilter.Priority = int(filter.Metric.Value)
-		mask |= netlink.RT_FILTER_PRIORITY
 	}
 
 	return nlFilter, mask, nil
@@ -218,11 +286,26 @@ func routeTypeFromNetlink(routeType int) (route.RouteType, error) {
 	switch routeType {
 	case unix.RTN_UNICAST:
 		return route.RouteTypeUnicast, nil
-	case 0:
-		return "", fmt.Errorf("observed route type %d: %w", routeType, routeerr.ErrInvalidObservedState)
-	default:
+	case unix.RTN_BLACKHOLE, unix.RTN_UNREACHABLE, unix.RTN_PROHIBIT, unix.RTN_THROW, unix.RTN_NAT, unix.RTN_LOCAL, unix.RTN_BROADCAST, unix.RTN_ANYCAST, unix.RTN_MULTICAST, unix.RTN_XRESOLVE:
 		return "", fmt.Errorf("observed route type %d: %w", routeType, routeerr.ErrUnsupported)
+	default:
+		return "", fmt.Errorf("observed route type %d: %w", routeType, routeerr.ErrInvalidObservedState)
 	}
+}
+
+func metricFitsNativeInt(value uint32) bool {
+	return metricFitsInt(value, strconv.IntSize)
+}
+
+func metricFitsInt(value uint32, intSize int) bool {
+	if intSize >= 64 {
+		return true
+	}
+	return value <= uint32(maxIntForSize(intSize))
+}
+
+func maxIntForSize(intSize int) int64 {
+	return int64(1)<<(intSize-1) - 1
 }
 
 func exactRouteMatch(info route.RouteInfo, spec route.RouteSpec) bool {
@@ -259,9 +342,7 @@ func routeInfoMatchesFilter(info route.RouteInfo, filter route.RouteFilter) bool
 
 func sortRouteInfos(infos []route.RouteInfo) {
 	sort.Slice(infos, func(i, j int) bool {
-		left := routeInfoSortKey(infos[i])
-		right := routeInfoSortKey(infos[j])
-		return left < right
+		return routeInfoSortKey(infos[i]) < routeInfoSortKey(infos[j])
 	})
 }
 
@@ -274,7 +355,7 @@ func routeInfoSortKey(info route.RouteInfo) string {
 	if info.Gateway.Mode == route.GatewayIPv4 {
 		gateway += "/" + info.Gateway.Addr.String()
 	}
-	return fmt.Sprintf("%s|%s|%s|%010d|%s|%s|%s", destination, info.LinkName, gateway, info.Metric.Value, info.Table, info.Scope, info.Protocol)
+	return fmt.Sprintf("%s|%s|%s|%s|%010d|%s|%s", info.Table, destination, info.LinkName, gateway, info.Metric.Value, info.Scope, info.Protocol)
 }
 
 func destinationFromNetlink(dst *net.IPNet) (route.Destination, error) {

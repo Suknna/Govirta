@@ -45,6 +45,9 @@ func validateRouteSpec(spec route.RouteSpec) error {
 	if !spec.Metric.Set {
 		return routeerr.ErrInvalidRequest
 	}
+	if !metricFitsNativeInt(spec.Metric.Value) {
+		return routeerr.ErrInvalidRequest
+	}
 	if err := validateLinkName(spec.LinkName); err != nil {
 		return err
 	}
@@ -75,7 +78,12 @@ func validateRouteFilter(filter route.RouteFilter) error {
 		return err
 	}
 	switch filter.Metric.Mode {
-	case route.MetricAny, route.MetricValue:
+	case route.MetricAny:
+		return nil
+	case route.MetricValue:
+		if !metricFitsNativeInt(filter.Metric.Value) {
+			return routeerr.ErrInvalidRequest
+		}
 		return nil
 	default:
 		return routeerr.ErrInvalidRequest
