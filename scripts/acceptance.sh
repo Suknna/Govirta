@@ -154,6 +154,13 @@ run_acceptance() {
 			printf "missing required guest tool: %s\n" "$HOME/.local/go/bin/go" >&2
 			exit 1
 		fi
+		old_ip_forward=$(sysctl -n net.ipv4.ip_forward)
+		printf "previous net.ipv4.ip_forward = %s\n" "$old_ip_forward"
+		restore_ipv4_forwarding() {
+			sudo sysctl -w "net.ipv4.ip_forward=$old_ip_forward" >/dev/null || \
+				printf "failed to restore net.ipv4.ip_forward=%s\n" "$old_ip_forward" >&2
+		}
+		trap restore_ipv4_forwarding EXIT
 		sudo sysctl -w net.ipv4.ip_forward=1
 		sudo -E env \
 			GOCACHE=/govirta-cache/gocache \
