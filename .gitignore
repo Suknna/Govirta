@@ -25,4 +25,5 @@ test/log/*.log
 
 # Worktrees
 .worktrees/
+.l/
 worktrees/

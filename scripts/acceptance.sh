@@ -3,8 +3,15 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 instance_name="govirta-acceptance"
-repo_parent=$(dirname -- "$repo_root")
-repo_key=$(printf '%s' "$repo_root" | cksum | cut -d ' ' -f 1)
+# 始终基于主仓库根目录计算 Lima 短路径，避免 worktree 内运行时路径漂移
+main_repo_root=$(cd -- "$repo_root" && git rev-parse --git-common-dir | sed 's|/\.git$||')
+# git-common-dir 可能返回相对路径，规范化为绝对路径
+case "$main_repo_root" in
+  /*) ;;
+  *)  main_repo_root=$(cd -- "$repo_root" && cd -- "$main_repo_root" && pwd) ;;
+esac
+repo_parent=$(dirname -- "$main_repo_root")
+repo_key=$(printf '%s' "$main_repo_root" | cksum | cut -d ' ' -f 1)
 lima_home="${GOVIRTA_LIMA_HOME:-$repo_parent/.l/$repo_key}"
 cache_dir="$repo_root/.lima/cache"
 generated_config="$cache_dir/govirta.generated.yaml"
