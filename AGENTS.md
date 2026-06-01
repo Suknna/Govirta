@@ -1,12 +1,12 @@
 # PROJECT AGENTS KNOWLEDGE BASE
 
-**Generated:** 2026-05-28
-**Commit:** 6c06c5f
+**Generated:** 2026-06-01
+**Commit:** 981938d
 **Branch:** main
 
 <!--
 Verified-against:
-  base_commit: 6c06c5f
+  base_commit: 981938d
   files:
     - cmd/govirtad/main.go
     - cmd/govirtlet/main.go
