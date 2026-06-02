@@ -518,7 +518,7 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - `lima/govirta.yaml` must keep `vmType: "vz"` and `nestedVirtualization: true`; this path is verified on Apple M3 + macOS 26.5 + Lima 2.1.1.
 - Full acceptance includes the hostnet bridge/TAP path: `TestHostnetLinkBridgeTapEndToEnd` creates a real bridge + TAP with `internal/hostnet/link/linux`, direct-kernel boots CirrOS with QEMU, waits for QMP running state and serial login marker, then verifies host-to-guest ping over the bridge/TAP path.
 - Full acceptance includes the hostnet route path: `TestHostnetRoutePrimitives` creates a real dummy link, checks IPv4 forwarding readiness, exercises add/list/get/replace/delete route primitives through `internal/hostnet/route/linux`, and relies on `scripts/acceptance.sh` to enable `net.ipv4.ip_forward=1` for the guest test run.
-- Full acceptance includes the hostnet firewall path: `TestHostnetFirewallPrimitives` exercises real nftables masquerade and endpoint anti-spoofing lifecycle behavior through `internal/hostnet/firewall/linux` without validating full guest internet egress.
+- Full acceptance includes the hostnet firewall path: `TestHostnetFirewallMasqueradePrimitives` and `TestHostnetFirewallAntiSpoofingPrimitives` exercise real nftables masquerade and endpoint anti-spoofing lifecycle behavior through `internal/hostnet/firewall/linux` without validating full guest internet egress.
 - `test/log/*.log` is gitignored; keep `test/log/.gitkeep` tracked and do not commit generated acceptance logs.
 - Setup required before pushing: `git config core.hooksPath .githooks`.
 - Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
