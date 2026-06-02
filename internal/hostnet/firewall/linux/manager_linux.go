@@ -38,7 +38,7 @@ func (m *Manager) EnsureMasquerade(ctx context.Context, spec firewall.Masquerade
 	if err := validateMasqueradeSpec(ctx, spec); err != nil {
 		return firewall.RuleInfo{}, translateError("ensure masquerade", err)
 	}
-	return firewall.RuleInfo{}, translateError("ensure masquerade", firewallerr.ErrUnsupported)
+	return ensureDesiredRule(ctx, m.firewallHandle(), "ensure masquerade", desiredMasqueradeRule(spec))
 }
 
 func (m *Manager) DeleteMasquerade(ctx context.Context, ref firewall.RuleRef) error {
