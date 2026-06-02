@@ -48,11 +48,20 @@ func ensureDesiredRule(ctx context.Context, h handle, operation string, desired 
 	if err != nil {
 		return firewall.RuleInfo{}, translateError(operation, err)
 	}
-	if info, ok := findEquivalentRule(infos, desired); ok {
-		return info, nil
-	}
-	if len(infos) > 0 {
+	// The Govirta-owned rule set for this owner/purpose/family/table/chain is
+	// the single source of truth. More than one managed rule for the same
+	// identity is inconsistent state that this ensure path must not silently
+	// reconcile (resolving duplicates is an explicit delete-path responsibility).
+	switch len(infos) {
+	case 0:
+		// No managed rule yet; fall through to creation below.
+	case 1:
+		if ruleSummaryMatchesDesired(infos[0].Summary, desired.summary) {
+			return infos[0], nil
+		}
 		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: existing Govirta rule differs from requested state", firewallerr.ErrConflict))
+	default:
+		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: %d Govirta rules already exist for this identity", firewallerr.ErrConflict, len(infos)))
 	}
 
 	table, err := ensureTable(h, desired)
@@ -128,10 +137,35 @@ func ensureChain(h handle, table *nftables.Table, desired desiredRule) (*nftable
 	}
 	for _, chain := range chains {
 		if chain != nil && sameTable(chain.Table, table) && chain.Name == string(desired.chainName) {
+			if err := validateExistingChain(chain, desired); err != nil {
+				return nil, err
+			}
 			return chain, nil
 		}
 	}
 	return h.AddChain(chainForDesired(table, desired)), nil
+}
+
+// validateExistingChain rejects reuse of a chain that shares the desired name
+// but is not an effective base chain for the desired purpose. The ensure path
+// must not silently attach a managed rule to a chain with the wrong type, hook,
+// or priority.
+func validateExistingChain(chain *nftables.Chain, desired desiredRule) error {
+	switch desired.purpose {
+	case firewall.RulePurposeMasquerade:
+		if chain.Type != nftables.ChainTypeNAT {
+			return fmt.Errorf("%w: existing chain %q is not a NAT chain", firewallerr.ErrConflict, chain.Name)
+		}
+		if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookPostrouting {
+			return fmt.Errorf("%w: existing chain %q is not hooked at postrouting", firewallerr.ErrConflict, chain.Name)
+		}
+		if chain.Priority == nil || int(*chain.Priority) != desired.priority.Value {
+			return fmt.Errorf("%w: existing chain %q priority does not match requested srcnat priority", firewallerr.ErrConflict, chain.Name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported desired chain purpose %q", firewallerr.ErrConflict, desired.purpose)
+	}
 }
 
 func chainForDesired(table *nftables.Table, desired desiredRule) *nftables.Chain {

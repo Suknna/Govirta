@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -140,6 +141,116 @@ func TestEnsureMasqueradeCanceledContextRecordsNoHandleCalls(t *testing.T) {
 		t.Fatalf("EnsureMasquerade error = %v, want %v", err, context.Canceled)
 	}
 	assertNoHandleCalls(t, fh)
+}
+
+// Issue 2: more than one Govirta-owned rule for the same
+// owner/purpose/family/table/chain is inconsistent managed state. The ensure
+// path must report conflict and must not auto-delete any rule.
+func TestEnsureMasqueradeConflictsOnDuplicateManagedRules(t *testing.T) {
+	table := &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "gv_nat"}
+	priority := nftables.ChainPriority(100)
+	chain := &nftables.Chain{Table: table, Name: "postrouting", Type: nftables.ChainTypeNAT, Hooknum: nftables.ChainHookPostrouting, Priority: &priority}
+	fh := &fakeHandle{
+		tables: []*nftables.Table{table},
+		chains: []*nftables.Chain{chain},
+		rules: []*nftables.Rule{
+			masqueradeRule(table, chain, "govirta-test", 1, netip.MustParsePrefix("192.168.100.0/24"), "eth0"),
+			masqueradeRule(table, chain, "govirta-test", 2, netip.MustParsePrefix("192.168.100.0/24"), "eth0"),
+		},
+	}
+
+	_, err := NewManagerWithHandle(fh).EnsureMasquerade(context.Background(), taskMasqueradeSpec())
+	if !errors.Is(err, firewallerr.ErrConflict) {
+		t.Fatalf("EnsureMasquerade error = %v, want %v", err, firewallerr.ErrConflict)
+	}
+	if len(fh.rules) != 2 {
+		t.Fatalf("rule count = %d, want 2 (ensure path must not auto-delete)", len(fh.rules))
+	}
+	if containsCall(fh.calls, "AddRule:ip:gv_nat:postrouting") || containsCall(fh.calls, "Flush") {
+		t.Fatalf("calls = %v, want no mutation on duplicate conflict", fh.calls)
+	}
+}
+
+// Issue 1: an existing chain with the requested name but wrong base-chain
+// semantics (type/hook/priority) must not be silently reused.
+func TestEnsureMasqueradeConflictsWithIncompatibleExistingChain(t *testing.T) {
+	srcnat := nftables.ChainPriority(100)
+	wrong := nftables.ChainPriority(0)
+	cases := []struct {
+		name      string
+		buildHook func() *nftables.ChainHook
+		typ       nftables.ChainType
+		priority  *nftables.ChainPriority
+	}{
+		{name: "wrong type", buildHook: func() *nftables.ChainHook { return nftables.ChainHookPostrouting }, typ: nftables.ChainTypeFilter, priority: &srcnat},
+		{name: "wrong hook", buildHook: func() *nftables.ChainHook { return nftables.ChainHookForward }, typ: nftables.ChainTypeNAT, priority: &srcnat},
+		{name: "nil hook", buildHook: func() *nftables.ChainHook { return nil }, typ: nftables.ChainTypeNAT, priority: &srcnat},
+		{name: "wrong priority", buildHook: func() *nftables.ChainHook { return nftables.ChainHookPostrouting }, typ: nftables.ChainTypeNAT, priority: &wrong},
+		{name: "nil priority", buildHook: func() *nftables.ChainHook { return nftables.ChainHookPostrouting }, typ: nftables.ChainTypeNAT, priority: nil},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			table := &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "gv_nat"}
+			chain := &nftables.Chain{Table: table, Name: "postrouting", Type: tt.typ, Hooknum: tt.buildHook(), Priority: tt.priority}
+			fh := &fakeHandle{tables: []*nftables.Table{table}, chains: []*nftables.Chain{chain}}
+
+			_, err := NewManagerWithHandle(fh).EnsureMasquerade(context.Background(), taskMasqueradeSpec())
+			if !errors.Is(err, firewallerr.ErrConflict) {
+				t.Fatalf("EnsureMasquerade error = %v, want %v", err, firewallerr.ErrConflict)
+			}
+			if len(fh.rules) != 0 {
+				t.Fatalf("rule count = %d, want 0 (no rule added on chain conflict)", len(fh.rules))
+			}
+			if containsCall(fh.calls, "AddChain:ip:gv_nat:postrouting") || containsCall(fh.calls, "Flush") {
+				t.Fatalf("calls = %v, want no chain creation or flush on chain conflict", fh.calls)
+			}
+		})
+	}
+}
+
+// Issue 3: an observation read that fails after a successful Flush must
+// propagate as invalid observed state and must not claim success.
+func TestEnsureMasqueradePropagatesPostFlushObservationFailure(t *testing.T) {
+	observeErr := errors.New("observation read failed")
+	fh := &fakeHandle{failures: map[string]error{"GetRules": observeErr}}
+
+	_, err := NewManagerWithHandle(fh).EnsureMasquerade(context.Background(), taskMasqueradeSpec())
+	if !errors.Is(err, observeErr) {
+		t.Fatalf("EnsureMasquerade error = %v, want observation cause %v", err, observeErr)
+	}
+	if !errors.Is(err, firewallerr.ErrInvalidObservedState) {
+		t.Fatalf("EnsureMasquerade error = %v, want %v", err, firewallerr.ErrInvalidObservedState)
+	}
+	if !containsCall(fh.calls, "Flush") {
+		t.Fatalf("calls = %v, want Flush before observation failure", fh.calls)
+	}
+}
+
+// Issue 3: a successful Flush whose effect is not observable afterward must
+// return invalid observed state rather than a false success.
+func TestEnsureMasqueradeReturnsInvalidObservedStateWhenRuleNotObserved(t *testing.T) {
+	fh := &fakeHandle{}
+	h := &ruleDroppingHandle{fakeHandle: fh}
+
+	_, err := NewManagerWithHandle(h).EnsureMasquerade(context.Background(), taskMasqueradeSpec())
+	if !errors.Is(err, firewallerr.ErrInvalidObservedState) {
+		t.Fatalf("EnsureMasquerade error = %v, want %v", err, firewallerr.ErrInvalidObservedState)
+	}
+	if !containsCall(fh.calls, "Flush") {
+		t.Fatalf("calls = %v, want Flush before observation", fh.calls)
+	}
+}
+
+// ruleDroppingHandle simulates a handle that accepts and flushes a rule add but
+// whose effect is not visible to subsequent observation reads.
+type ruleDroppingHandle struct {
+	*fakeHandle
+}
+
+func (h *ruleDroppingHandle) AddRule(rule *nftables.Rule) *nftables.Rule {
+	h.record(fmt.Sprintf("AddRule:%s:%s:%s", nftFamilyName(rule.Table.Family), rule.Table.Name, rule.Chain.Name))
+	return rule
 }
 
 func taskMasqueradeSpec() firewall.MasqueradeSpec {
