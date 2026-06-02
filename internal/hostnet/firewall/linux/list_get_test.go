@@ -3,6 +3,7 @@
 package linux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -18,7 +19,13 @@ import (
 
 func TestListRulesIgnoresNonGovirtaRules(t *testing.T) {
 	fh, objects := seededRuleHandle()
-	fh.rules = append(fh.rules, &nftables.Rule{Table: objects.natTable, Chain: objects.natChain, Handle: 99})
+	summary := firewall.MasqueradeSummary{GuestCIDR: netip.MustParsePrefix("203.0.113.0/24"), EgressInterfaceName: "eth2", Priority: firewall.ExplicitPriority(100, firewall.PriorityNameSrcNAT)}
+	fh.rules = append(fh.rules,
+		&nftables.Rule{Table: objects.natTable, Chain: objects.natChain, Handle: 99},
+		&nftables.Rule{Table: objects.natTable, Chain: objects.natChain, Handle: 100, Exprs: masqueradeExprs(summary), UserData: []byte("govirta-owner=vm-3;govirta-purpose=masquerade;govirta-guard=masquerade")},
+		&nftables.Rule{Table: objects.natTable, Chain: objects.natChain, Handle: 101, Exprs: masqueradeExprs(summary), UserData: []byte("govirta-purpose=masquerade")},
+		&nftables.Rule{Table: objects.natTable, Chain: objects.natChain, Handle: 102, Exprs: masqueradeExprs(summary), UserData: []byte("other-key=value")},
+	)
 
 	infos, err := NewManagerWithHandle(fh).ListRules(context.Background(), validRuleFilter())
 	if err != nil {
@@ -26,9 +33,37 @@ func TestListRulesIgnoresNonGovirtaRules(t *testing.T) {
 	}
 
 	for _, info := range infos {
-		if ruleRefForInfo(info).Handle == 99 {
+		switch ruleRefForInfo(info).Handle {
+		case 99, 100, 101, 102:
 			t.Fatalf("ListRules returned non-Govirta rule: %+v", info)
 		}
+	}
+}
+
+func TestListRulesReturnsInvalidObservedStateForBrokenGovirtaUserData(t *testing.T) {
+	cases := []struct {
+		name     string
+		userData []byte
+	}{
+		{name: "magic missing owner", userData: []byte("govirta-firewall-rule=v1;govirta-purpose=masquerade;govirta-guard=masquerade")},
+		{name: "magic missing purpose", userData: []byte("govirta-firewall-rule=v1;govirta-owner=vm-3;govirta-guard=masquerade")},
+		{name: "magic missing guard", userData: []byte("govirta-firewall-rule=v1;govirta-owner=vm-3;govirta-purpose=masquerade")},
+		{name: "magic illegal owner", userData: []byte("govirta-firewall-rule=v1;govirta-owner=bad/name;govirta-purpose=masquerade;govirta-guard=masquerade")},
+		{name: "magic illegal purpose", userData: []byte("govirta-firewall-rule=v1;govirta-owner=vm-3;govirta-purpose=unsupported;govirta-guard=masquerade")},
+		{name: "magic illegal guard", userData: []byte("govirta-firewall-rule=v1;govirta-owner=vm-3;govirta-purpose=endpoint-anti-spoofing;govirta-guard=unsupported")},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			fh, objects := seededRuleHandle()
+			summary := firewall.MasqueradeSummary{GuestCIDR: netip.MustParsePrefix("203.0.113.0/24"), EgressInterfaceName: "eth2", Priority: firewall.ExplicitPriority(100, firewall.PriorityNameSrcNAT)}
+			fh.rules = append(fh.rules, &nftables.Rule{Table: objects.natTable, Chain: objects.natChain, Handle: 99, Exprs: masqueradeExprs(summary), UserData: tt.userData})
+
+			_, err := NewManagerWithHandle(fh).ListRules(context.Background(), validRuleFilter())
+			if !errors.Is(err, firewallerr.ErrInvalidObservedState) {
+				t.Fatalf("ListRules error = %v, want %v", err, firewallerr.ErrInvalidObservedState)
+			}
+		})
 	}
 }
 
@@ -88,6 +123,50 @@ func TestGetRuleReturnsRuleMatchingCompactRef(t *testing.T) {
 	}
 	if info.Summary.EndpointAntiSpoofing == nil || info.Summary.EndpointAntiSpoofing.BridgeName != "br0" || info.Summary.EndpointAntiSpoofing.TapName != "tap0" {
 		t.Fatalf("GetRule summary = %+v, want endpoint bridge br0 and TAP tap0", info.Summary)
+	}
+}
+
+func TestGetRuleRejectsCrossProtocolEndpointExpression(t *testing.T) {
+	cases := []struct {
+		name       string
+		metadata   endpointGuardKind
+		actualType uint16
+	}{
+		{name: "IPv4 metadata with ARP EtherType", metadata: guardIPv4, actualType: etherTypeARP},
+		{name: "ARP MAC metadata with IPv4 EtherType", metadata: guardARPMAC, actualType: etherTypeIPv4},
+		{name: "ARP IPv4 metadata with IPv4 EtherType", metadata: guardARPIPv4, actualType: etherTypeIPv4},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			fh, objects := seededRuleHandle()
+			summary := firewall.EndpointAntiSpoofingSummary{BridgeName: "br0", TapName: "tap2", MAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 0x02}, IPv4: netip.MustParseAddr("192.0.2.12")}
+			var payload []byte
+			var offset uint32
+			switch tt.metadata {
+			case guardIPv4:
+				addr := summary.IPv4.As4()
+				payload, offset = addr[:], 12
+			case guardARPMAC:
+				payload, offset = []byte(summary.MAC), 8
+			case guardARPIPv4:
+				addr := summary.IPv4.As4()
+				payload, offset = addr[:], 14
+			}
+			rule := &nftables.Rule{
+				Table:    objects.bridgeTable,
+				Chain:    objects.bridgeChain,
+				Handle:   22,
+				Exprs:    endpointProtocolDropExprs(summary.BridgeName, summary.TapName, tt.actualType, expr.PayloadBaseNetworkHeader, offset, payload),
+				UserData: userDataForRule("vm-3", firewall.RulePurposeEndpointAntiSpoofing, tt.metadata),
+			}
+			fh.rules = append(fh.rules, rule)
+
+			_, err := NewManagerWithHandle(fh).GetRule(context.Background(), firewall.RuleQuery{Ref: endpointRef("vm-3", 22)})
+			if !errors.Is(err, firewallerr.ErrInvalidObservedState) {
+				t.Fatalf("GetRule error = %v, want %v", err, firewallerr.ErrInvalidObservedState)
+			}
+		})
 	}
 }
 
@@ -169,7 +248,7 @@ func masqueradeRule(table *nftables.Table, chain *nftables.Chain, owner firewall
 		Table:    table,
 		Chain:    chain,
 		Handle:   handle,
-		Exprs:    masqueradeExprs(summary, owner),
+		Exprs:    masqueradeExprs(summary),
 		UserData: userDataForRule(owner, firewall.RulePurposeMasquerade, guardMasquerade),
 	}
 }
@@ -179,13 +258,13 @@ func endpointRule(table *nftables.Table, chain *nftables.Chain, owner firewall.R
 	var exprs []expr.Any
 	switch guard {
 	case guardEtherMAC:
-		exprs = endpointEtherMACDropExprs(summary, owner)
+		exprs = endpointEtherMACDropExprs(summary)
 	case guardIPv4:
-		exprs = endpointIPv4DropExprs(summary, owner)
+		exprs = endpointIPv4DropExprs(summary)
 	case guardARPMAC:
-		exprs = endpointARPMACDropExprs(summary, owner)
+		exprs = endpointARPMACDropExprs(summary)
 	case guardARPIPv4:
-		exprs = endpointARPIPv4DropExprs(summary, owner)
+		exprs = endpointARPIPv4DropExprs(summary)
 	}
 	return &nftables.Rule{
 		Table:    table,
@@ -193,6 +272,49 @@ func endpointRule(table *nftables.Table, chain *nftables.Chain, owner firewall.R
 		Handle:   handle,
 		Exprs:    exprs,
 		UserData: userDataForRule(owner, firewall.RulePurposeEndpointAntiSpoofing, guard),
+	}
+}
+
+func TestEndpointProtocolBuildersIncludeEtherTypeGuard(t *testing.T) {
+	summary := firewall.EndpointAntiSpoofingSummary{BridgeName: "br0", TapName: "tap0", MAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 1}, IPv4: netip.MustParseAddr("192.0.2.10")}
+	cases := []struct {
+		name      string
+		exprs     []expr.Any
+		etherType uint16
+	}{
+		{name: "IPv4", exprs: endpointIPv4DropExprs(summary), etherType: etherTypeIPv4},
+		{name: "ARP MAC", exprs: endpointARPMACDropExprs(summary), etherType: etherTypeARP},
+		{name: "ARP IPv4", exprs: endpointARPIPv4DropExprs(summary), etherType: etherTypeARP},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.exprs) != 9 {
+				t.Fatalf("expr count = %d, want 9", len(tt.exprs))
+			}
+			meta, ok := tt.exprs[4].(*expr.Meta)
+			if !ok || meta.Key != expr.MetaKeyPROTOCOL || meta.Register != regProtocol {
+				t.Fatalf("protocol expr = %#v, want MetaKeyPROTOCOL in regProtocol", tt.exprs[4])
+			}
+			cmp, ok := tt.exprs[5].(*expr.Cmp)
+			if !ok || cmp.Op != expr.CmpOpEq || cmp.Register != regProtocol || !bytes.Equal(cmp.Data, etherTypeData(tt.etherType)) {
+				t.Fatalf("protocol comparison = %#v, want EtherType %#04x", tt.exprs[5], tt.etherType)
+			}
+		})
+	}
+}
+
+func TestEndpointEtherMACBuilderHasNoEtherTypeGuard(t *testing.T) {
+	summary := firewall.EndpointAntiSpoofingSummary{BridgeName: "br0", TapName: "tap0", MAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 1}}
+	exprs := endpointEtherMACDropExprs(summary)
+	if len(exprs) != 7 {
+		t.Fatalf("expr count = %d, want 7", len(exprs))
+	}
+	for _, expression := range exprs {
+		meta, ok := expression.(*expr.Meta)
+		if ok && meta.Key == expr.MetaKeyPROTOCOL {
+			t.Fatalf("ether MAC guard unexpectedly includes protocol expression")
+		}
 	}
 }
 

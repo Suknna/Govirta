@@ -3,39 +3,14 @@
 package linux
 
 import (
-	"bytes"
 	"sort"
 
 	"github.com/google/nftables"
 	"github.com/suknna/govirta/internal/hostnet/firewall"
 )
 
-type desiredRule struct {
-	family    firewall.TableFamily
-	tableName firewall.TableName
-	chainName firewall.ChainName
-	purpose   firewall.RulePurpose
-	owner     firewall.RuleOwner
-	priority  firewall.Priority
-	summary   firewall.RuleSummary
-}
-
 func ruleRefForInfo(info firewall.RuleInfo) firewall.RuleRef {
 	return info.Ref
-}
-
-func tableForDesired(rule desiredRule) *nftables.Table {
-	return &nftables.Table{
-		Family: nftFamily(rule.family),
-		Name:   string(rule.tableName),
-	}
-}
-
-func chainForDesired(table *nftables.Table, rule desiredRule) *nftables.Chain {
-	return &nftables.Chain{
-		Table: table,
-		Name:  string(rule.chainName),
-	}
 }
 
 func ruleInfoMatchesFilter(info firewall.RuleInfo, filter firewall.RuleFilter) bool {
@@ -56,26 +31,6 @@ func ruleInfoMatchesFilter(info firewall.RuleInfo, filter firewall.RuleFilter) b
 		return false
 	}
 	return true
-}
-
-func sameMasquerade(left, right *firewall.MasqueradeSummary) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return left.GuestCIDR == right.GuestCIDR &&
-		left.EgressInterfaceName == right.EgressInterfaceName &&
-		left.Priority == right.Priority
-}
-
-func sameEndpointAntiSpoofing(left, right *firewall.EndpointAntiSpoofingSummary) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return left.BridgeName == right.BridgeName &&
-		left.TapName == right.TapName &&
-		bytes.Equal(left.MAC, right.MAC) &&
-		left.IPv4 == right.IPv4 &&
-		left.Priority == right.Priority
 }
 
 func nftFamily(family firewall.TableFamily) nftables.TableFamily {

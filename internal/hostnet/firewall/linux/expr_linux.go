@@ -19,6 +19,8 @@ import (
 type endpointGuardKind string
 
 const (
+	userDataMagicKey   = "govirta-firewall-rule"
+	userDataMagicValue = "v1"
 	userDataOwnerKey   = "govirta-owner"
 	userDataPurposeKey = "govirta-purpose"
 	userDataGuardKey   = "govirta-guard"
@@ -29,13 +31,17 @@ const (
 	guardARPMAC     endpointGuardKind = "arp-mac"
 	guardARPIPv4    endpointGuardKind = "arp-ipv4"
 
-	regMatch uint32 = unix.NFT_REG_1
-	regMask  uint32 = unix.NFT_REG_2
+	etherTypeIPv4 uint16 = 0x0800
+	etherTypeARP  uint16 = 0x0806
+
+	regMatch    uint32 = unix.NFT_REG_1
+	regProtocol uint32 = unix.NFT_REG_2
+	regMask     uint32 = unix.NFT_REG_3
 
 	interfaceNameLen = 16
 )
 
-func masqueradeExprs(summary firewall.MasqueradeSummary, owner firewall.RuleOwner) []expr.Any {
+func masqueradeExprs(summary firewall.MasqueradeSummary) []expr.Any {
 	masked := summary.GuestCIDR.Masked()
 	addr := masked.Addr().As4()
 	mask := prefixMask(summary.GuestCIDR.Bits(), 4)
@@ -49,37 +55,52 @@ func masqueradeExprs(summary firewall.MasqueradeSummary, owner firewall.RuleOwne
 	}
 }
 
-func endpointEtherMACDropExprs(summary firewall.EndpointAntiSpoofingSummary, owner firewall.RuleOwner) []expr.Any {
+func endpointEtherMACDropExprs(summary firewall.EndpointAntiSpoofingSummary) []expr.Any {
 	return endpointDropExprsForBridge(summary.BridgeName, summary.TapName, expr.PayloadBaseLLHeader, 6, []byte(summary.MAC))
 }
 
-func endpointIPv4DropExprs(summary firewall.EndpointAntiSpoofingSummary, owner firewall.RuleOwner) []expr.Any {
+func endpointIPv4DropExprs(summary firewall.EndpointAntiSpoofingSummary) []expr.Any {
 	addr := summary.IPv4.As4()
-	return endpointDropExprsForBridge(summary.BridgeName, summary.TapName, expr.PayloadBaseNetworkHeader, 12, addr[:])
+	return endpointProtocolDropExprs(summary.BridgeName, summary.TapName, etherTypeIPv4, expr.PayloadBaseNetworkHeader, 12, addr[:])
 }
 
-func endpointARPMACDropExprs(summary firewall.EndpointAntiSpoofingSummary, owner firewall.RuleOwner) []expr.Any {
-	return endpointDropExprsForBridge(summary.BridgeName, summary.TapName, expr.PayloadBaseNetworkHeader, 8, []byte(summary.MAC))
+func endpointARPMACDropExprs(summary firewall.EndpointAntiSpoofingSummary) []expr.Any {
+	return endpointProtocolDropExprs(summary.BridgeName, summary.TapName, etherTypeARP, expr.PayloadBaseNetworkHeader, 8, []byte(summary.MAC))
 }
 
-func endpointARPIPv4DropExprs(summary firewall.EndpointAntiSpoofingSummary, owner firewall.RuleOwner) []expr.Any {
+func endpointARPIPv4DropExprs(summary firewall.EndpointAntiSpoofingSummary) []expr.Any {
 	addr := summary.IPv4.As4()
-	return endpointDropExprsForBridge(summary.BridgeName, summary.TapName, expr.PayloadBaseNetworkHeader, 14, addr[:])
-}
-
-func endpointDropExprs(tap firewall.InterfaceName, base expr.PayloadBase, offset uint32, data []byte) []expr.Any {
-	return endpointDropExprsForBridge("", tap, base, offset, data)
+	return endpointProtocolDropExprs(summary.BridgeName, summary.TapName, etherTypeARP, expr.PayloadBaseNetworkHeader, 14, addr[:])
 }
 
 func endpointDropExprsForBridge(bridge firewall.InterfaceName, tap firewall.InterfaceName, base expr.PayloadBase, offset uint32, data []byte) []expr.Any {
+	exprs := endpointInterfaceExprs(bridge, tap)
+	exprs = append(exprs,
+		&expr.Payload{OperationType: expr.PayloadLoad, DestRegister: regMatch, Base: base, Offset: offset, Len: uint32(len(data))},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: regMatch, Data: data},
+		&expr.Verdict{Kind: expr.VerdictDrop},
+	)
+	return exprs
+}
+
+func endpointProtocolDropExprs(bridge firewall.InterfaceName, tap firewall.InterfaceName, etherType uint16, base expr.PayloadBase, offset uint32, data []byte) []expr.Any {
+	exprs := endpointInterfaceExprs(bridge, tap)
+	exprs = append(exprs,
+		&expr.Meta{Key: expr.MetaKeyPROTOCOL, Register: regProtocol},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: regProtocol, Data: etherTypeData(etherType)},
+		&expr.Payload{OperationType: expr.PayloadLoad, DestRegister: regMatch, Base: base, Offset: offset, Len: uint32(len(data))},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: regMatch, Data: data},
+		&expr.Verdict{Kind: expr.VerdictDrop},
+	)
+	return exprs
+}
+
+func endpointInterfaceExprs(bridge firewall.InterfaceName, tap firewall.InterfaceName) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: regMatch},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: regMatch, Data: interfaceNameData(bridge)},
 		&expr.Meta{Key: expr.MetaKeyBRIIIFNAME, Register: regMatch},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: regMatch, Data: interfaceNameData(tap)},
-		&expr.Payload{OperationType: expr.PayloadLoad, DestRegister: regMatch, Base: base, Offset: offset, Len: uint32(len(data))},
-		&expr.Cmp{Op: expr.CmpOpNeq, Register: regMatch, Data: data},
-		&expr.Verdict{Kind: expr.VerdictDrop},
 	}
 }
 
@@ -135,7 +156,7 @@ type ruleUserData struct {
 }
 
 func userDataForRule(owner firewall.RuleOwner, purpose firewall.RulePurpose, guard endpointGuardKind) []byte {
-	return []byte(fmt.Sprintf("%s=%s;%s=%s;%s=%s", userDataOwnerKey, owner, userDataPurposeKey, purpose, userDataGuardKey, guard))
+	return []byte(fmt.Sprintf("%s=%s;%s=%s;%s=%s;%s=%s", userDataMagicKey, userDataMagicValue, userDataOwnerKey, owner, userDataPurposeKey, purpose, userDataGuardKey, guard))
 }
 
 func parseRuleUserData(data []byte) (ruleUserData, bool, error) {
@@ -153,13 +174,41 @@ func parseRuleUserData(data []byte) (ruleUserData, bool, error) {
 	owner, hasOwner := fields[userDataOwnerKey]
 	purpose, hasPurpose := fields[userDataPurposeKey]
 	guard, hasGuard := fields[userDataGuardKey]
-	if !hasOwner && !hasPurpose && !hasGuard {
+	magic, hasMagic := fields[userDataMagicKey]
+	if !hasMagic || magic != userDataMagicValue {
 		return ruleUserData{}, false, nil
 	}
 	if !hasOwner || !hasPurpose || !hasGuard || owner == "" || purpose == "" || guard == "" {
 		return ruleUserData{}, true, invalidObservedState("incomplete Govirta rule metadata")
 	}
-	return ruleUserData{owner: firewall.RuleOwner(owner), purpose: firewall.RulePurpose(purpose), guard: endpointGuardKind(guard)}, true, nil
+	metadata := ruleUserData{owner: firewall.RuleOwner(owner), purpose: firewall.RulePurpose(purpose), guard: endpointGuardKind(guard)}
+	if err := validateObservedRuleUserData(metadata); err != nil {
+		return ruleUserData{}, true, err
+	}
+	return metadata, true, nil
+}
+
+func validateObservedRuleUserData(metadata ruleUserData) error {
+	if err := validateSafeName("owner", string(metadata.owner)); err != nil {
+		return invalidObservedState("invalid Govirta rule owner")
+	}
+	if err := validatePurpose(metadata.purpose); err != nil {
+		return invalidObservedState("invalid Govirta rule purpose")
+	}
+	switch metadata.purpose {
+	case firewall.RulePurposeMasquerade:
+		if metadata.guard != guardMasquerade {
+			return invalidObservedState("masquerade rule has guard %q", metadata.guard)
+		}
+	case firewall.RulePurposeEndpointAntiSpoofing:
+		switch metadata.guard {
+		case guardEtherMAC, guardIPv4, guardARPMAC, guardARPIPv4:
+			return nil
+		default:
+			return invalidObservedState("endpoint anti-spoofing rule has guard %q", metadata.guard)
+		}
+	}
+	return nil
 }
 
 func parseMasquerade(exprs []expr.Any, chain *nftables.Chain) (*firewall.MasqueradeSummary, error) {
@@ -228,7 +277,14 @@ func parseEndpointAntiSpoofing(guard endpointGuardKind, exprs []expr.Any, chain 
 }
 
 func validateEndpointGuardPayload(guard endpointGuardKind, exprs []expr.Any) error {
-	payload, ok := exprs[4].(*expr.Payload)
+	payloadIndex := 4
+	if guard != guardEtherMAC {
+		if err := validateEndpointGuardProtocol(guard, exprs); err != nil {
+			return err
+		}
+		payloadIndex = 6
+	}
+	payload, ok := exprs[payloadIndex].(*expr.Payload)
 	if !ok {
 		return invalidObservedState("endpoint payload expression is invalid")
 	}
@@ -253,8 +309,32 @@ func validateEndpointGuardPayload(guard endpointGuardKind, exprs []expr.Any) err
 	return nil
 }
 
+func validateEndpointGuardProtocol(guard endpointGuardKind, exprs []expr.Any) error {
+	meta, ok := exprs[4].(*expr.Meta)
+	if !ok || meta.Key != expr.MetaKeyPROTOCOL || meta.Register != regProtocol || meta.SourceRegister {
+		return invalidObservedState("endpoint protocol expression is invalid")
+	}
+	cmpProtocol, ok := exprs[5].(*expr.Cmp)
+	if !ok || cmpProtocol.Op != expr.CmpOpEq || cmpProtocol.Register != regProtocol {
+		return invalidObservedState("endpoint protocol comparison is invalid")
+	}
+	var wantEtherType uint16
+	switch guard {
+	case guardIPv4:
+		wantEtherType = etherTypeIPv4
+	case guardARPMAC, guardARPIPv4:
+		wantEtherType = etherTypeARP
+	default:
+		return invalidObservedState("endpoint guard %q must not have protocol guard", guard)
+	}
+	if !bytes.Equal(cmpProtocol.Data, etherTypeData(wantEtherType)) {
+		return invalidObservedState("endpoint guard %q EtherType does not match metadata", guard)
+	}
+	return nil
+}
+
 func parseEndpointDropExprs(exprs []expr.Any) (*firewall.EndpointAntiSpoofingSummary, error) {
-	if len(exprs) != 7 {
+	if len(exprs) != 7 && len(exprs) != 9 {
 		return nil, invalidObservedState("endpoint guard expression count is %d", len(exprs))
 	}
 	meta, ok := exprs[0].(*expr.Meta)
@@ -273,15 +353,16 @@ func parseEndpointDropExprs(exprs []expr.Any) (*firewall.EndpointAntiSpoofingSum
 	if !ok || cmpTap.Op != expr.CmpOpEq || cmpTap.Register != regMatch {
 		return nil, invalidObservedState("endpoint TAP comparison is invalid")
 	}
-	payload, ok := exprs[4].(*expr.Payload)
+	payloadIndex := len(exprs) - 3
+	payload, ok := exprs[payloadIndex].(*expr.Payload)
 	if !ok || payload.OperationType != expr.PayloadLoad || payload.DestRegister != regMatch {
 		return nil, invalidObservedState("endpoint payload expression is invalid")
 	}
-	cmpValue, ok := exprs[5].(*expr.Cmp)
+	cmpValue, ok := exprs[payloadIndex+1].(*expr.Cmp)
 	if !ok || cmpValue.Op != expr.CmpOpNeq || cmpValue.Register != regMatch || uint32(len(cmpValue.Data)) != payload.Len {
 		return nil, invalidObservedState("endpoint payload comparison is invalid")
 	}
-	verdict, ok := exprs[6].(*expr.Verdict)
+	verdict, ok := exprs[payloadIndex+2].(*expr.Verdict)
 	if !ok || verdict.Kind != expr.VerdictDrop || verdict.Chain != "" {
 		return nil, invalidObservedState("endpoint drop verdict is invalid")
 	}
@@ -339,6 +420,10 @@ func interfaceNameData(name firewall.InterfaceName) []byte {
 	data := make([]byte, interfaceNameLen)
 	copy(data, string(name))
 	return data
+}
+
+func etherTypeData(etherType uint16) []byte {
+	return []byte{byte(etherType >> 8), byte(etherType)}
 }
 
 func interfaceNameFromData(data []byte) string {
