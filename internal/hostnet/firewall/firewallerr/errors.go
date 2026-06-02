@@ -1,3 +1,4 @@
+// Package firewallerr defines stable host firewall error classes.
 package firewallerr
 
 import "errors"

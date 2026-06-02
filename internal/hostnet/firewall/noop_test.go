@@ -22,9 +22,67 @@ func TestExplicitPriorityAllowsZeroValue(t *testing.T) {
 	}
 }
 
+func TestRuleFilterConstructorsSetExplicitModes(t *testing.T) {
+	tests := []struct {
+		name string
+		got  firewall.RuleFilter
+		want firewall.RuleFilter
+	}{
+		{
+			name: "any",
+			got: firewall.RuleFilter{
+				Owner:   firewall.AnyOwner(),
+				Purpose: firewall.AnyPurpose(),
+				Family:  firewall.AnyFamily(),
+				Table:   firewall.AnyTable(),
+				Chain:   firewall.AnyChain(),
+			},
+			want: firewall.RuleFilter{
+				Owner:   firewall.OwnerFilter{Mode: firewall.OwnerAny},
+				Purpose: firewall.PurposeFilter{Mode: firewall.PurposeAny},
+				Family:  firewall.FamilyFilter{Mode: firewall.FamilyAny},
+				Table:   firewall.TableFilter{Mode: firewall.TableAny},
+				Chain:   firewall.ChainFilter{Mode: firewall.ChainAny},
+			},
+		},
+		{
+			name: "value",
+			got: firewall.RuleFilter{
+				Owner:   firewall.FilterOwner("vm-1"),
+				Purpose: firewall.FilterPurpose(firewall.RulePurposeMasquerade),
+				Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
+				Table:   firewall.FilterTable("govirta"),
+				Chain:   firewall.FilterChain("postrouting"),
+			},
+			want: firewall.RuleFilter{
+				Owner:   firewall.OwnerFilter{Mode: firewall.OwnerValue, Value: "vm-1"},
+				Purpose: firewall.PurposeFilter{Mode: firewall.PurposeValue, Value: firewall.RulePurposeMasquerade},
+				Family:  firewall.FamilyFilter{Mode: firewall.FamilyValue, Value: firewall.TableFamilyIPv4},
+				Table:   firewall.TableFilter{Mode: firewall.TableValue, Value: "govirta"},
+				Chain:   firewall.ChainFilter{Mode: firewall.ChainValue, Value: "postrouting"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("filter = %#v, want %#v", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNoopManagerReportsUnsupported(t *testing.T) {
 	manager := firewall.NewNoopManager()
 	ctx := context.Background()
+	filter := firewall.RuleFilter{
+		Owner:   firewall.AnyOwner(),
+		Purpose: firewall.AnyPurpose(),
+		Family:  firewall.AnyFamily(),
+		Table:   firewall.AnyTable(),
+		Chain:   firewall.AnyChain(),
+	}
 	tests := []struct {
 		name string
 		run  func() error
@@ -37,7 +95,7 @@ func TestNoopManagerReportsUnsupported(t *testing.T) {
 		}},
 		{name: "DeleteEndpointAntiSpoofing", run: func() error { return manager.DeleteEndpointAntiSpoofing(ctx, firewall.RuleRef{}) }},
 		{name: "GetRule", run: func() error { _, err := manager.GetRule(ctx, firewall.RuleQuery{}); return err }},
-		{name: "ListRules", run: func() error { _, err := manager.ListRules(ctx, firewall.RuleFilter{}); return err }},
+		{name: "ListRules", run: func() error { _, err := manager.ListRules(ctx, filter); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -84,19 +84,68 @@ type RuleQuery struct {
 	Ref RuleRef
 }
 
+// OwnerFilter selects owner matching for ListRules.
+//
+// Mode must be explicitly set to OwnerAny or OwnerValue. OwnerValue requires
+// Value to identify the owner to match.
+type OwnerFilter struct {
+	Mode  OwnerFilterMode
+	Value RuleOwner
+}
+
+// PurposeFilter selects purpose matching for ListRules.
+//
+// Mode must be explicitly set to PurposeAny or PurposeValue. PurposeValue
+// requires Value to identify the rule purpose to match.
+type PurposeFilter struct {
+	Mode  PurposeFilterMode
+	Value RulePurpose
+}
+
+// FamilyFilter selects table-family matching for ListRules.
+//
+// Mode must be explicitly set to FamilyAny or FamilyValue. FamilyValue requires
+// Value to identify the table family to match.
+type FamilyFilter struct {
+	Mode  FamilyFilterMode
+	Value TableFamily
+}
+
+// TableFilter selects table matching for ListRules.
+//
+// Mode must be explicitly set to TableAny or TableValue. TableValue requires
+// Value to identify the table to match.
+type TableFilter struct {
+	Mode  TableFilterMode
+	Value TableName
+}
+
+// ChainFilter selects chain matching for ListRules.
+//
+// Mode must be explicitly set to ChainAny or ChainValue. ChainValue requires
+// Value to identify the chain to match.
+type ChainFilter struct {
+	Mode  ChainFilterMode
+	Value ChainName
+}
+
 // RuleFilter selects observed firewall rules for enumeration.
 //
-// All behavior-affecting filter dimensions are explicit. Empty values match the
-// implementation-defined validation contract of the concrete manager.
+// All behavior-affecting filter dimensions must use explicit modes. Any modes
+// select all values for their dimension; value modes select only matching
+// observed rule fields.
 type RuleFilter struct {
-	Owner     RuleOwner
-	Purpose   RulePurpose
-	Family    TableFamily
-	TableName TableName
-	ChainName ChainName
+	Owner   OwnerFilter
+	Purpose PurposeFilter
+	Family  FamilyFilter
+	Table   TableFilter
+	Chain   ChainFilter
 }
 
 // RuleSummary contains purpose-specific observed firewall rule details.
+//
+// Exactly one summary pointer must be populated. The populated summary must
+// match RuleInfo.Ref.Purpose.
 type RuleSummary struct {
 	Masquerade           *MasqueradeSummary
 	EndpointAntiSpoofing *EndpointAntiSpoofingSummary
@@ -120,16 +169,12 @@ type EndpointAntiSpoofingSummary struct {
 
 // RuleInfo reports observed host firewall rule state.
 //
+// Ref is the single source of identity for the observed rule. Summary carries
+// purpose-specific observed details and must match Ref.Purpose.
 // Implementations populate RuleInfo from actual host firewall state after
 // translating platform data into Govirta-owned types. RuleInfo must not be a
 // blind echo of a requested spec.
 type RuleInfo struct {
-	Ref       RuleRef
-	Family    TableFamily
-	TableName TableName
-	ChainName ChainName
-	Purpose   RulePurpose
-	Owner     RuleOwner
-	Handle    RuleHandle
-	Summary   RuleSummary
+	Ref     RuleRef
+	Summary RuleSummary
 }
