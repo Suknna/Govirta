@@ -152,6 +152,10 @@ run_acceptance() {
 			printf "missing required guest tool: ping\n" >&2
 			exit 1
 		fi
+		if ! command -v nft >/dev/null 2>&1; then
+			echo "nft command is required for hostnet firewall acceptance" >&2
+			exit 1
+		fi
 		if [ ! -x "$HOME/.local/go/bin/go" ]; then
 			printf "missing required guest tool: %s\n" "$HOME/.local/go/bin/go" >&2
 			exit 1

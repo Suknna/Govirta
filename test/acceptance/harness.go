@@ -203,6 +203,12 @@ func logRouteDiagnostics(t *testing.T, ctx context.Context, probe string, linkNa
 	}
 }
 
+func logFirewallDiagnostics(t *testing.T, ctx context.Context) {
+	t.Helper()
+	stdout, stderr, err := runCommand(ctx, "nft", "list", "ruleset")
+	t.Logf("nft list ruleset: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+}
+
 func startQEMUCommand(cmd *exec.Cmd) (*bytes.Buffer, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

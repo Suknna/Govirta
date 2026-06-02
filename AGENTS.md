@@ -41,6 +41,17 @@ Verified-against:
     - internal/hostnet/route/linux/route_test.go
     - internal/hostnet/route/linux/list_get_test.go
     - internal/hostnet/route/linux/errors_test.go
+    - internal/hostnet/firewall/firewall.go
+    - internal/hostnet/firewall/constants.go
+    - internal/hostnet/firewall/noop.go
+    - internal/hostnet/firewall/firewallerr/errors.go
+    - internal/hostnet/firewall/linux/manager_linux.go
+    - internal/hostnet/firewall/linux/handle_linux.go
+    - internal/hostnet/firewall/linux/rules_linux.go
+    - internal/hostnet/firewall/linux/info_linux.go
+    - internal/hostnet/firewall/linux/expr_linux.go
+    - internal/hostnet/firewall/linux/validate_linux.go
+    - internal/hostnet/firewall/linux/errors_linux.go
     - internal/network/bridge/bridge.go
     - internal/scheduler/scheduler.go
     - internal/types/types.go
@@ -106,6 +117,17 @@ Verified-against:
         - internal/hostnet/route/linux/validate_linux.go
         - internal/hostnet/route/linux/errors_linux.go
         - internal/hostnet/route/linux/sysctl_linux.go
+    - anchor: flow-hostnet-firewall
+      sources:
+        - internal/hostnet/firewall/firewall.go
+        - internal/hostnet/firewall/constants.go
+        - internal/hostnet/firewall/linux/manager_linux.go
+        - internal/hostnet/firewall/linux/handle_linux.go
+        - internal/hostnet/firewall/linux/rules_linux.go
+        - internal/hostnet/firewall/linux/info_linux.go
+        - internal/hostnet/firewall/linux/expr_linux.go
+        - internal/hostnet/firewall/linux/validate_linux.go
+        - internal/hostnet/firewall/linux/errors_linux.go
     - anchor: flow-govirtctl-version
       sources:
         - cmd/govirtctl/main.go
@@ -136,13 +158,13 @@ Verified-against:
 
 ## OVERVIEW
 
-Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route netlink primitives + zerolog, with OpenStack-style internal storage abstractions now present under `internal/storage`.
+Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route/firewall primitives + zerolog, with OpenStack-style internal storage abstractions now present under `internal/storage`.
 
 ## CURRENT PHASE
 
 Govirta is in the single-node cold-operation closure phase. Prioritize the local QEMU/qemu-img/QMP/network/storage path before distributed scheduling, API orchestration, Kubernetes integration, live migration, hot-plug, or multi-node behavior.
 
-Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP and host route primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
+Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP, host route, and firewall primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
 
 Current implementation priority:
 
@@ -151,7 +173,7 @@ Current implementation priority:
 3. storage pool / image / root-volume lifecycle
 4. VM create/start/stop/delete
 5. QMP `query-status` / `system_powerdown` / `quit`
-6. Local TAP/bridge/route networking primitives
+6. Local TAP/bridge/route/firewall networking primitives
 7. Cold snapshots
 8. Cold disk expansion
 9. Cold CPU/memory/disk/NIC modification
@@ -180,6 +202,7 @@ Govirta/
 ├── internal/            # 所有 Go 内部模块边界；无 pkg/
 │   ├── apiserver/       # API server boundary，目前 no-op skeleton
 │   ├── controlplane/    # control plane composition
+│   ├── hostnet/firewall/ # host firewall primitive boundary and Linux nftables implementation
 │   ├── hostnet/link/    # host bridge/TAP primitive boundary and Linux netlink implementation
 │   ├── hostnet/route/   # host IPv4 route primitive boundary, forwarding checks, and Linux netlink implementation
 │   ├── network/bridge/  # Linux bridge boundary
@@ -202,6 +225,7 @@ Govirta/
 | QEMU argv 示例 | `cmd/qemucli/main.go` → `internal/virt/qemu` | `qemucli` 只打印 argv，不启动 QEMU |
 | host bridge/TAP primitives | `internal/hostnet/link` → `internal/hostnet/link/linux` | `link.Manager` contract；Linux 通过 netlink ensure/get/list/delete bridge 和 TAP |
 | host route primitives | `internal/hostnet/route` → `internal/hostnet/route/linux` | `route.Manager` contract；Linux 通过 netlink add/replace/delete/list/get IPv4 routes，并只读检查 `/proc/sys/net/ipv4/ip_forward` |
+| host firewall primitives | `internal/hostnet/firewall` → `internal/hostnet/firewall/linux` | `firewall.Manager` contract；Linux 通过 nftables ensure/delete/list/get masquerade 和 endpoint anti-spoofing rules |
 | VM-facing storage | `internal/storage/` (详见 `internal/storage/AGENTS.md`) | `VolumeService` / `ImageService` / `pool.Service` |
 | QEMU 配置/参数 | `internal/virt/qemu/` (详见 `internal/virt/qemu/AGENTS.md`) | typed argv builder；黄金测试在 `vm_test.go` |
 | qemu-img | `internal/virt/qemuimg/` (详见 `internal/virt/qemuimg/AGENTS.md`) | Create/Info/Convert/Resize/Snapshot/Check/Remove + runner |
@@ -240,6 +264,10 @@ Govirta/
 | `routelinux.Manager.DeleteRoute` | method | `internal/hostnet/route/linux/manager_linux.go:125` | validate explicit `RouteSpec` → netlink `RouteDel`; missing route is idempotent success |
 | `routelinux.Manager.ListRoutes` | method | `internal/hostnet/route/linux/manager_linux.go:149` | validate explicit `RouteFilter` → netlink `RouteListFiltered` → Go-side exact filtering + stable sorting |
 | `routelinux.Manager.GetRoute` | method | `internal/hostnet/route/linux/manager_linux.go:182` | validate `RouteQuery` → netlink `RouteGet` path selection → observed primary `RouteInfo` |
+| `firewall.Manager` | interface | `internal/hostnet/firewall/firewall.go:17` | host firewall primitive API：`EnsureMasquerade` / `DeleteMasquerade` / `EnsureEndpointAntiSpoofing` / `DeleteEndpointAntiSpoofing` / `GetRule` / `ListRules` |
+| `firewalllinux.Manager` | struct | `internal/hostnet/firewall/linux/manager_linux.go:15` | Linux nftables-backed implementation of `firewall.Manager` |
+| `firewalllinux.Manager.EnsureMasquerade` | method | `internal/hostnet/firewall/linux/manager_linux.go:37` | validate explicit NAT spec → ensure table/chain/rule → return observed masquerade rule info |
+| `firewalllinux.Manager.EnsureEndpointAntiSpoofing` | method | `internal/hostnet/firewall/linux/manager_linux.go:51` | validate explicit endpoint spec → ensure bridge-chain guard rule group → return observed logical endpoint rule info |
 | `storage.VolumeService` | struct | `internal/storage/service.go:14` | VM-facing block volume API；所有操作显式 PoolName |
 | `storage.ImageService` | struct | `internal/storage/image_service.go:12` | file image byte-stream API；Put/Get/Delete |
 | `pool.Service` | struct | `internal/storage/pool/service.go:16` | pool registry, capacity accounting, in-memory indexes |
@@ -252,7 +280,7 @@ Govirta/
 
 ## CALL GRAPHS & DATA FLOW
 
-主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP/route primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
+主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP/route/firewall primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
 
 ### Flow: govirtad control plane boot {#flow-govirtad-boot}
 
@@ -353,6 +381,21 @@ Govirta/
 - Boundaries: Linux-only netlink kernel route table and read-only `/proc/sys/net/ipv4/ip_forward`; no shell commands and no sysctl writes inside the route package
 - Sinks: host IPv4 route table mutations for add/replace/delete; read-only forwarding readiness and route observations; errors classify through `routeerr`
 
+### Flow: hostnet firewall primitives {#flow-hostnet-firewall}
+
+- Trigger: `internal/hostnet/firewall.Manager` methods (caller wants to manage Govirta-owned host firewall rules)
+- Cross-module chain:
+  1. `internal/hostnet/firewall/firewall.go:9 (Manager)` — root contract requires caller context and explicit `MasqueradeSpec`, `EndpointAntiSpoofingSpec`, `RuleRef`, `RuleQuery`, or `RuleFilter`
+  2. `internal/hostnet/firewall/linux/manager_linux.go:37 (EnsureMasquerade)` — validate explicit NAT spec, then build desired Govirta-owned nftables table/chain/rule state
+  3. `internal/hostnet/firewall/linux/manager_linux.go:51 (EnsureEndpointAntiSpoofing)` — validate explicit bridge/TAP/MAC/IPv4 endpoint spec, then build the bridge-chain anti-spoofing guard rule group
+  4. `internal/hostnet/firewall/linux/rules_linux.go:69 (ensureDesiredRule)` / `:126 (ensureDesiredRuleGroup)` — ensure table/chain, reject conflicting managed rules, reconcile missing Govirta-owned rules, flush nftables batch, then re-read observed state
+  5. `internal/hostnet/firewall/linux/info_linux.go:13 (listObservedRules)` / `:117 (logicalEndpointInfo)` — list observed nftables rules, ignore non-Govirta rules, compact endpoint guard groups into logical `RuleInfo`
+  6. `internal/hostnet/firewall/linux/expr_linux.go:224 (parseMasquerade)` / `:264 (parseEndpointAntiSpoofing)` — parse nftables expressions and Govirta user data back into stable firewall summaries
+  7. `internal/hostnet/firewall/linux/errors_linux.go:14 (translateError)` — map nftables/syscall/firewall sentinel failures to stable `firewallerr` classes while preserving causes
+- Data: `firewall.MasqueradeSpec` / `EndpointAntiSpoofingSpec` / `RuleRef` / `RuleFilter` → nftables table/chain/rule operations → observed `firewall.RuleInfo`
+- Boundaries: Linux-only nftables kernel boundary through `realHandle` (`internal/hostnet/firewall/linux/handle_linux.go:20`); no shell commands, no sysctl writes, and no bridge/TAP creation
+- Sinks: Govirta-owned nftables masquerade and endpoint anti-spoofing rules only; non-Govirta rules are observed but not flushed or deleted
+
 ### Flow: storage block volume lifecycle {#flow-storage-volume}
 
 - Trigger: `internal/storage/service.go:80 (VolumeService.CreateVolume)` / `:171 (PublishVolume)` / `:206 (DeleteVolume)` (future VM orchestration caller)
@@ -405,6 +448,7 @@ Govirta/
 - Storage APIs require explicit pool, format, and source choices when behavior affects storage outcomes; no implicit default storage pool or format inference.
 - All externally provided APIs, including Go package APIs, HTTP APIs, and gRPC APIs, must require callers to pass every behavior-affecting parameter explicitly. Do not infer, auto-fill, default, or decide missing API parameters on behalf of callers.
 - `internal/hostnet/route` may read/check IPv4 forwarding but must not enable, disable, or persist it. Node installation, operations tooling, and acceptance setup own `net.ipv4.ip_forward` configuration.
+- `internal/hostnet/firewall` manages Govirta-owned nftables rules only. Callers must explicitly pass endpoint MAC/IP/TAP/bridge and NAT egress/source choices; the package must not infer endpoint identity, create links, or change IPv4 forwarding state.
 - Image-derived root volumes must always be full independent copies of source image bytes. Do not use qcow2 backing-file links, reflink-style logical sharing, or any image-to-root-disk link semantics in the current project scope.
 - Context/knowledge-base references must not be dangling: every `AGENTS.md` cross-reference, `#flow-*` anchor, docs path, and symbol reference added to this knowledge base must resolve to an existing section, file, or source symbol at the time it is written.
 - Control-plane persistent data storage follows the Kubernetes-inspired architecture and permanently considers only etcd. This is a fixed long-term decision on par with the no-libvirt rule: never introduce SQLite, PostgreSQL, MySQL, embedded KV stores, or any alternative metadata database. etcd is the sole persistence backend the project will ever target.
@@ -423,6 +467,10 @@ Govirta/
 - Do not use `panic` for expected business errors, string-match errors, swallow errors silently, or use `goto` as normal control flow.
 - Do not discard, suppress, overwrite, or log-and-continue errors that affect correctness, cleanup, rollback, persistence, storage, networking, process execution, or API responses; return them upward and use `errors.Join` when multiple errors must be preserved.
 - Do not let QEMU packages create host bridge/TAP resources; host link primitives belong under `internal/hostnet/link`.
+- Do not let `internal/hostnet/firewall` enable, disable, or persist IPv4 forwarding; acceptance setup and operations tooling own sysctl state.
+- Do not let `internal/hostnet/firewall` create bridge/TAP devices; host link primitives belong under `internal/hostnet/link`.
+- Do not let `internal/hostnet/firewall` infer endpoint MAC, IP, TAP, bridge, egress interface, or guest CIDR; callers must pass every behavior-affecting firewall field explicitly.
+- Do not flush, delete, or rewrite non-Govirta firewall rules from `internal/hostnet/firewall`; only Govirta-owned rules selected by explicit owner/purpose identity may be reconciled.
 - Do not spend implementation effort on distributed scheduling, Kubernetes integration, live migration, hot-plug, or multi-node control before the single-node cold-operation closure is complete.
 - Do not implement cold snapshot, cold resize, or cold config modification against a running VM; these operations must require a stopped/offline VM until a later hot-operation phase is explicitly designed.
 - Do not add qemu-nbd, qemu-storage-daemon, qemu-io, CSI sidecars, gRPC storage services, or libvirt-derived storage abstractions in the current phase.
@@ -470,6 +518,7 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - `lima/govirta.yaml` must keep `vmType: "vz"` and `nestedVirtualization: true`; this path is verified on Apple M3 + macOS 26.5 + Lima 2.1.1.
 - Full acceptance includes the hostnet bridge/TAP path: `TestHostnetLinkBridgeTapEndToEnd` creates a real bridge + TAP with `internal/hostnet/link/linux`, direct-kernel boots CirrOS with QEMU, waits for QMP running state and serial login marker, then verifies host-to-guest ping over the bridge/TAP path.
 - Full acceptance includes the hostnet route path: `TestHostnetRoutePrimitives` creates a real dummy link, checks IPv4 forwarding readiness, exercises add/list/get/replace/delete route primitives through `internal/hostnet/route/linux`, and relies on `scripts/acceptance.sh` to enable `net.ipv4.ip_forward=1` for the guest test run.
+- Full acceptance includes the hostnet firewall path: `TestHostnetFirewallMasqueradePrimitives` and `TestHostnetFirewallAntiSpoofingPrimitives` exercise real nftables masquerade and endpoint anti-spoofing lifecycle behavior through `internal/hostnet/firewall/linux` without validating full guest internet egress.
 - `test/log/*.log` is gitignored; keep `test/log/.gitkeep` tracked and do not commit generated acceptance logs.
 - Setup required before pushing: `git config core.hooksPath .githooks`.
 - Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
@@ -481,5 +530,5 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - Development temporary artifacts belong under project `.tmp/`; do not use global `/tmp` for debugging artifacts.
 - Storage metadata is in memory only: after restart, callers must explicitly re-register pools and image catalog state; drivers do not scan storage roots or write metadata files.
 - File/image pool overcommit ratio is `1.0`; block pool overcommit ratio is `1.5`.
-- VM external networking still requires NAT/firewall/DNS/default-route orchestration beyond the current bridge/TAP/route primitives. The route package proves host IPv4 route management and forwarding readiness only; it does not provide end-to-end guest internet access.
+- VM external networking still requires guest default-route, DNS, NAT, and orchestration-level connectivity beyond the current bridge/TAP/route/firewall primitives. The hostnet packages prove host primitive lifecycle behavior only; they do not provide end-to-end guest internet access.
 - Call-graph evidence: AFT outline/zoom and direct source/test reads; LSP call hierarchy was not used end-to-end. `[降级]` LSP；`[已验证]` 源码与测试断言。

@@ -27,6 +27,7 @@ provision:
       apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        nftables \
         qemu-efi-aarch64 \
         qemu-system-arm \
         qemu-utils
