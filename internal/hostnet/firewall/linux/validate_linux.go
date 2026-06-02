@@ -62,7 +62,7 @@ func validateEndpointAntiSpoofingSpec(ctx context.Context, spec firewall.Endpoin
 	if len(spec.MAC) != 6 || spec.MAC[0]&1 != 0 {
 		return invalidRequest("endpoint MAC must be a unicast 6-byte address")
 	}
-	if !spec.IPv4.IsValid() || !spec.IPv4.Is4() || spec.IPv4.IsUnspecified() || spec.IPv4.IsMulticast() {
+	if !spec.IPv4.IsValid() || !spec.IPv4.Is4() || !spec.IPv4.IsGlobalUnicast() {
 		return invalidRequest("endpoint IPv4 must be a usable unicast IPv4 address")
 	}
 	return validatePriority(spec.Priority, firewall.PriorityNameBridgeFilter)
@@ -173,6 +173,9 @@ func validatePriority(priority firewall.Priority, expected firewall.PriorityName
 func validateOwnerFilter(filter firewall.OwnerFilter) error {
 	switch filter.Mode {
 	case firewall.OwnerAny:
+		if filter.Value != "" {
+			return invalidRequest("owner any filter must not carry a value")
+		}
 		return nil
 	case firewall.OwnerValue:
 		return validateSafeName("owner", string(filter.Value))
@@ -184,6 +187,9 @@ func validateOwnerFilter(filter firewall.OwnerFilter) error {
 func validatePurposeFilter(filter firewall.PurposeFilter) error {
 	switch filter.Mode {
 	case firewall.PurposeAny:
+		if filter.Value != "" {
+			return invalidRequest("purpose any filter must not carry a value")
+		}
 		return nil
 	case firewall.PurposeValue:
 		return validatePurpose(filter.Value)
@@ -195,6 +201,9 @@ func validatePurposeFilter(filter firewall.PurposeFilter) error {
 func validateFamilyFilter(filter firewall.FamilyFilter) error {
 	switch filter.Mode {
 	case firewall.FamilyAny:
+		if filter.Value != "" {
+			return invalidRequest("family any filter must not carry a value")
+		}
 		return nil
 	case firewall.FamilyValue:
 		return validateFamily(filter.Value)
@@ -206,6 +215,9 @@ func validateFamilyFilter(filter firewall.FamilyFilter) error {
 func validateTableFilter(filter firewall.TableFilter) error {
 	switch filter.Mode {
 	case firewall.TableAny:
+		if filter.Value != "" {
+			return invalidRequest("table any filter must not carry a value")
+		}
 		return nil
 	case firewall.TableValue:
 		return validateSafeName("table", string(filter.Value))
@@ -217,6 +229,9 @@ func validateTableFilter(filter firewall.TableFilter) error {
 func validateChainFilter(filter firewall.ChainFilter) error {
 	switch filter.Mode {
 	case firewall.ChainAny:
+		if filter.Value != "" {
+			return invalidRequest("chain any filter must not carry a value")
+		}
 		return nil
 	case firewall.ChainValue:
 		return validateSafeName("chain", string(filter.Value))

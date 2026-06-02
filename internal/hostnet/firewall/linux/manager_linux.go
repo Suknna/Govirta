@@ -5,7 +5,6 @@ package linux
 import (
 	"context"
 
-	"github.com/google/nftables"
 	"github.com/suknna/govirta/internal/hostnet/firewall"
 	"github.com/suknna/govirta/internal/hostnet/firewall/firewallerr"
 )
@@ -26,17 +25,6 @@ func NewManager() (*Manager, error) {
 
 func NewManagerWithHandle(h handle) *Manager {
 	return &Manager{handle: h}
-}
-
-func (m *Manager) firewallHandle() handle {
-	if m == nil || m.handle == nil {
-		h, err := newRealHandle()
-		if err != nil {
-			return failingHandle{err: translateError("create nftables handle", err)}
-		}
-		return h
-	}
-	return m.handle
 }
 
 func (m *Manager) EnsureMasquerade(ctx context.Context, spec firewall.MasqueradeSpec) (firewall.RuleInfo, error) {
@@ -80,29 +68,3 @@ func (m *Manager) ListRules(ctx context.Context, filter firewall.RuleFilter) ([]
 	}
 	return nil, translateError("list firewall rules", firewallerr.ErrUnsupported)
 }
-
-type failingHandle struct {
-	err error
-}
-
-func (h failingHandle) AddTable(table *nftables.Table) *nftables.Table { return table }
-
-func (h failingHandle) DelTable(table *nftables.Table) {}
-
-func (h failingHandle) AddChain(chain *nftables.Chain) *nftables.Chain { return chain }
-
-func (h failingHandle) DelChain(chain *nftables.Chain) {}
-
-func (h failingHandle) AddRule(rule *nftables.Rule) *nftables.Rule { return rule }
-
-func (h failingHandle) DelRule(rule *nftables.Rule) error { return h.err }
-
-func (h failingHandle) GetTables() ([]*nftables.Table, error) { return nil, h.err }
-
-func (h failingHandle) GetChains() ([]*nftables.Chain, error) { return nil, h.err }
-
-func (h failingHandle) GetRules(table *nftables.Table, chain *nftables.Chain) ([]*nftables.Rule, error) {
-	return nil, h.err
-}
-
-func (h failingHandle) Flush() error { return h.err }
