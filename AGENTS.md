@@ -264,7 +264,7 @@ Govirta/
 | `routelinux.Manager.DeleteRoute` | method | `internal/hostnet/route/linux/manager_linux.go:125` | validate explicit `RouteSpec` → netlink `RouteDel`; missing route is idempotent success |
 | `routelinux.Manager.ListRoutes` | method | `internal/hostnet/route/linux/manager_linux.go:149` | validate explicit `RouteFilter` → netlink `RouteListFiltered` → Go-side exact filtering + stable sorting |
 | `routelinux.Manager.GetRoute` | method | `internal/hostnet/route/linux/manager_linux.go:182` | validate `RouteQuery` → netlink `RouteGet` path selection → observed primary `RouteInfo` |
-| `firewall.Manager` | interface | `internal/hostnet/firewall/firewall.go:9` | host firewall primitive API：`EnsureMasquerade` / `DeleteMasquerade` / `EnsureEndpointAntiSpoofing` / `DeleteEndpointAntiSpoofing` / `GetRule` / `ListRules` |
+| `firewall.Manager` | interface | `internal/hostnet/firewall/firewall.go:17` | host firewall primitive API：`EnsureMasquerade` / `DeleteMasquerade` / `EnsureEndpointAntiSpoofing` / `DeleteEndpointAntiSpoofing` / `GetRule` / `ListRules` |
 | `firewalllinux.Manager` | struct | `internal/hostnet/firewall/linux/manager_linux.go:15` | Linux nftables-backed implementation of `firewall.Manager` |
 | `firewalllinux.Manager.EnsureMasquerade` | method | `internal/hostnet/firewall/linux/manager_linux.go:37` | validate explicit NAT spec → ensure table/chain/rule → return observed masquerade rule info |
 | `firewalllinux.Manager.EnsureEndpointAntiSpoofing` | method | `internal/hostnet/firewall/linux/manager_linux.go:51` | validate explicit endpoint spec → ensure bridge-chain guard rule group → return observed logical endpoint rule info |
