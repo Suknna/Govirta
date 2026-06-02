@@ -94,11 +94,7 @@ func deleteObservedEndpointGroup(h handle, ref firewall.RuleRef) error {
 
 	var selected []observedRuleDetail
 	for _, group := range groups {
-		info, err := logicalEndpointInfo(group)
-		if err != nil {
-			return err
-		}
-		if info.Ref.Handle == ref.Handle {
+		if endpointGroupLowestHandle(group) == ref.Handle {
 			selected = group
 			break
 		}
@@ -136,6 +132,16 @@ func deleteObservedEndpointGroup(h handle, ref firewall.RuleRef) error {
 		}
 	}
 	return nil
+}
+
+func endpointGroupLowestHandle(details []observedRuleDetail) firewall.RuleHandle {
+	var lowest firewall.RuleHandle
+	for _, detail := range details {
+		if lowest == 0 || detail.info.Ref.Handle < lowest {
+			lowest = detail.info.Ref.Handle
+		}
+	}
+	return lowest
 }
 
 func (m *Manager) ListRules(ctx context.Context, filter firewall.RuleFilter) ([]firewall.RuleInfo, error) {

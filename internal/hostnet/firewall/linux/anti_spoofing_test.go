@@ -182,6 +182,90 @@ func TestDeleteEndpointAntiSpoofingRemovesGroupAndLeavesOtherEndpoint(t *testing
 	}
 }
 
+func TestDeleteEndpointAntiSpoofingIgnoresUnrelatedIncompleteGroup(t *testing.T) {
+	fh := &fakeHandle{}
+	manager := NewManagerWithHandle(fh)
+	target, err := manager.EnsureEndpointAntiSpoofing(context.Background(), taskEndpointAntiSpoofingSpec())
+	if err != nil {
+		t.Fatalf("target EnsureEndpointAntiSpoofing error = %v", err)
+	}
+	other := taskEndpointAntiSpoofingSpec()
+	other.TapName = "gv-tap1"
+	other.MAC = net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x10, 0x02}
+	other.IPv4 = netip.MustParseAddr("192.168.100.11")
+	if _, err := manager.EnsureEndpointAntiSpoofing(context.Background(), other); err != nil {
+		t.Fatalf("other EnsureEndpointAntiSpoofing error = %v", err)
+	}
+	removeEndpointGuard(t, fh, "gv-tap1", guardARPIPv4)
+
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), target.Ref); err != nil {
+		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
+	}
+	for _, rule := range fh.rules {
+		metadata, ok, err := parseRuleUserData(rule.UserData)
+		if err != nil || !ok || metadata.purpose != firewall.RulePurposeEndpointAntiSpoofing {
+			continue
+		}
+		detail, _, err := observedRuleDetailFor(rule.Table, rule.Chain, rule)
+		if err != nil {
+			t.Fatalf("observedRuleDetailFor error = %v", err)
+		}
+		if detail.info.Summary.EndpointAntiSpoofing.TapName == "gv-tap0" {
+			t.Fatalf("target TAP guard remains after delete: %+v", detail.info)
+		}
+	}
+}
+
+func TestDeleteEndpointAntiSpoofingCleansIncompleteTargetGroup(t *testing.T) {
+	fh := &fakeHandle{}
+	manager := NewManagerWithHandle(fh)
+	target, err := manager.EnsureEndpointAntiSpoofing(context.Background(), taskEndpointAntiSpoofingSpec())
+	if err != nil {
+		t.Fatalf("target EnsureEndpointAntiSpoofing error = %v", err)
+	}
+	removeEndpointGuard(t, fh, "gv-tap0", guardARPIPv4)
+
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), target.Ref); err != nil {
+		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
+	}
+	for _, rule := range fh.rules {
+		metadata, ok, err := parseRuleUserData(rule.UserData)
+		if err != nil || !ok || metadata.purpose != firewall.RulePurposeEndpointAntiSpoofing {
+			continue
+		}
+		detail, _, err := observedRuleDetailFor(rule.Table, rule.Chain, rule)
+		if err != nil {
+			t.Fatalf("observedRuleDetailFor error = %v", err)
+		}
+		if detail.info.Summary.EndpointAntiSpoofing.TapName == "gv-tap0" {
+			t.Fatalf("incomplete target TAP guard remains after delete: %+v", detail.info)
+		}
+	}
+}
+
+func TestDeleteEndpointAntiSpoofingLeavesNonGovirtaRules(t *testing.T) {
+	fh := &fakeHandle{}
+	manager := NewManagerWithHandle(fh)
+	target, err := manager.EnsureEndpointAntiSpoofing(context.Background(), taskEndpointAntiSpoofingSpec())
+	if err != nil {
+		t.Fatalf("target EnsureEndpointAntiSpoofing error = %v", err)
+	}
+	table := fh.tables[0]
+	chain := fh.chains[0]
+	nonGovirta := &nftables.Rule{Table: table, Chain: chain, Handle: 99, UserData: []byte("owner=other")}
+	fh.rules = append(fh.rules, nonGovirta)
+
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), target.Ref); err != nil {
+		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
+	}
+	for _, rule := range fh.rules {
+		if rule.Handle == nonGovirta.Handle {
+			return
+		}
+	}
+	t.Fatalf("non-Govirta rule was deleted")
+}
+
 func TestEnsureEndpointAntiSpoofingCanceledContextRecordsNoHandleCalls(t *testing.T) {
 	fh := &fakeHandle{}
 	_, err := NewManagerWithHandle(fh).EnsureEndpointAntiSpoofing(canceledContext(), taskEndpointAntiSpoofingSpec())
@@ -230,4 +314,24 @@ func assertEndpointSummary(t *testing.T, info firewall.RuleInfo, spec firewall.E
 	if summary.BridgeName != spec.BridgeName || summary.TapName != spec.TapName || summary.MAC.String() != spec.MAC.String() || summary.IPv4 != spec.IPv4 || summary.Priority != spec.Priority {
 		t.Fatalf("EndpointAntiSpoofingSummary = %+v, want bridge=%s tap=%s mac=%s ip=%s priority=%+v", summary, spec.BridgeName, spec.TapName, spec.MAC, spec.IPv4, spec.Priority)
 	}
+}
+
+func removeEndpointGuard(t *testing.T, fh *fakeHandle, tap firewall.InterfaceName, guard endpointGuardKind) {
+	t.Helper()
+	for i, rule := range fh.rules {
+		metadata, ok, err := parseRuleUserData(rule.UserData)
+		if err != nil || !ok || metadata.purpose != firewall.RulePurposeEndpointAntiSpoofing || metadata.guard != guard {
+			continue
+		}
+		detail, _, err := observedRuleDetailFor(rule.Table, rule.Chain, rule)
+		if err != nil {
+			t.Fatalf("observedRuleDetailFor error = %v", err)
+		}
+		if detail.info.Summary.EndpointAntiSpoofing.TapName != tap {
+			continue
+		}
+		fh.rules = append(fh.rules[:i], fh.rules[i+1:]...)
+		return
+	}
+	t.Fatalf("guard %q for TAP %q not found", guard, tap)
 }
