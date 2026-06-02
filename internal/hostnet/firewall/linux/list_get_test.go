@@ -78,7 +78,6 @@ func TestListRulesReturnsSortedGovirtaRules(t *testing.T) {
 	got := refsFromInfos(infos)
 	want := []firewall.RuleRef{
 		endpointRef("vm-1", 5),
-		endpointRef("vm-1", 7),
 		endpointRef("vm-2", 3),
 		masqueradeRef("vm-1", 10),
 		masqueradeRef("vm-2", 2),
@@ -112,7 +111,7 @@ func TestListRulesFilterByOwnerPurposeFamilyTableChain(t *testing.T) {
 
 func TestGetRuleReturnsRuleMatchingCompactRef(t *testing.T) {
 	fh, _ := seededRuleHandle()
-	ref := endpointRef("vm-1", 7)
+	ref := endpointRef("vm-1", 5)
 
 	info, err := NewManagerWithHandle(fh).GetRule(context.Background(), firewall.RuleQuery{Ref: ref})
 	if err != nil {
@@ -121,8 +120,8 @@ func TestGetRuleReturnsRuleMatchingCompactRef(t *testing.T) {
 	if got := ruleRefForInfo(info); got != ref {
 		t.Fatalf("GetRule ref = %+v, want %+v", got, ref)
 	}
-	if info.Summary.EndpointAntiSpoofing == nil || info.Summary.EndpointAntiSpoofing.BridgeName != "br0" || info.Summary.EndpointAntiSpoofing.TapName != "tap0" {
-		t.Fatalf("GetRule summary = %+v, want endpoint bridge br0 and TAP tap0", info.Summary)
+	if info.Summary.EndpointAntiSpoofing == nil || info.Summary.EndpointAntiSpoofing.BridgeName != "br0" || info.Summary.EndpointAntiSpoofing.TapName != "tap0" || info.Summary.EndpointAntiSpoofing.MAC.String() != "02:00:00:00:00:01" || info.Summary.EndpointAntiSpoofing.IPv4 != netip.MustParseAddr("192.0.2.10") {
+		t.Fatalf("GetRule summary = %+v, want merged endpoint bridge br0 TAP tap0 MAC 02:00:00:00:00:01 IPv4 192.0.2.10", info.Summary)
 	}
 }
 
@@ -193,7 +192,7 @@ func TestDeleteEndpointAntiSpoofingRemovesOnlyMatchingRule(t *testing.T) {
 	fh, _ := seededRuleHandle()
 	manager := NewManagerWithHandle(fh)
 
-	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), endpointRef("vm-1", 7)); err != nil {
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), endpointRef("vm-1", 5)); err != nil {
 		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
 	}
 
@@ -203,7 +202,6 @@ func TestDeleteEndpointAntiSpoofingRemovesOnlyMatchingRule(t *testing.T) {
 	}
 	got := refsFromInfos(infos)
 	want := []firewall.RuleRef{
-		endpointRef("vm-1", 5),
 		endpointRef("vm-2", 3),
 		masqueradeRef("vm-1", 10),
 		masqueradeRef("vm-2", 2),
@@ -235,9 +233,14 @@ func seededRuleHandle() (*fakeHandle, seededObjects) {
 	fh.rules = []*nftables.Rule{
 		masqueradeRule(natTable, natChain, "vm-1", 10, netip.MustParsePrefix("192.0.2.0/24"), "eth0"),
 		masqueradeRule(natTable, natChain, "vm-2", 2, netip.MustParsePrefix("198.51.100.0/24"), "eth1"),
-		endpointRule(bridgeTable, bridgeChain, "vm-1", 7, guardIPv4, "tap0", nil, netip.MustParseAddr("192.0.2.10")),
 		endpointRule(bridgeTable, bridgeChain, "vm-1", 5, guardEtherMAC, "tap0", net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, netip.Addr{}),
-		endpointRule(bridgeTable, bridgeChain, "vm-2", 3, guardARPIPv4, "tap1", nil, netip.MustParseAddr("192.0.2.11")),
+		endpointRule(bridgeTable, bridgeChain, "vm-1", 7, guardIPv4, "tap0", nil, netip.MustParseAddr("192.0.2.10")),
+		endpointRule(bridgeTable, bridgeChain, "vm-1", 8, guardARPMAC, "tap0", net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, netip.Addr{}),
+		endpointRule(bridgeTable, bridgeChain, "vm-1", 9, guardARPIPv4, "tap0", nil, netip.MustParseAddr("192.0.2.10")),
+		endpointRule(bridgeTable, bridgeChain, "vm-2", 3, guardEtherMAC, "tap1", net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}, netip.Addr{}),
+		endpointRule(bridgeTable, bridgeChain, "vm-2", 4, guardIPv4, "tap1", nil, netip.MustParseAddr("192.0.2.11")),
+		endpointRule(bridgeTable, bridgeChain, "vm-2", 6, guardARPMAC, "tap1", net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}, netip.Addr{}),
+		endpointRule(bridgeTable, bridgeChain, "vm-2", 11, guardARPIPv4, "tap1", nil, netip.MustParseAddr("192.0.2.11")),
 	}
 	return fh, seededObjects{natTable: natTable, natChain: natChain, bridgeTable: bridgeTable, bridgeChain: bridgeChain}
 }

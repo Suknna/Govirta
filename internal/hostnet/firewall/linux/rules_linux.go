@@ -19,6 +19,7 @@ type desiredRule struct {
 	chainName firewall.ChainName
 	purpose   firewall.RulePurpose
 	owner     firewall.RuleOwner
+	guard     endpointGuardKind
 	priority  firewall.Priority
 	summary   firewall.RuleSummary
 }
@@ -30,6 +31,7 @@ func desiredMasqueradeRule(spec firewall.MasqueradeSpec) desiredRule {
 		chainName: spec.ChainName,
 		purpose:   firewall.RulePurposeMasquerade,
 		owner:     spec.RuleOwner,
+		guard:     guardMasquerade,
 		priority:  spec.Priority,
 		summary: firewall.RuleSummary{Masquerade: &firewall.MasqueradeSummary{
 			GuestCIDR:           spec.GuestCIDR.Masked(),
@@ -37,6 +39,31 @@ func desiredMasqueradeRule(spec firewall.MasqueradeSpec) desiredRule {
 			Priority:            spec.Priority,
 		}},
 	}
+}
+
+func desiredEndpointAntiSpoofingRules(spec firewall.EndpointAntiSpoofingSpec) []desiredRule {
+	summary := firewall.RuleSummary{EndpointAntiSpoofing: &firewall.EndpointAntiSpoofingSummary{
+		BridgeName: spec.BridgeName,
+		TapName:    spec.TapName,
+		MAC:        netHardwareAddrCopy(spec.MAC),
+		IPv4:       spec.IPv4,
+		Priority:   spec.Priority,
+	}}
+	guards := []endpointGuardKind{guardEtherMAC, guardIPv4, guardARPMAC, guardARPIPv4}
+	desired := make([]desiredRule, 0, len(guards))
+	for _, guard := range guards {
+		desired = append(desired, desiredRule{
+			family:    firewall.TableFamilyBridge,
+			tableName: spec.TableName,
+			chainName: spec.ChainName,
+			purpose:   firewall.RulePurposeEndpointAntiSpoofing,
+			owner:     spec.RuleOwner,
+			guard:     guard,
+			priority:  spec.Priority,
+			summary:   summary,
+		})
+	}
+	return desired
 }
 
 func ensureDesiredRule(ctx context.Context, h handle, operation string, desired desiredRule) (firewall.RuleInfo, error) {
@@ -73,7 +100,15 @@ func ensureDesiredRule(ctx context.Context, h handle, operation string, desired 
 		return firewall.RuleInfo{}, translateError(operation, err)
 	}
 
-	h.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: ruleExprs(desired), UserData: ruleUserDataForDesired(desired)})
+	exprs, err := ruleExprs(desired)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+	userData, err := ruleUserDataForDesired(desired)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+	h.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: exprs, UserData: userData})
 	if err := h.Flush(); err != nil {
 		return firewall.RuleInfo{}, translateError(operation, err)
 	}
@@ -86,6 +121,86 @@ func ensureDesiredRule(ctx context.Context, h handle, operation string, desired 
 		return info, nil
 	}
 	return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: ensured firewall rule was not observed", firewallerr.ErrInvalidObservedState))
+}
+
+func ensureDesiredRuleGroup(ctx context.Context, h handle, operation string, desired []desiredRule) (firewall.RuleInfo, error) {
+	if err := checkContext(ctx); err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+	if len(desired) == 0 {
+		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: desired firewall rule group must be non-empty", firewallerr.ErrInvalidRequest))
+	}
+	base := desired[0]
+	if err := validateDesiredEndpointGroup(desired); err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+
+	details, err := listObservedRuleDetails(h, desiredRuleFilter(base))
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+	matching, err := matchingEndpointDetails(details, base)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+
+	existingByGuard := map[endpointGuardKind]observedRuleDetail{}
+	for _, detail := range matching {
+		if _, exists := existingByGuard[detail.guard]; exists {
+			return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: duplicate endpoint guard %q exists for TAP %q", firewallerr.ErrConflict, detail.guard, base.summary.EndpointAntiSpoofing.TapName))
+		}
+		if !endpointGuardMatchesDesired(detail, base) {
+			return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: existing endpoint guard differs from requested state", firewallerr.ErrConflict))
+		}
+		existingByGuard[detail.guard] = detail
+	}
+	if len(existingByGuard) == len(desired) {
+		info, err := logicalEndpointInfo(matching)
+		return info, translateError(operation, err)
+	}
+
+	table, err := ensureTable(h, base)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+	chain, err := ensureChain(h, table, base)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+	for _, rule := range desired {
+		if _, exists := existingByGuard[rule.guard]; exists {
+			continue
+		}
+		exprs, err := ruleExprs(rule)
+		if err != nil {
+			return firewall.RuleInfo{}, translateError(operation, err)
+		}
+		userData, err := ruleUserDataForDesired(rule)
+		if err != nil {
+			return firewall.RuleInfo{}, translateError(operation, err)
+		}
+		h.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: exprs, UserData: userData})
+	}
+	if err := h.Flush(); err != nil {
+		return firewall.RuleInfo{}, translateError(operation, err)
+	}
+
+	details, err = listObservedRuleDetails(h, desiredRuleFilter(base))
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: %w", firewallerr.ErrInvalidObservedState, err))
+	}
+	matching, err = matchingEndpointDetails(details, base)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: %w", firewallerr.ErrInvalidObservedState, err))
+	}
+	info, err := logicalEndpointInfo(matching)
+	if err != nil {
+		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: %w", firewallerr.ErrInvalidObservedState, err))
+	}
+	if !ruleSummaryMatchesDesired(info.Summary, base.summary) {
+		return firewall.RuleInfo{}, translateError(operation, fmt.Errorf("%w: ensured endpoint anti-spoofing group differs from requested state", firewallerr.ErrInvalidObservedState))
+	}
+	return info, nil
 }
 
 func desiredRuleFilter(desired desiredRule) firewall.RuleFilter {
@@ -113,6 +228,14 @@ func ruleSummaryMatchesDesired(observed firewall.RuleSummary, desired firewall.R
 			observed.Masquerade.GuestCIDR == desired.Masquerade.GuestCIDR &&
 			observed.Masquerade.EgressInterfaceName == desired.Masquerade.EgressInterfaceName &&
 			observed.Masquerade.Priority == desired.Masquerade.Priority
+	}
+	if desired.EndpointAntiSpoofing != nil {
+		return observed.EndpointAntiSpoofing != nil &&
+			observed.EndpointAntiSpoofing.BridgeName == desired.EndpointAntiSpoofing.BridgeName &&
+			observed.EndpointAntiSpoofing.TapName == desired.EndpointAntiSpoofing.TapName &&
+			observed.EndpointAntiSpoofing.IPv4 == desired.EndpointAntiSpoofing.IPv4 &&
+			observed.EndpointAntiSpoofing.Priority == desired.EndpointAntiSpoofing.Priority &&
+			observed.EndpointAntiSpoofing.MAC.String() == desired.EndpointAntiSpoofing.MAC.String()
 	}
 	return false
 }
@@ -143,7 +266,11 @@ func ensureChain(h handle, table *nftables.Table, desired desiredRule) (*nftable
 			return chain, nil
 		}
 	}
-	return h.AddChain(chainForDesired(table, desired)), nil
+	chain, err := chainForDesired(table, desired)
+	if err != nil {
+		return nil, err
+	}
+	return h.AddChain(chain), nil
 }
 
 // validateExistingChain rejects reuse of a chain that shares the desired name
@@ -163,38 +290,150 @@ func validateExistingChain(chain *nftables.Chain, desired desiredRule) error {
 			return fmt.Errorf("%w: existing chain %q priority does not match requested srcnat priority", firewallerr.ErrConflict, chain.Name)
 		}
 		return nil
+	case firewall.RulePurposeEndpointAntiSpoofing:
+		if chain.Type != nftables.ChainTypeFilter {
+			return fmt.Errorf("%w: existing chain %q is not a filter chain", firewallerr.ErrConflict, chain.Name)
+		}
+		if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookForward {
+			return fmt.Errorf("%w: existing chain %q is not hooked at forward", firewallerr.ErrConflict, chain.Name)
+		}
+		if chain.Priority == nil || int(*chain.Priority) != desired.priority.Value {
+			return fmt.Errorf("%w: existing chain %q priority does not match requested bridge filter priority", firewallerr.ErrConflict, chain.Name)
+		}
+		return nil
 	default:
 		return fmt.Errorf("%w: unsupported desired chain purpose %q", firewallerr.ErrConflict, desired.purpose)
 	}
 }
 
-func chainForDesired(table *nftables.Table, desired desiredRule) *nftables.Chain {
+func chainForDesired(table *nftables.Table, desired desiredRule) (*nftables.Chain, error) {
 	priority := nftables.ChainPriority(desired.priority.Value)
 	chain := &nftables.Chain{Table: table, Name: string(desired.chainName), Priority: &priority}
 	switch desired.purpose {
 	case firewall.RulePurposeMasquerade:
 		chain.Type = nftables.ChainTypeNAT
 		chain.Hooknum = nftables.ChainHookPostrouting
-	}
-	return chain
-}
-
-func ruleExprs(desired desiredRule) []expr.Any {
-	switch desired.purpose {
-	case firewall.RulePurposeMasquerade:
-		return masqueradeExprs(*desired.summary.Masquerade)
+		return chain, nil
+	case firewall.RulePurposeEndpointAntiSpoofing:
+		chain.Type = nftables.ChainTypeFilter
+		chain.Hooknum = nftables.ChainHookForward
+		return chain, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("%w: unsupported desired chain purpose %q", firewallerr.ErrUnsupported, desired.purpose)
 	}
 }
 
-func ruleUserDataForDesired(desired desiredRule) []byte {
+func ruleExprs(desired desiredRule) ([]expr.Any, error) {
 	switch desired.purpose {
 	case firewall.RulePurposeMasquerade:
-		return userDataForRule(desired.owner, desired.purpose, guardMasquerade)
+		if desired.guard != guardMasquerade || desired.summary.Masquerade == nil {
+			return nil, fmt.Errorf("%w: invalid masquerade desired rule", firewallerr.ErrInvalidRequest)
+		}
+		return masqueradeExprs(*desired.summary.Masquerade), nil
+	case firewall.RulePurposeEndpointAntiSpoofing:
+		if desired.summary.EndpointAntiSpoofing == nil {
+			return nil, fmt.Errorf("%w: invalid endpoint anti-spoofing desired rule", firewallerr.ErrInvalidRequest)
+		}
+		summary := *desired.summary.EndpointAntiSpoofing
+		switch desired.guard {
+		case guardEtherMAC:
+			return endpointEtherMACDropExprs(summary), nil
+		case guardIPv4:
+			return endpointIPv4DropExprs(summary), nil
+		case guardARPMAC:
+			return endpointARPMACDropExprs(summary), nil
+		case guardARPIPv4:
+			return endpointARPIPv4DropExprs(summary), nil
+		default:
+			return nil, fmt.Errorf("%w: unsupported endpoint guard %q", firewallerr.ErrUnsupported, desired.guard)
+		}
 	default:
-		return nil
+		return nil, fmt.Errorf("%w: unsupported rule purpose %q", firewallerr.ErrUnsupported, desired.purpose)
 	}
+}
+
+func ruleUserDataForDesired(desired desiredRule) ([]byte, error) {
+	switch desired.purpose {
+	case firewall.RulePurposeMasquerade:
+		if desired.guard != guardMasquerade {
+			return nil, fmt.Errorf("%w: invalid masquerade guard %q", firewallerr.ErrInvalidRequest, desired.guard)
+		}
+		return userDataForRule(desired.owner, desired.purpose, guardMasquerade), nil
+	case firewall.RulePurposeEndpointAntiSpoofing:
+		switch desired.guard {
+		case guardEtherMAC, guardIPv4, guardARPMAC, guardARPIPv4:
+			return userDataForRule(desired.owner, desired.purpose, desired.guard), nil
+		default:
+			return nil, fmt.Errorf("%w: unsupported endpoint guard %q", firewallerr.ErrUnsupported, desired.guard)
+		}
+	default:
+		return nil, fmt.Errorf("%w: unsupported rule purpose %q", firewallerr.ErrUnsupported, desired.purpose)
+	}
+}
+
+func validateDesiredEndpointGroup(desired []desiredRule) error {
+	base := desired[0]
+	if base.purpose != firewall.RulePurposeEndpointAntiSpoofing || base.summary.EndpointAntiSpoofing == nil {
+		return fmt.Errorf("%w: desired group must contain endpoint anti-spoofing rules", firewallerr.ErrInvalidRequest)
+	}
+	seen := map[endpointGuardKind]bool{}
+	for _, rule := range desired {
+		if rule.family != base.family || rule.tableName != base.tableName || rule.chainName != base.chainName || rule.purpose != base.purpose || rule.owner != base.owner || rule.priority != base.priority || !ruleSummaryMatchesDesired(rule.summary, base.summary) {
+			return fmt.Errorf("%w: desired endpoint group contains mixed identities", firewallerr.ErrInvalidRequest)
+		}
+		switch rule.guard {
+		case guardEtherMAC, guardIPv4, guardARPMAC, guardARPIPv4:
+			if seen[rule.guard] {
+				return fmt.Errorf("%w: desired endpoint group contains duplicate guard %q", firewallerr.ErrInvalidRequest, rule.guard)
+			}
+			seen[rule.guard] = true
+		default:
+			return fmt.Errorf("%w: unsupported endpoint guard %q", firewallerr.ErrUnsupported, rule.guard)
+		}
+	}
+	if len(seen) != 4 {
+		return fmt.Errorf("%w: desired endpoint group must contain four guards", firewallerr.ErrInvalidRequest)
+	}
+	return nil
+}
+
+func matchingEndpointDetails(details []observedRuleDetail, desired desiredRule) ([]observedRuleDetail, error) {
+	var matching []observedRuleDetail
+	desiredEndpoint := desired.summary.EndpointAntiSpoofing
+	for _, detail := range details {
+		if detail.info.Ref.Purpose != firewall.RulePurposeEndpointAntiSpoofing || detail.info.Summary.EndpointAntiSpoofing == nil {
+			continue
+		}
+		observed := detail.info.Summary.EndpointAntiSpoofing
+		if observed.TapName != desiredEndpoint.TapName {
+			continue
+		}
+		if observed.BridgeName != desiredEndpoint.BridgeName || observed.Priority != desiredEndpoint.Priority {
+			return nil, fmt.Errorf("%w: existing endpoint guard has different bridge or priority", firewallerr.ErrConflict)
+		}
+		matching = append(matching, detail)
+	}
+	return matching, nil
+}
+
+func endpointGuardMatchesDesired(detail observedRuleDetail, desired desiredRule) bool {
+	observed := detail.info.Summary.EndpointAntiSpoofing
+	want := desired.summary.EndpointAntiSpoofing
+	if observed == nil || want == nil || observed.BridgeName != want.BridgeName || observed.TapName != want.TapName || observed.Priority != want.Priority {
+		return false
+	}
+	switch detail.guard {
+	case guardEtherMAC, guardARPMAC:
+		return observed.MAC.String() == want.MAC.String()
+	case guardIPv4, guardARPIPv4:
+		return observed.IPv4 == want.IPv4
+	default:
+		return false
+	}
+}
+
+func netHardwareAddrCopy(addr []byte) []byte {
+	return append([]byte(nil), addr...)
 }
 
 func ruleRefForInfo(info firewall.RuleInfo) firewall.RuleRef {

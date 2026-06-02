@@ -104,15 +104,25 @@ func endpointInterfaceExprs(bridge firewall.InterfaceName, tap firewall.Interfac
 	}
 }
 
+type observedRuleDetail struct {
+	info  firewall.RuleInfo
+	guard endpointGuardKind
+}
+
 func observedRuleInfo(table *nftables.Table, chain *nftables.Chain, rule *nftables.Rule) (firewall.RuleInfo, bool, error) {
+	detail, recognized, err := observedRuleDetailFor(table, chain, rule)
+	return detail.info, recognized, err
+}
+
+func observedRuleDetailFor(table *nftables.Table, chain *nftables.Chain, rule *nftables.Rule) (observedRuleDetail, bool, error) {
 	metadata, ok, err := parseRuleUserData(rule.UserData)
 	if err != nil || !ok {
-		return firewall.RuleInfo{}, ok, err
+		return observedRuleDetail{}, ok, err
 	}
 
 	family, ok := firewallFamily(table.Family)
 	if !ok {
-		return firewall.RuleInfo{}, true, invalidObservedState("unsupported table family %d", table.Family)
+		return observedRuleDetail{}, true, invalidObservedState("unsupported table family %d", table.Family)
 	}
 
 	info := firewall.RuleInfo{
@@ -129,24 +139,24 @@ func observedRuleInfo(table *nftables.Table, chain *nftables.Chain, rule *nftabl
 	switch metadata.purpose {
 	case firewall.RulePurposeMasquerade:
 		if metadata.guard != guardMasquerade {
-			return firewall.RuleInfo{}, true, invalidObservedState("masquerade rule has guard %q", metadata.guard)
+			return observedRuleDetail{}, true, invalidObservedState("masquerade rule has guard %q", metadata.guard)
 		}
 		summary, err := parseMasquerade(rule.Exprs, chain)
 		if err != nil {
-			return firewall.RuleInfo{}, true, err
+			return observedRuleDetail{}, true, err
 		}
 		info.Summary.Masquerade = summary
 	case firewall.RulePurposeEndpointAntiSpoofing:
 		summary, err := parseEndpointAntiSpoofing(metadata.guard, rule.Exprs, chain)
 		if err != nil {
-			return firewall.RuleInfo{}, true, err
+			return observedRuleDetail{}, true, err
 		}
 		info.Summary.EndpointAntiSpoofing = summary
 	default:
-		return firewall.RuleInfo{}, true, invalidObservedState("unsupported rule purpose %q", metadata.purpose)
+		return observedRuleDetail{}, true, invalidObservedState("unsupported rule purpose %q", metadata.purpose)
 	}
 
-	return info, true, nil
+	return observedRuleDetail{info: info, guard: metadata.guard}, true, nil
 }
 
 type ruleUserData struct {

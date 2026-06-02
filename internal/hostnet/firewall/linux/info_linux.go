@@ -11,6 +11,19 @@ import (
 )
 
 func listObservedRules(h handle, filter firewall.RuleFilter) ([]firewall.RuleInfo, error) {
+	details, err := listObservedRuleDetails(h, filter)
+	if err != nil {
+		return nil, err
+	}
+	infos, err := compactObservedRules(details)
+	if err != nil {
+		return nil, err
+	}
+	sortRuleInfos(infos)
+	return infos, nil
+}
+
+func listObservedRuleDetails(h handle, filter firewall.RuleFilter) ([]observedRuleDetail, error) {
 	tables, err := h.GetTables()
 	if err != nil {
 		return nil, err
@@ -36,7 +49,7 @@ func listObservedRules(h handle, filter firewall.RuleFilter) ([]firewall.RuleInf
 		}
 	}
 
-	var infos []firewall.RuleInfo
+	var details []observedRuleDetail
 	for _, chain := range chains {
 		table := tableByChain[chain]
 		if table == nil || !tableChainMatchesFilter(table, chain, filter) {
@@ -48,19 +61,120 @@ func listObservedRules(h handle, filter firewall.RuleFilter) ([]firewall.RuleInf
 			return nil, err
 		}
 		for _, rule := range rules {
-			info, recognized, err := observedRuleInfo(table, chain, rule)
+			detail, recognized, err := observedRuleDetailFor(table, chain, rule)
 			if err != nil {
 				return nil, err
 			}
-			if !recognized || !ruleInfoMatchesFilter(info, filter) {
+			if !recognized || !ruleInfoMatchesFilter(detail.info, filter) {
 				continue
 			}
-			infos = append(infos, info)
+			details = append(details, detail)
 		}
 	}
 
-	sortRuleInfos(infos)
+	return details, nil
+}
+
+func compactObservedRules(details []observedRuleDetail) ([]firewall.RuleInfo, error) {
+	var infos []firewall.RuleInfo
+	groups := map[endpointGroupKey][]observedRuleDetail{}
+	for _, detail := range details {
+		if detail.info.Ref.Purpose != firewall.RulePurposeEndpointAntiSpoofing {
+			infos = append(infos, detail.info)
+			continue
+		}
+		summary := detail.info.Summary.EndpointAntiSpoofing
+		if summary == nil {
+			return nil, fmt.Errorf("%w: endpoint anti-spoofing rule has no endpoint summary", firewallerr.ErrInvalidObservedState)
+		}
+		key := endpointGroupKey{
+			owner:     detail.info.Ref.Owner,
+			family:    detail.info.Ref.Family,
+			tableName: detail.info.Ref.TableName,
+			chainName: detail.info.Ref.ChainName,
+			tapName:   summary.TapName,
+		}
+		groups[key] = append(groups[key], detail)
+	}
+	for _, group := range groups {
+		info, err := logicalEndpointInfo(group)
+		if err != nil {
+			return nil, err
+		}
+		infos = append(infos, info)
+	}
 	return infos, nil
+}
+
+type endpointGroupKey struct {
+	owner     firewall.RuleOwner
+	family    firewall.TableFamily
+	tableName firewall.TableName
+	chainName firewall.ChainName
+	tapName   firewall.InterfaceName
+}
+
+func logicalEndpointInfo(details []observedRuleDetail) (firewall.RuleInfo, error) {
+	if len(details) == 0 {
+		return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing group is empty", firewallerr.ErrInvalidObservedState)
+	}
+	base := details[0]
+	baseSummary := base.info.Summary.EndpointAntiSpoofing
+	if baseSummary == nil {
+		return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing rule has no endpoint summary", firewallerr.ErrInvalidObservedState)
+	}
+	ref := base.info.Ref
+	ref.Handle = base.info.Ref.Handle
+	merged := firewall.EndpointAntiSpoofingSummary{
+		BridgeName: baseSummary.BridgeName,
+		TapName:    baseSummary.TapName,
+		Priority:   baseSummary.Priority,
+	}
+	seen := map[endpointGuardKind]bool{}
+	for _, detail := range details {
+		summary := detail.info.Summary.EndpointAntiSpoofing
+		if summary == nil {
+			return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing rule has no endpoint summary", firewallerr.ErrInvalidObservedState)
+		}
+		if detail.info.Ref.Owner != ref.Owner || detail.info.Ref.Purpose != ref.Purpose || detail.info.Ref.Family != ref.Family || detail.info.Ref.TableName != ref.TableName || detail.info.Ref.ChainName != ref.ChainName || summary.BridgeName != merged.BridgeName || summary.TapName != merged.TapName || summary.Priority != merged.Priority {
+			return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing group has mixed identity", firewallerr.ErrInvalidObservedState)
+		}
+		if seen[detail.guard] {
+			return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing group has duplicate guard %q", firewallerr.ErrInvalidObservedState, detail.guard)
+		}
+		seen[detail.guard] = true
+		if detail.info.Ref.Handle < ref.Handle {
+			ref.Handle = detail.info.Ref.Handle
+		}
+		switch detail.guard {
+		case guardEtherMAC, guardARPMAC:
+			if len(summary.MAC) != 6 {
+				return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing MAC guard is incomplete", firewallerr.ErrInvalidObservedState)
+			}
+			if len(merged.MAC) == 0 {
+				merged.MAC = netHardwareAddrCopy(summary.MAC)
+			} else if merged.MAC.String() != summary.MAC.String() {
+				return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing MAC guards disagree", firewallerr.ErrInvalidObservedState)
+			}
+		case guardIPv4, guardARPIPv4:
+			if !summary.IPv4.IsValid() || !summary.IPv4.Is4() {
+				return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing IPv4 guard is incomplete", firewallerr.ErrInvalidObservedState)
+			}
+			if !merged.IPv4.IsValid() {
+				merged.IPv4 = summary.IPv4
+			} else if merged.IPv4 != summary.IPv4 {
+				return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing IPv4 guards disagree", firewallerr.ErrInvalidObservedState)
+			}
+		default:
+			return firewall.RuleInfo{}, fmt.Errorf("%w: unsupported endpoint guard %q", firewallerr.ErrInvalidObservedState, detail.guard)
+		}
+	}
+	for _, required := range []endpointGuardKind{guardEtherMAC, guardIPv4, guardARPMAC, guardARPIPv4} {
+		if !seen[required] {
+			return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing group is missing guard %q", firewallerr.ErrInvalidObservedState, required)
+		}
+	}
+	return firewall.RuleInfo{Ref: ref, Summary: firewall.RuleSummary{EndpointAntiSpoofing: &merged}}, nil
 }
 
 func getObservedRule(h handle, query firewall.RuleQuery) (firewall.RuleInfo, error) {
