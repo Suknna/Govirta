@@ -26,7 +26,7 @@ Local virtualization boundary aggregator. Owns three sibling packages: typed QEM
 
 ## CONVENTIONS
 
-- This package tree renders deterministic argv and exposes typed command boundaries; process spawn / QMP lifecycle / TAP creation belongs above (`internal/node`) or beside (`internal/network/bridge`) this layer.
+- This package tree renders deterministic argv and exposes typed command boundaries; process spawn / QMP lifecycle / TAP creation belongs above (`internal/node`) or beside (`internal/hostnet/link` primitives orchestrated by `internal/network`) this layer.
 - New virtualization boundaries (e.g., a future `nbd/` or `migration/` package) sit at this level only when they own a distinct external command/protocol surface; otherwise extend an existing subpackage.
 
 ## ANTI-PATTERNS

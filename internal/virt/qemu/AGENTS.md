@@ -65,7 +65,7 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 - Do not add `machine.WithAccel`, `machine.WithKernelIRQChip`, `TypeQ35`, `TypeVirt`, or other free-composition APIs. Profiles only.
 - Do not bypass `Build()` validation by appending raw strings to `Builder.ordered` from outside the package; it is unexported.
 - Do not start QEMU processes from this package; argv is the deliverable. Process spawn lives above this typed boundary.
-- Do not reference TAP names that are not pre-created on the host. This package consumes TAP names; `internal/network/bridge` owns lifecycle.
+- Do not reference TAP names that are not pre-created on the host. This package consumes TAP names; `internal/hostnet/link` owns host TAP/bridge lifecycle and `internal/network` orchestrates it.
 - Do not silently widen the machine profile whitelist; `Profile.IsSupported()` (`machine.go:20`) is the single source of truth.
 - Do not let unit tests require a real `qemu-system-*` binary; tests assert argv strings only.
 

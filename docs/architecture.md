@@ -31,7 +31,7 @@ govirtctl -> govirtad -> scheduler/store/control loops -> govirtlet -> QEMU/QMP/
 - `internal/node`: node agent composition.
 - `internal/virt/qemu`: QEMU process abstraction.
 - `internal/virt/qmp`: QMP protocol abstraction.
-- `internal/network/bridge`: Linux bridge abstraction.
+- `internal/network`: VM-facing network orchestration layer over `internal/hostnet/*` host primitives (link/route/firewall/dhcp).
 
 ## Fast Iteration Policy
 
