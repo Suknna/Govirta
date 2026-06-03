@@ -237,6 +237,52 @@ func writeSerialCommand(ctx context.Context, serialPath string, command string) 
 	return nil
 }
 
+func runSerialCommand(ctx context.Context, serialPath string, command string) (string, error) {
+	conn, err := dialUnixSocket(ctx, serialPath)
+	if err != nil {
+		return "", fmt.Errorf("dial serial socket %q: %w", serialPath, err)
+	}
+	defer conn.Close()
+
+	marker := fmt.Sprintf("__govirta_serial_done_%d__", time.Now().UnixNano())
+	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return "", fmt.Errorf("set serial write deadline: %w", err)
+	}
+	if _, err := conn.Write([]byte(command + "; printf '\\n" + marker + "\\n'\n")); err != nil {
+		return "", fmt.Errorf("write serial command %q: %w", command, err)
+	}
+
+	var captured strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		if err := ctx.Err(); err != nil {
+			return captured.String(), fmt.Errorf("timed out waiting for serial command %q marker: %w", command, err)
+		}
+
+		if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			return captured.String(), fmt.Errorf("set serial read deadline: %w", err)
+		}
+		n, err := conn.Read(buf)
+		if n > 0 {
+			captured.Write(buf[:n])
+			output := captured.String()
+			if strings.Contains(output, marker) {
+				return output, nil
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) || isTimeout(err) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return captured.String(), fmt.Errorf("serial socket closed before command %q marker", command)
+		}
+		return captured.String(), fmt.Errorf("read serial command output: %w", err)
+	}
+}
+
 func waitForQMPStatus(t *testing.T, ctx context.Context, socketPath string, want qmp.State) qmp.Status {
 	t.Helper()
 
