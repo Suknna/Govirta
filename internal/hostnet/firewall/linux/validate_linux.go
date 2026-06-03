@@ -40,6 +40,28 @@ func validateMasqueradeSpec(ctx context.Context, spec firewall.MasqueradeSpec) e
 	return validatePriority(spec.Priority, firewall.PriorityNameSrcNAT)
 }
 
+func validateForwardAcceptSpec(ctx context.Context, spec firewall.ForwardAcceptSpec) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if err := validateSafeName("table", string(spec.TableName)); err != nil {
+		return err
+	}
+	if err := validateSafeName("chain", string(spec.ChainName)); err != nil {
+		return err
+	}
+	if err := validateSafeName("owner", string(spec.RuleOwner)); err != nil {
+		return err
+	}
+	if !spec.GuestCIDR.IsValid() || !spec.GuestCIDR.Addr().Is4() || spec.GuestCIDR.Bits() == 0 {
+		return invalidRequest("guest CIDR must be a non-zero IPv4 prefix")
+	}
+	if err := validateInterfaceName("egress interface", spec.EgressInterfaceName); err != nil {
+		return err
+	}
+	return validatePriority(spec.Priority, firewall.PriorityNameForwardFilter)
+}
+
 func validateEndpointAntiSpoofingSpec(ctx context.Context, spec firewall.EndpointAntiSpoofingSpec) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -95,7 +117,7 @@ func validateRuleRef(ctx context.Context, ref firewall.RuleRef, purpose firewall
 
 func validateRuleQuery(ctx context.Context, query firewall.RuleQuery) error {
 	switch query.Ref.Purpose {
-	case firewall.RulePurposeMasquerade, firewall.RulePurposeEndpointAntiSpoofing:
+	case firewall.RulePurposeMasquerade, firewall.RulePurposeEndpointAntiSpoofing, firewall.RulePurposeForwardAccept:
 		return validateRuleRef(ctx, query.Ref, query.Ref.Purpose)
 	default:
 		if err := checkContext(ctx); err != nil {
@@ -163,6 +185,10 @@ func validatePriority(priority firewall.Priority, expected firewall.PriorityName
 	case firewall.PriorityNameBridgeFilter:
 		if priority.Value != -200 {
 			return invalidRequest("bridge filter priority must be -200")
+		}
+	case firewall.PriorityNameForwardFilter:
+		if priority.Value != 0 {
+			return invalidRequest("forward filter priority must be 0")
 		}
 	default:
 		return invalidRequest("unsupported priority name")
@@ -242,9 +268,9 @@ func validateChainFilter(filter firewall.ChainFilter) error {
 
 func validateFamilyForPurpose(family firewall.TableFamily, purpose firewall.RulePurpose) error {
 	switch purpose {
-	case firewall.RulePurposeMasquerade:
+	case firewall.RulePurposeMasquerade, firewall.RulePurposeForwardAccept:
 		if family != firewall.TableFamilyIPv4 {
-			return invalidRequest("masquerade rules must use IPv4 table family")
+			return invalidRequest("masquerade and forward-accept rules must use IPv4 table family")
 		}
 	case firewall.RulePurposeEndpointAntiSpoofing:
 		if family != firewall.TableFamilyBridge {
@@ -258,7 +284,7 @@ func validateFamilyForPurpose(family firewall.TableFamily, purpose firewall.Rule
 
 func validatePurpose(purpose firewall.RulePurpose) error {
 	switch purpose {
-	case firewall.RulePurposeMasquerade, firewall.RulePurposeEndpointAntiSpoofing:
+	case firewall.RulePurposeMasquerade, firewall.RulePurposeEndpointAntiSpoofing, firewall.RulePurposeForwardAccept:
 		return nil
 	default:
 		return invalidRequest("unsupported rule purpose")

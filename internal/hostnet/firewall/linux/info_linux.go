@@ -4,6 +4,7 @@ package linux
 
 import (
 	"fmt"
+	"net/netip"
 
 	"github.com/google/nftables"
 	"github.com/suknna/govirta/internal/hostnet/firewall"
@@ -77,27 +78,49 @@ func listObservedRuleDetails(h handle, filter firewall.RuleFilter) ([]observedRu
 
 func compactObservedRules(details []observedRuleDetail) ([]firewall.RuleInfo, error) {
 	var infos []firewall.RuleInfo
-	groups := map[endpointGroupKey][]observedRuleDetail{}
+	endpointGroups := map[endpointGroupKey][]observedRuleDetail{}
+	forwardGroups := map[forwardGroupKey][]observedRuleDetail{}
 	for _, detail := range details {
-		if detail.info.Ref.Purpose != firewall.RulePurposeEndpointAntiSpoofing {
+		switch detail.info.Ref.Purpose {
+		case firewall.RulePurposeEndpointAntiSpoofing:
+			summary := detail.info.Summary.EndpointAntiSpoofing
+			if summary == nil {
+				return nil, fmt.Errorf("%w: endpoint anti-spoofing rule has no endpoint summary", firewallerr.ErrInvalidObservedState)
+			}
+			key := endpointGroupKey{
+				owner:     detail.info.Ref.Owner,
+				family:    detail.info.Ref.Family,
+				tableName: detail.info.Ref.TableName,
+				chainName: detail.info.Ref.ChainName,
+				tapName:   summary.TapName,
+			}
+			endpointGroups[key] = append(endpointGroups[key], detail)
+		case firewall.RulePurposeForwardAccept:
+			summary := detail.info.Summary.ForwardAccept
+			if summary == nil {
+				return nil, fmt.Errorf("%w: forward-accept rule has no summary", firewallerr.ErrInvalidObservedState)
+			}
+			key := forwardGroupKey{
+				owner:     detail.info.Ref.Owner,
+				family:    detail.info.Ref.Family,
+				tableName: detail.info.Ref.TableName,
+				chainName: detail.info.Ref.ChainName,
+				guestCIDR: summary.GuestCIDR,
+			}
+			forwardGroups[key] = append(forwardGroups[key], detail)
+		default:
 			infos = append(infos, detail.info)
-			continue
 		}
-		summary := detail.info.Summary.EndpointAntiSpoofing
-		if summary == nil {
-			return nil, fmt.Errorf("%w: endpoint anti-spoofing rule has no endpoint summary", firewallerr.ErrInvalidObservedState)
-		}
-		key := endpointGroupKey{
-			owner:     detail.info.Ref.Owner,
-			family:    detail.info.Ref.Family,
-			tableName: detail.info.Ref.TableName,
-			chainName: detail.info.Ref.ChainName,
-			tapName:   summary.TapName,
-		}
-		groups[key] = append(groups[key], detail)
 	}
-	for _, group := range groups {
+	for _, group := range endpointGroups {
 		info, err := logicalEndpointInfo(group)
+		if err != nil {
+			return nil, err
+		}
+		infos = append(infos, info)
+	}
+	for _, group := range forwardGroups {
+		info, err := logicalForwardInfo(group)
 		if err != nil {
 			return nil, err
 		}
@@ -112,6 +135,14 @@ type endpointGroupKey struct {
 	tableName firewall.TableName
 	chainName firewall.ChainName
 	tapName   firewall.InterfaceName
+}
+
+type forwardGroupKey struct {
+	owner     firewall.RuleOwner
+	family    firewall.TableFamily
+	tableName firewall.TableName
+	chainName firewall.ChainName
+	guestCIDR netip.Prefix
 }
 
 func logicalEndpointInfo(details []observedRuleDetail) (firewall.RuleInfo, error) {

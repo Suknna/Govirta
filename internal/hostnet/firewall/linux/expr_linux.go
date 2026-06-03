@@ -152,6 +152,12 @@ func observedRuleDetailFor(table *nftables.Table, chain *nftables.Chain, rule *n
 			return observedRuleDetail{}, true, err
 		}
 		info.Summary.EndpointAntiSpoofing = summary
+	case firewall.RulePurposeForwardAccept:
+		summary, err := parseForwardAccept(metadata.guard, rule.Exprs, chain)
+		if err != nil {
+			return observedRuleDetail{}, true, err
+		}
+		info.Summary.ForwardAccept = summary
 	default:
 		return observedRuleDetail{}, true, invalidObservedState("unsupported rule purpose %q", metadata.purpose)
 	}
@@ -216,6 +222,13 @@ func validateObservedRuleUserData(metadata ruleUserData) error {
 			return nil
 		default:
 			return invalidObservedState("endpoint anti-spoofing rule has guard %q", metadata.guard)
+		}
+	case firewall.RulePurposeForwardAccept:
+		switch metadata.guard {
+		case guardForwardEgress, guardForwardReturn:
+			return nil
+		default:
+			return invalidObservedState("forward-accept rule has guard %q", metadata.guard)
 		}
 	}
 	return nil

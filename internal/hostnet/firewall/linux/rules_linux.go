@@ -237,6 +237,12 @@ func ruleSummaryMatchesDesired(observed firewall.RuleSummary, desired firewall.R
 			observed.EndpointAntiSpoofing.Priority == desired.EndpointAntiSpoofing.Priority &&
 			observed.EndpointAntiSpoofing.MAC.String() == desired.EndpointAntiSpoofing.MAC.String()
 	}
+	if desired.ForwardAccept != nil {
+		return observed.ForwardAccept != nil &&
+			observed.ForwardAccept.GuestCIDR == desired.ForwardAccept.GuestCIDR &&
+			observed.ForwardAccept.EgressInterfaceName == desired.ForwardAccept.EgressInterfaceName &&
+			observed.ForwardAccept.Priority == desired.ForwardAccept.Priority
+	}
 	return false
 }
 
@@ -301,6 +307,17 @@ func validateExistingChain(chain *nftables.Chain, desired desiredRule) error {
 			return fmt.Errorf("%w: existing chain %q priority does not match requested bridge filter priority", firewallerr.ErrConflict, chain.Name)
 		}
 		return nil
+	case firewall.RulePurposeForwardAccept:
+		if chain.Type != nftables.ChainTypeFilter {
+			return fmt.Errorf("%w: existing chain %q is not a filter chain", firewallerr.ErrConflict, chain.Name)
+		}
+		if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookForward {
+			return fmt.Errorf("%w: existing chain %q is not hooked at forward", firewallerr.ErrConflict, chain.Name)
+		}
+		if chain.Priority == nil || int(*chain.Priority) != desired.priority.Value {
+			return fmt.Errorf("%w: existing chain %q priority does not match requested forward filter priority", firewallerr.ErrConflict, chain.Name)
+		}
+		return nil
 	default:
 		return fmt.Errorf("%w: unsupported desired chain purpose %q", firewallerr.ErrConflict, desired.purpose)
 	}
@@ -315,6 +332,10 @@ func chainForDesired(table *nftables.Table, desired desiredRule) (*nftables.Chai
 		chain.Hooknum = nftables.ChainHookPostrouting
 		return chain, nil
 	case firewall.RulePurposeEndpointAntiSpoofing:
+		chain.Type = nftables.ChainTypeFilter
+		chain.Hooknum = nftables.ChainHookForward
+		return chain, nil
+	case firewall.RulePurposeForwardAccept:
 		chain.Type = nftables.ChainTypeFilter
 		chain.Hooknum = nftables.ChainHookForward
 		return chain, nil
@@ -347,6 +368,19 @@ func ruleExprs(desired desiredRule) ([]expr.Any, error) {
 		default:
 			return nil, fmt.Errorf("%w: unsupported endpoint guard %q", firewallerr.ErrUnsupported, desired.guard)
 		}
+	case firewall.RulePurposeForwardAccept:
+		if desired.summary.ForwardAccept == nil {
+			return nil, fmt.Errorf("%w: invalid forward-accept desired rule", firewallerr.ErrInvalidRequest)
+		}
+		summary := *desired.summary.ForwardAccept
+		switch desired.guard {
+		case guardForwardEgress:
+			return forwardEgressAcceptExprs(summary), nil
+		case guardForwardReturn:
+			return forwardReturnAcceptExprs(summary), nil
+		default:
+			return nil, fmt.Errorf("%w: unsupported forward-accept guard %q", firewallerr.ErrUnsupported, desired.guard)
+		}
 	default:
 		return nil, fmt.Errorf("%w: unsupported rule purpose %q", firewallerr.ErrUnsupported, desired.purpose)
 	}
@@ -365,6 +399,13 @@ func ruleUserDataForDesired(desired desiredRule) ([]byte, error) {
 			return userDataForRule(desired.owner, desired.purpose, desired.guard), nil
 		default:
 			return nil, fmt.Errorf("%w: unsupported endpoint guard %q", firewallerr.ErrUnsupported, desired.guard)
+		}
+	case firewall.RulePurposeForwardAccept:
+		switch desired.guard {
+		case guardForwardEgress, guardForwardReturn:
+			return userDataForRule(desired.owner, desired.purpose, desired.guard), nil
+		default:
+			return nil, fmt.Errorf("%w: unsupported forward-accept guard %q", firewallerr.ErrUnsupported, desired.guard)
 		}
 	default:
 		return nil, fmt.Errorf("%w: unsupported rule purpose %q", firewallerr.ErrUnsupported, desired.purpose)

@@ -62,6 +62,20 @@ func (m *Manager) DeleteEndpointAntiSpoofing(ctx context.Context, ref firewall.R
 	return translateError("delete endpoint anti-spoofing", deleteObservedEndpointGroup(m.firewallHandle(), ref))
 }
 
+func (m *Manager) EnsureForwardAccept(ctx context.Context, spec firewall.ForwardAcceptSpec) (firewall.RuleInfo, error) {
+	if err := validateForwardAcceptSpec(ctx, spec); err != nil {
+		return firewall.RuleInfo{}, translateError("ensure forward-accept", err)
+	}
+	return ensureDesiredForwardGroup(ctx, m.firewallHandle(), "ensure forward-accept", desiredForwardAcceptRules(spec))
+}
+
+func (m *Manager) DeleteForwardAccept(ctx context.Context, ref firewall.RuleRef) error {
+	if err := validateRuleRef(ctx, ref, firewall.RulePurposeForwardAccept); err != nil {
+		return translateError("delete forward-accept", err)
+	}
+	return translateError("delete forward-accept", deleteObservedForwardGroup(m.firewallHandle(), ref))
+}
+
 func (m *Manager) GetRule(ctx context.Context, query firewall.RuleQuery) (firewall.RuleInfo, error) {
 	if err := validateRuleQuery(ctx, query); err != nil {
 		return firewall.RuleInfo{}, translateError("get firewall rule", err)
