@@ -132,18 +132,76 @@ func TestGetNetworkStatusReadsLiveState(t *testing.T) {
 	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
 		t.Fatalf("RegisterNetwork error = %v, want nil", err)
 	}
+	// Ensure first so the firewall rules the status read observes actually
+	// exist live, mirroring the real host flow.
+	if _, err := svc.EnsureNetwork(context.Background(), "net0"); err != nil {
+		t.Fatalf("EnsureNetwork error = %v, want nil", err)
+	}
+	rec.reset()
 
-	if _, err := svc.GetNetworkStatus(context.Background(), "net0"); err != nil {
+	status, err := svc.GetNetworkStatus(context.Background(), "net0")
+	if err != nil {
 		t.Fatalf("GetNetworkStatus error = %v, want nil", err)
 	}
 
 	// Status must be read live from the primitives, not the in-memory definition.
-	liveReads := []string{"link.Get", "route.GetIPv4Forwarding", "dhcp.GetServer"}
+	liveReads := []string{"link.Get", "route.GetIPv4Forwarding", "firewall.ListRules", "dhcp.GetServer"}
 	total := 0
 	for _, name := range liveReads {
 		total += rec.count(name)
 	}
 	if total == 0 {
 		t.Fatalf("GetNetworkStatus performed no live primitive reads; sequence=%v", rec.sequence())
+	}
+
+	// The firewall fields must be populated from the observed rules, not left
+	// as zero-value RuleInfo. Handle 1 = masquerade, 2 = forward-accept.
+	if status.Masquerade.Ref.Purpose != firewall.RulePurposeMasquerade {
+		t.Fatalf("Masquerade.Ref.Purpose = %q, want %q", status.Masquerade.Ref.Purpose, firewall.RulePurposeMasquerade)
+	}
+	if status.Masquerade.Summary.Masquerade == nil {
+		t.Fatalf("Masquerade.Summary.Masquerade = nil, want populated summary")
+	}
+	if status.Forward.Ref.Purpose != firewall.RulePurposeForwardAccept {
+		t.Fatalf("Forward.Ref.Purpose = %q, want %q", status.Forward.Ref.Purpose, firewall.RulePurposeForwardAccept)
+	}
+	if status.Forward.Summary.ForwardAccept == nil {
+		t.Fatalf("Forward.Summary.ForwardAccept = nil, want populated summary")
+	}
+}
+
+func TestGetNICStatusPopulatesAntiSpoofing(t *testing.T) {
+	svc, _, _, _, _, rec := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+	// Ensure first so the anti-spoofing rule the status read observes actually
+	// exists live, mirroring the real host flow.
+	if _, err := svc.EnsureNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("EnsureNIC error = %v, want nil", err)
+	}
+	rec.reset()
+
+	status, err := svc.GetNICStatus(context.Background(), "net0", "vm1")
+	if err != nil {
+		t.Fatalf("GetNICStatus error = %v, want nil", err)
+	}
+
+	// AntiSpoofing must be read live and disambiguated by the NIC MAC.
+	if rec.count("firewall.ListRules") == 0 {
+		t.Fatalf("GetNICStatus performed no live firewall read; sequence=%v", rec.sequence())
+	}
+	if status.AntiSpoofing.Ref.Purpose != firewall.RulePurposeEndpointAntiSpoofing {
+		t.Fatalf("AntiSpoofing.Ref.Purpose = %q, want %q", status.AntiSpoofing.Ref.Purpose, firewall.RulePurposeEndpointAntiSpoofing)
+	}
+	summary := status.AntiSpoofing.Summary.EndpointAntiSpoofing
+	if summary == nil {
+		t.Fatalf("AntiSpoofing.Summary.EndpointAntiSpoofing = nil, want populated summary")
+	}
+	if summary.MAC.String() != sampleNIC().MAC.String() {
+		t.Fatalf("AntiSpoofing summary MAC = %s, want %s", summary.MAC, sampleNIC().MAC)
 	}
 }

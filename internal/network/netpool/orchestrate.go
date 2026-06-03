@@ -249,6 +249,26 @@ func (s *Service) GetNetworkStatus(ctx context.Context, name NetworkName) (Netwo
 	if err != nil {
 		return NetworkStatus{}, fmt.Errorf("get network %q forwarding: %w", name, err)
 	}
+	masquerade, err := s.firewallRule(ctx, firewall.RuleFilter{
+		Owner:   firewall.FilterOwner(def.RuleOwner),
+		Purpose: firewall.FilterPurpose(firewall.RulePurposeMasquerade),
+		Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
+		Table:   firewall.FilterTable(def.FirewallTable),
+		Chain:   firewall.FilterChain(def.MasqueradeChain),
+	})
+	if err != nil {
+		return NetworkStatus{}, fmt.Errorf("get network %q masquerade: %w", name, err)
+	}
+	forward, err := s.firewallRule(ctx, firewall.RuleFilter{
+		Owner:   firewall.FilterOwner(def.RuleOwner),
+		Purpose: firewall.FilterPurpose(firewall.RulePurposeForwardAccept),
+		Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
+		Table:   firewall.FilterTable(def.FirewallTable),
+		Chain:   firewall.FilterChain(def.ForwardChain),
+	})
+	if err != nil {
+		return NetworkStatus{}, fmt.Errorf("get network %q forward-accept: %w", name, err)
+	}
 	server, err := s.dhcp.GetServer(ctx, def.DHCPServerID)
 	if err != nil {
 		return NetworkStatus{}, fmt.Errorf("get network %q dhcp: %w", name, err)
@@ -257,6 +277,8 @@ func (s *Service) GetNetworkStatus(ctx context.Context, name NetworkName) (Netwo
 		Name:       name,
 		Bridge:     bridge,
 		Forwarding: forwarding,
+		Masquerade: masquerade,
+		Forward:    forward,
 		DHCP:       server,
 	}, nil
 }
@@ -286,11 +308,16 @@ func (s *Service) GetNICStatus(ctx context.Context, networkName NetworkName, vmI
 	if err != nil {
 		return NICStatus{}, fmt.Errorf("get nic %q/%q lease: %w", networkName, vmID, err)
 	}
+	antiSpoofing, err := s.nicAntiSpoofingRule(ctx, def.RuleOwner, nic)
+	if err != nil {
+		return NICStatus{}, fmt.Errorf("get nic %q/%q anti-spoofing: %w", networkName, vmID, err)
+	}
 	return NICStatus{
-		NetworkName: networkName,
-		VMID:        vmID,
-		Tap:         tap,
-		Lease:       lease,
+		NetworkName:  networkName,
+		VMID:         vmID,
+		Tap:          tap,
+		Lease:        lease,
+		AntiSpoofing: antiSpoofing,
 	}, nil
 }
 
@@ -299,6 +326,49 @@ func classifyNotReady(err error) error {
 		return fmt.Errorf("%w: %w", networker.ErrNotReady, err)
 	}
 	return err
+}
+
+// firewallRule returns the single observed firewall rule matching filter.
+// Network masquerade and forward-accept rules are unique per network identity,
+// so observing zero rules is ErrNotFound and observing more than one is
+// ErrConflict rather than returning an ambiguous zero-value RuleInfo.
+func (s *Service) firewallRule(ctx context.Context, filter firewall.RuleFilter) (firewall.RuleInfo, error) {
+	rules, err := s.firewall.ListRules(ctx, filter)
+	if err != nil {
+		return firewall.RuleInfo{}, err
+	}
+	switch len(rules) {
+	case 1:
+		return rules[0], nil
+	case 0:
+		return firewall.RuleInfo{}, fmt.Errorf("%w: no matching firewall rule observed", networker.ErrNotFound)
+	default:
+		return firewall.RuleInfo{}, fmt.Errorf("%w: %d matching firewall rules observed, want one", networker.ErrConflict, len(rules))
+	}
+}
+
+// nicAntiSpoofingRule returns the observed anti-spoofing rule for one NIC.
+// Multiple NICs share one owner, table, and chain, and ListRules cannot filter
+// by MAC, so the unique match is completed Go-side against the observed
+// EndpointAntiSpoofingSummary MAC.
+func (s *Service) nicAntiSpoofingRule(ctx context.Context, owner firewall.RuleOwner, nic NICDefinition) (firewall.RuleInfo, error) {
+	rules, err := s.firewall.ListRules(ctx, firewall.RuleFilter{
+		Owner:   firewall.FilterOwner(owner),
+		Purpose: firewall.FilterPurpose(firewall.RulePurposeEndpointAntiSpoofing),
+		Family:  firewall.FilterFamily(firewall.TableFamilyBridge),
+		Table:   firewall.FilterTable(nic.AntiSpoofTable),
+		Chain:   firewall.FilterChain(nic.AntiSpoofChain),
+	})
+	if err != nil {
+		return firewall.RuleInfo{}, err
+	}
+	for _, rule := range rules {
+		summary := rule.Summary.EndpointAntiSpoofing
+		if summary != nil && summary.MAC.String() == nic.MAC.String() {
+			return rule, nil
+		}
+	}
+	return firewall.RuleInfo{}, fmt.Errorf("%w: no anti-spoofing rule observed for MAC %s", networker.ErrNotFound, nic.MAC)
 }
 
 func netipUnspecified4() netip.Addr { return netip.AddrFrom4([4]byte{0, 0, 0, 0}) }

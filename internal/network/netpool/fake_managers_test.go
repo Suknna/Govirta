@@ -190,6 +190,64 @@ type fakeFirewall struct {
 	forwardSpec  firewall.ForwardAcceptSpec
 	endpointSpec firewall.EndpointAntiSpoofingSpec
 	deletedRefs  []firewall.RuleRef
+	// rules holds the observable rules an Ensure call created, so ListRules
+	// can return them live the way a real firewall would. Network masquerade
+	// and forward-accept rules are unique per identity; endpoint rules are keyed
+	// additionally by MAC so multiple NICs on one chain stay distinct.
+	rules []firewall.RuleInfo
+}
+
+// storeRule replaces any existing observable rule sharing the new rule's logical
+// identity, then records the new rule. For endpoint anti-spoofing rules the
+// identity also includes the observed MAC so distinct NICs coexist.
+func (f *fakeFirewall) storeRule(info firewall.RuleInfo) {
+	newMAC := ""
+	if info.Summary.EndpointAntiSpoofing != nil {
+		newMAC = info.Summary.EndpointAntiSpoofing.MAC.String()
+	}
+	var kept []firewall.RuleInfo
+	for _, r := range f.rules {
+		sameIdentity := r.Ref.Purpose == info.Ref.Purpose &&
+			r.Ref.TableName == info.Ref.TableName &&
+			r.Ref.ChainName == info.Ref.ChainName
+		if sameIdentity && newMAC != "" {
+			oldMAC := ""
+			if r.Summary.EndpointAntiSpoofing != nil {
+				oldMAC = r.Summary.EndpointAntiSpoofing.MAC.String()
+			}
+			if oldMAC == newMAC {
+				continue
+			}
+			kept = append(kept, r)
+			continue
+		}
+		if sameIdentity {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	f.rules = append(kept, info)
+}
+
+// ruleMatchesFilter reports whether a stored rule satisfies every value-mode
+// dimension of filter; any-mode dimensions match unconditionally.
+func ruleMatchesFilter(rule firewall.RuleInfo, filter firewall.RuleFilter) bool {
+	if filter.Owner.Mode == firewall.OwnerValue && rule.Ref.Owner != filter.Owner.Value {
+		return false
+	}
+	if filter.Purpose.Mode == firewall.PurposeValue && rule.Ref.Purpose != filter.Purpose.Value {
+		return false
+	}
+	if filter.Family.Mode == firewall.FamilyValue && rule.Ref.Family != filter.Family.Value {
+		return false
+	}
+	if filter.Table.Mode == firewall.TableValue && rule.Ref.TableName != filter.Table.Value {
+		return false
+	}
+	if filter.Chain.Mode == firewall.ChainValue && rule.Ref.ChainName != filter.Chain.Value {
+		return false
+	}
+	return true
 }
 
 var _ firewall.Manager = (*fakeFirewall)(nil)
@@ -200,14 +258,23 @@ func (f *fakeFirewall) EnsureMasquerade(_ context.Context, spec firewall.Masquer
 	if err := f.errs["EnsureMasquerade"]; err != nil {
 		return firewall.RuleInfo{}, err
 	}
-	return firewall.RuleInfo{Ref: firewall.RuleRef{
-		Owner:     spec.RuleOwner,
-		Purpose:   firewall.RulePurposeMasquerade,
-		Family:    firewall.TableFamilyIPv4,
-		TableName: spec.TableName,
-		ChainName: spec.ChainName,
-		Handle:    1,
-	}}, nil
+	info := firewall.RuleInfo{
+		Ref: firewall.RuleRef{
+			Owner:     spec.RuleOwner,
+			Purpose:   firewall.RulePurposeMasquerade,
+			Family:    firewall.TableFamilyIPv4,
+			TableName: spec.TableName,
+			ChainName: spec.ChainName,
+			Handle:    1,
+		},
+		Summary: firewall.RuleSummary{Masquerade: &firewall.MasqueradeSummary{
+			GuestCIDR:           spec.GuestCIDR,
+			EgressInterfaceName: spec.EgressInterfaceName,
+			Priority:            spec.Priority,
+		}},
+	}
+	f.storeRule(info)
+	return info, nil
 }
 
 func (f *fakeFirewall) DeleteMasquerade(_ context.Context, ref firewall.RuleRef) error {
@@ -222,14 +289,25 @@ func (f *fakeFirewall) EnsureEndpointAntiSpoofing(_ context.Context, spec firewa
 	if err := f.errs["EnsureEndpointAntiSpoofing"]; err != nil {
 		return firewall.RuleInfo{}, err
 	}
-	return firewall.RuleInfo{Ref: firewall.RuleRef{
-		Owner:     spec.RuleOwner,
-		Purpose:   firewall.RulePurposeEndpointAntiSpoofing,
-		Family:    firewall.TableFamilyBridge,
-		TableName: spec.TableName,
-		ChainName: spec.ChainName,
-		Handle:    3,
-	}}, nil
+	info := firewall.RuleInfo{
+		Ref: firewall.RuleRef{
+			Owner:     spec.RuleOwner,
+			Purpose:   firewall.RulePurposeEndpointAntiSpoofing,
+			Family:    firewall.TableFamilyBridge,
+			TableName: spec.TableName,
+			ChainName: spec.ChainName,
+			Handle:    3,
+		},
+		Summary: firewall.RuleSummary{EndpointAntiSpoofing: &firewall.EndpointAntiSpoofingSummary{
+			BridgeName: spec.BridgeName,
+			TapName:    spec.TapName,
+			MAC:        spec.MAC,
+			IPv4:       spec.IPv4,
+			Priority:   spec.Priority,
+		}},
+	}
+	f.storeRule(info)
+	return info, nil
 }
 
 func (f *fakeFirewall) DeleteEndpointAntiSpoofing(_ context.Context, ref firewall.RuleRef) error {
@@ -244,14 +322,23 @@ func (f *fakeFirewall) EnsureForwardAccept(_ context.Context, spec firewall.Forw
 	if err := f.errs["EnsureForwardAccept"]; err != nil {
 		return firewall.RuleInfo{}, err
 	}
-	return firewall.RuleInfo{Ref: firewall.RuleRef{
-		Owner:     spec.RuleOwner,
-		Purpose:   firewall.RulePurposeForwardAccept,
-		Family:    firewall.TableFamilyIPv4,
-		TableName: spec.TableName,
-		ChainName: spec.ChainName,
-		Handle:    2,
-	}}, nil
+	info := firewall.RuleInfo{
+		Ref: firewall.RuleRef{
+			Owner:     spec.RuleOwner,
+			Purpose:   firewall.RulePurposeForwardAccept,
+			Family:    firewall.TableFamilyIPv4,
+			TableName: spec.TableName,
+			ChainName: spec.ChainName,
+			Handle:    2,
+		},
+		Summary: firewall.RuleSummary{ForwardAccept: &firewall.ForwardAcceptSummary{
+			GuestCIDR:           spec.GuestCIDR,
+			EgressInterfaceName: spec.EgressInterfaceName,
+			Priority:            spec.Priority,
+		}},
+	}
+	f.storeRule(info)
+	return info, nil
 }
 
 func (f *fakeFirewall) DeleteForwardAccept(_ context.Context, ref firewall.RuleRef) error {
@@ -265,9 +352,18 @@ func (f *fakeFirewall) GetRule(_ context.Context, _ firewall.RuleQuery) (firewal
 	return firewall.RuleInfo{}, f.errs["GetRule"]
 }
 
-func (f *fakeFirewall) ListRules(_ context.Context, _ firewall.RuleFilter) ([]firewall.RuleInfo, error) {
+func (f *fakeFirewall) ListRules(_ context.Context, filter firewall.RuleFilter) ([]firewall.RuleInfo, error) {
 	f.rec.record("firewall.ListRules")
-	return nil, f.errs["ListRules"]
+	if err := f.errs["ListRules"]; err != nil {
+		return nil, err
+	}
+	var out []firewall.RuleInfo
+	for _, r := range f.rules {
+		if ruleMatchesFilter(r, filter) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // fakeDHCP is a recording dhcp.Manager. It captures the last server spec and
