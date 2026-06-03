@@ -244,11 +244,22 @@ func runSerialCommand(ctx context.Context, serialPath string, command string) (s
 	}
 	defer conn.Close()
 
+	// The shell echoes the command line back over the serial console before it
+	// runs, so the echoed text contains everything we write. If the sentinel
+	// marker appeared verbatim in the command, the read loop below would match it
+	// in the echo and return before the real command output arrived (observed:
+	// empty `ip route show` captures truncated exactly at the echoed marker).
+	// Emit the marker from two separately quoted halves: the echoed command shows
+	// the split, quoted halves ('left' 'right') while printf joins them into the
+	// contiguous marker in the actual output. The read loop matches only the
+	// contiguous form, so it cannot match the echo regardless of terminal line
+	// wrapping or CRLF translation.
 	marker := fmt.Sprintf("__govirta_serial_done_%d__", time.Now().UnixNano())
+	half := len(marker) / 2
 	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return "", fmt.Errorf("set serial write deadline: %w", err)
 	}
-	if _, err := conn.Write([]byte(command + "; printf '\\n" + marker + "\\n'\n")); err != nil {
+	if _, err := conn.Write([]byte(command + "; printf '\\n%s%s\\n' '" + marker[:half] + "' '" + marker[half:] + "'\n")); err != nil {
 		return "", fmt.Errorf("write serial command %q: %w", command, err)
 	}
 
