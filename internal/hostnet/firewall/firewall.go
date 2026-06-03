@@ -33,6 +33,17 @@ type Manager interface {
 	// DeleteEndpointAntiSpoofing removes the endpoint anti-spoofing rule selected by ref.
 	DeleteEndpointAntiSpoofing(ctx context.Context, ref RuleRef) error
 
+	// EnsureForwardAccept creates or reconciles the explicit filter-forward
+	// accept rule group that allows guest CIDR egress traffic and its conntrack
+	// established/related return traffic across the egress interface.
+	//
+	// Implementations return observed firewall state after success rather than a
+	// blind echo of spec.
+	EnsureForwardAccept(ctx context.Context, spec ForwardAcceptSpec) (RuleInfo, error)
+
+	// DeleteForwardAccept removes the forward-accept rule group selected by ref.
+	DeleteForwardAccept(ctx context.Context, ref RuleRef) error
+
 	// GetRule returns the observed firewall rule selected by query.
 	GetRule(ctx context.Context, query RuleQuery) (RuleInfo, error)
 
@@ -45,6 +56,23 @@ type Manager interface {
 // TableName, ChainName, RuleOwner, GuestCIDR, EgressInterfaceName, and Priority
 // are all behavior-affecting fields and must be explicitly supplied by callers.
 type MasqueradeSpec struct {
+	TableName           TableName
+	ChainName           ChainName
+	RuleOwner           RuleOwner
+	GuestCIDR           netip.Prefix
+	EgressInterfaceName InterfaceName
+	Priority            Priority
+}
+
+// ForwardAcceptSpec describes the complete desired filter-forward accept state.
+//
+// TableName, ChainName, RuleOwner, GuestCIDR, EgressInterfaceName, and Priority
+// are all behavior-affecting fields and must be explicitly supplied by callers.
+// The implementation creates a two-rule group (egress accept plus a conntrack
+// established/related return accept) under one logical RuleInfo; callers must
+// not pass a bridge name because forward-accept matches by guest CIDR and egress
+// interface only, symmetric with MasqueradeSpec.
+type ForwardAcceptSpec struct {
 	TableName           TableName
 	ChainName           ChainName
 	RuleOwner           RuleOwner
@@ -149,10 +177,21 @@ type RuleFilter struct {
 type RuleSummary struct {
 	Masquerade           *MasqueradeSummary
 	EndpointAntiSpoofing *EndpointAntiSpoofingSummary
+	ForwardAccept        *ForwardAcceptSummary
 }
 
 // MasqueradeSummary reports observed source NAT rule details.
 type MasqueradeSummary struct {
+	GuestCIDR           netip.Prefix
+	EgressInterfaceName InterfaceName
+	Priority            Priority
+}
+
+// ForwardAcceptSummary reports observed forward-accept rule group details.
+//
+// The two underlying rules (egress accept and conntrack return accept) are
+// compacted into one logical summary.
+type ForwardAcceptSummary struct {
 	GuestCIDR           netip.Prefix
 	EgressInterfaceName InterfaceName
 	Priority            Priority

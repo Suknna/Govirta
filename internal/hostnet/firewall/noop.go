@@ -53,6 +53,24 @@ func (NoopManager) DeleteEndpointAntiSpoofing(ctx context.Context, _ RuleRef) er
 	return firewallerr.ErrUnsupported
 }
 
+// EnsureForwardAccept validates nil or canceled context and otherwise returns ErrUnsupported.
+func (NoopManager) EnsureForwardAccept(ctx context.Context, _ ForwardAcceptSpec) (RuleInfo, error) {
+	if err := noopFirewallOperationError(ctx); err != nil {
+		return RuleInfo{}, err
+	}
+
+	return RuleInfo{}, firewallerr.ErrUnsupported
+}
+
+// DeleteForwardAccept validates nil or canceled context and otherwise returns ErrUnsupported.
+func (NoopManager) DeleteForwardAccept(ctx context.Context, _ RuleRef) error {
+	if err := noopFirewallOperationError(ctx); err != nil {
+		return err
+	}
+
+	return firewallerr.ErrUnsupported
+}
+
 // GetRule validates nil or canceled context and otherwise returns ErrUnsupported.
 func (NoopManager) GetRule(ctx context.Context, _ RuleQuery) (RuleInfo, error) {
 	if err := noopFirewallOperationError(ctx); err != nil {

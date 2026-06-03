@@ -66,11 +66,15 @@ const (
 	PriorityNameSrcNAT PriorityName = "srcnat"
 	// PriorityNameBridgeFilter identifies the bridge filter priority used by Govirta.
 	PriorityNameBridgeFilter PriorityName = "bridge-filter"
+	// PriorityNameForwardFilter identifies the filter-forward priority used by Govirta.
+	PriorityNameForwardFilter PriorityName = "forward-filter"
 
 	// RulePurposeMasquerade identifies guest egress masquerade rules.
 	RulePurposeMasquerade RulePurpose = "masquerade"
 	// RulePurposeEndpointAntiSpoofing identifies endpoint MAC/IP guard rules.
 	RulePurposeEndpointAntiSpoofing RulePurpose = "endpoint-anti-spoofing"
+	// RulePurposeForwardAccept identifies guest CIDR filter-forward accept rules.
+	RulePurposeForwardAccept RulePurpose = "forward-accept"
 )
 
 const (
