@@ -50,7 +50,6 @@ func TestAgentRunLogsDependencyNames(t *testing.T) {
 
 	assertLogField(t, event, "component", "node")
 	assertLogField(t, event, "qmp_client", "qmp-noop")
-	assertLogField(t, event, "bridge_manager", "bridge-noop")
 	assertLogField(t, event, "message", "starting node agent")
 	if _, ok := event["qemu_driver"]; ok {
 		t.Fatalf("unexpected qemu_driver log field after qemu.Driver removal")

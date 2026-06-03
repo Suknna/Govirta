@@ -4,21 +4,38 @@ import (
 	"context"
 
 	"github.com/rs/zerolog"
-	"github.com/suknna/govirta/internal/network/bridge"
+	hostdhcp "github.com/suknna/govirta/internal/hostnet/dhcp"
+	hostfirewall "github.com/suknna/govirta/internal/hostnet/firewall"
+	hostlink "github.com/suknna/govirta/internal/hostnet/link"
+	hostroute "github.com/suknna/govirta/internal/hostnet/route"
+	"github.com/suknna/govirta/internal/network"
+	"github.com/suknna/govirta/internal/network/netpool"
 	"github.com/suknna/govirta/internal/virt/qmp"
 )
 
 // Agent coordinates compute-node local virtualization dependencies.
 type Agent struct {
-	qmpClient     qmp.Client
-	bridgeManager bridge.Manager
+	qmpClient      qmp.Client
+	networkService *network.NetworkService
+	nicService     *network.NICService
 }
 
 // NewAgent creates a node agent with no-op dependencies.
+//
+// The network services share one netpool core wired with no-op host primitives;
+// real netlink/nftables/CoreDHCP managers are injected by the compute node at a
+// later integration step.
 func NewAgent() *Agent {
+	pools := netpool.NewService(
+		hostlink.NewNoopManager(),
+		hostroute.NewNoopManager(),
+		hostfirewall.NewNoopManager(),
+		hostdhcp.NewNoopManager(),
+	)
 	return &Agent{
-		qmpClient:     qmp.NewNoopClient(),
-		bridgeManager: bridge.NewNoopManager(),
+		qmpClient:      qmp.NewNoopClient(),
+		networkService: network.NewNetworkService(pools),
+		nicService:     network.NewNICService(pools),
 	}
 }
 
@@ -27,7 +44,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	logger := zerolog.Ctx(ctx).With().
 		Str("component", "node").
 		Str("qmp_client", a.qmpClient.Name()).
-		Str("bridge_manager", a.bridgeManager.Name()).
 		Logger()
 
 	ctx = logger.WithContext(ctx)
