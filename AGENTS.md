@@ -52,6 +52,22 @@ Verified-against:
     - internal/hostnet/firewall/linux/expr_linux.go
     - internal/hostnet/firewall/linux/validate_linux.go
     - internal/hostnet/firewall/linux/errors_linux.go
+    - internal/hostnet/dhcp/dhcp.go
+    - internal/hostnet/dhcp/constants.go
+    - internal/hostnet/dhcp/noop.go
+    - internal/hostnet/dhcp/noop_test.go
+    - internal/hostnet/dhcp/dhcperr/errors.go
+    - internal/hostnet/dhcp/coredhcp/manager.go
+    - internal/hostnet/dhcp/coredhcp/runtime.go
+    - internal/hostnet/dhcp/coredhcp/handler.go
+    - internal/hostnet/dhcp/coredhcp/validate.go
+    - internal/hostnet/dhcp/coredhcp/errors.go
+    - internal/hostnet/dhcp/coredhcp/info.go
+    - internal/hostnet/dhcp/coredhcp/starter_linux.go
+    - internal/hostnet/dhcp/coredhcp/starter_unsupported.go
+    - internal/hostnet/dhcp/coredhcp/binding_test.go
+    - internal/hostnet/dhcp/coredhcp/handler_test.go
+    - internal/hostnet/dhcp/coredhcp/manager_test.go
     - internal/network/bridge/bridge.go
     - internal/scheduler/scheduler.go
     - internal/types/types.go
@@ -73,6 +89,7 @@ Verified-against:
     - test/acceptance/doc.go
     - test/acceptance/harness.go
     - test/acceptance/hostnet_route_test.go
+    - test/acceptance/hostnet_dhcp_test.go
     - go.mod
     - README.md
     - docs/architecture.md
@@ -128,6 +145,16 @@ Verified-against:
         - internal/hostnet/firewall/linux/expr_linux.go
         - internal/hostnet/firewall/linux/validate_linux.go
         - internal/hostnet/firewall/linux/errors_linux.go
+    - anchor: flow-hostnet-dhcp
+      sources:
+        - internal/hostnet/dhcp/dhcp.go
+        - internal/hostnet/dhcp/constants.go
+        - internal/hostnet/dhcp/coredhcp/manager.go
+        - internal/hostnet/dhcp/coredhcp/runtime.go
+        - internal/hostnet/dhcp/coredhcp/handler.go
+        - internal/hostnet/dhcp/coredhcp/validate.go
+        - internal/hostnet/dhcp/coredhcp/errors.go
+        - test/acceptance/hostnet_dhcp_test.go
     - anchor: flow-govirtctl-version
       sources:
         - cmd/govirtctl/main.go
@@ -158,13 +185,13 @@ Verified-against:
 
 ## OVERVIEW
 
-Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route/firewall primitives + zerolog, with OpenStack-style internal storage abstractions now present under `internal/storage`.
+Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route/firewall primitives + CoreDHCP-backed static DHCP + zerolog, with OpenStack-style internal storage abstractions now present under `internal/storage`.
 
 ## CURRENT PHASE
 
 Govirta is in the single-node cold-operation closure phase. Prioritize the local QEMU/qemu-img/QMP/network/storage path before distributed scheduling, API orchestration, Kubernetes integration, live migration, hot-plug, or multi-node behavior.
 
-Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP, host route, and firewall primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
+Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP, host route, firewall, and static DHCP primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
 
 Current implementation priority:
 
@@ -173,7 +200,7 @@ Current implementation priority:
 3. storage pool / image / root-volume lifecycle
 4. VM create/start/stop/delete
 5. QMP `query-status` / `system_powerdown` / `quit`
-6. Local TAP/bridge/route/firewall networking primitives
+6. Local TAP/bridge/route/firewall/static DHCP networking primitives
 7. Cold snapshots
 8. Cold disk expansion
 9. Cold CPU/memory/disk/NIC modification
@@ -202,6 +229,7 @@ Govirta/
 ├── internal/            # 所有 Go 内部模块边界；无 pkg/
 │   ├── apiserver/       # API server boundary，目前 no-op skeleton
 │   ├── controlplane/    # control plane composition
+│   ├── hostnet/dhcp/    # host DHCP primitive boundary and CoreDHCP-backed static binding implementation
 │   ├── hostnet/firewall/ # host firewall primitive boundary and Linux nftables implementation
 │   ├── hostnet/link/    # host bridge/TAP primitive boundary and Linux netlink implementation
 │   ├── hostnet/route/   # host IPv4 route primitive boundary, forwarding checks, and Linux netlink implementation
@@ -226,6 +254,7 @@ Govirta/
 | host bridge/TAP primitives | `internal/hostnet/link` → `internal/hostnet/link/linux` | `link.Manager` contract；Linux 通过 netlink ensure/get/list/delete bridge 和 TAP |
 | host route primitives | `internal/hostnet/route` → `internal/hostnet/route/linux` | `route.Manager` contract；Linux 通过 netlink add/replace/delete/list/get IPv4 routes，并只读检查 `/proc/sys/net/ipv4/ip_forward` |
 | host firewall primitives | `internal/hostnet/firewall` → `internal/hostnet/firewall/linux` | `firewall.Manager` contract；Linux 通过 nftables ensure/delete/list/get masquerade 和 endpoint anti-spoofing rules |
+| hostnet DHCP static binding | `internal/hostnet/dhcp` → `internal/hostnet/dhcp/coredhcp` | `dhcp.Manager` contract；CoreDHCP-backed in-process static MAC/IP binding responder |
 | VM-facing storage | `internal/storage/` (详见 `internal/storage/AGENTS.md`) | `VolumeService` / `ImageService` / `pool.Service` |
 | QEMU 配置/参数 | `internal/virt/qemu/` (详见 `internal/virt/qemu/AGENTS.md`) | typed argv builder；黄金测试在 `vm_test.go` |
 | qemu-img | `internal/virt/qemuimg/` (详见 `internal/virt/qemuimg/AGENTS.md`) | Create/Info/Convert/Resize/Snapshot/Check/Remove + runner |
@@ -268,6 +297,12 @@ Govirta/
 | `firewalllinux.Manager` | struct | `internal/hostnet/firewall/linux/manager_linux.go:15` | Linux nftables-backed implementation of `firewall.Manager` |
 | `firewalllinux.Manager.EnsureMasquerade` | method | `internal/hostnet/firewall/linux/manager_linux.go:37` | validate explicit NAT spec → ensure table/chain/rule → return observed masquerade rule info |
 | `firewalllinux.Manager.EnsureEndpointAntiSpoofing` | method | `internal/hostnet/firewall/linux/manager_linux.go:51` | validate explicit endpoint spec → ensure bridge-chain guard rule group → return observed logical endpoint rule info |
+| `dhcp.Manager` | interface | `internal/hostnet/dhcp/dhcp.go:12-34` | host DHCP primitive API：`Start` / `Stop` / `ApplyBinding` / `RemoveBinding` / `GetServer` / `GetLease` / `ListLeases` |
+| `coredhcp.Manager` | struct | `internal/hostnet/dhcp/coredhcp/manager.go:29-34` | CoreDHCP-backed in-process implementation of `dhcp.Manager` |
+| `coredhcp.NewManager` | func | `internal/hostnet/dhcp/coredhcp/manager.go:38-41` | constructs the real CoreDHCP-backed manager while hiding CoreDHCP from the root contract |
+| `coredhcp.Manager.Start` | method | `internal/hostnet/dhcp/coredhcp/manager.go:47-120` | validate explicit `ServerSpec` → register runtime/plugin → start CoreDHCP listener → return observed server info |
+| `coredhcp.Manager.ApplyBinding` | method | `internal/hostnet/dhcp/coredhcp/manager.go:193-218` | validate explicit MAC/IP/hostname → update process-memory binding indexes → return reserved lease info |
+| `coredhcp.newHandler4` | internal helper | `internal/hostnet/dhcp/coredhcp/handler.go:26-55` | CoreDHCP DHCPv4 handler bridge；known MACs get OFFER/ACK, unknown or conflicting requests are silently dropped |
 | `storage.VolumeService` | struct | `internal/storage/service.go:14` | VM-facing block volume API；所有操作显式 PoolName |
 | `storage.ImageService` | struct | `internal/storage/image_service.go:12` | file image byte-stream API；Put/Get/Delete |
 | `pool.Service` | struct | `internal/storage/pool/service.go:16` | pool registry, capacity accounting, in-memory indexes |
@@ -280,7 +315,7 @@ Govirta/
 
 ## CALL GRAPHS & DATA FLOW
 
-主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP/route/firewall primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
+主要入口：control-plane daemon、compute-node daemon、CLI 输出、QEMU argv 渲染器、hostnet bridge/TAP/route/firewall/DHCP primitive API，以及 storage service API（当前尚未接入 cmd 入口，但已是 VM 编排层内部边界）。
 
 ### Flow: govirtad control plane boot {#flow-govirtad-boot}
 
@@ -396,6 +431,20 @@ Govirta/
 - Boundaries: Linux-only nftables kernel boundary through `realHandle` (`internal/hostnet/firewall/linux/handle_linux.go:20`); no shell commands, no sysctl writes, and no bridge/TAP creation
 - Sinks: Govirta-owned nftables masquerade and endpoint anti-spoofing rules only; non-Govirta rules are observed but not flushed or deleted
 
+### Flow: hostnet DHCP static binding {#flow-hostnet-dhcp}
+
+- Trigger: `internal/hostnet/dhcp/coredhcp/manager.go:47 (Manager.Start)` and `:193 (Manager.ApplyBinding)` (caller wants an in-process DHCP listener to answer explicit static MAC/IP bindings on an existing host interface)
+- Cross-module chain:
+  1. `internal/hostnet/dhcp/dhcp.go:12 (Manager)` — root contract requires caller context and explicit `ServerSpec`, `BindingRequest`, or `BindingQuery`
+  2. `internal/hostnet/dhcp/coredhcp/manager.go:47 (Manager.Start)` — validate context/spec, register the Govirta CoreDHCP plugin runtime, start the CoreDHCP listener, and return observed `ServerInfo`
+  3. `internal/hostnet/dhcp/coredhcp/manager.go:193 (Manager.ApplyBinding)` — validate explicit server ID, MAC, IP-in-pool, and hostname, then update process-memory binding indexes as a reserved lease
+  4. `internal/hostnet/dhcp/coredhcp/handler.go:26 (newHandler4)` — CoreDHCP dispatches guest DHCPv4 packets to the Govirta handler; known MAC `DISCOVER` returns `OFFER`, matching `REQUEST` returns `ACK` and marks the lease bound
+  5. `internal/hostnet/dhcp/coredhcp/handler.go:32 (newHandler4)` — unknown MACs, stopped servers, unsupported message types, or conflicting requested IPs return no response instead of DHCPNAK
+  6. `test/acceptance/hostnet_dhcp_test.go:24 (TestHostnetDHCPBindingEndToEnd)` — Lima boots CirrOS on a real bridge/TAP and verifies the guest reaches the bound static lease
+- Data: `dhcp.ServerSpec` + `dhcp.BindingRequest{MAC,IP}` → CoreDHCP listener/plugin runtime → guest `DISCOVER`/`REQUEST` → `OFFER`/`ACK` → observed `dhcp.LeaseInfo{State:LeaseStateBound}`
+- Boundaries: in-process CoreDHCP server and UDP listener bound to an existing interface/address; no QEMU process, bridge/TAP, route, firewall, guest, or persistent metadata mutation inside DHCP
+- Sinks: process-memory DHCP server/runtime and binding table only; callers must replay bindings after restart and own all surrounding VM/network lifecycle
+
 ### Flow: storage block volume lifecycle {#flow-storage-volume}
 
 - Trigger: `internal/storage/service.go:80 (VolumeService.CreateVolume)` / `:171 (PublishVolume)` / `:206 (DeleteVolume)` (future VM orchestration caller)
@@ -449,6 +498,7 @@ Govirta/
 - All externally provided APIs, including Go package APIs, HTTP APIs, and gRPC APIs, must require callers to pass every behavior-affecting parameter explicitly. Do not infer, auto-fill, default, or decide missing API parameters on behalf of callers.
 - `internal/hostnet/route` may read/check IPv4 forwarding but must not enable, disable, or persist it. Node installation, operations tooling, and acceptance setup own `net.ipv4.ip_forward` configuration.
 - `internal/hostnet/firewall` manages Govirta-owned nftables rules only. Callers must explicitly pass endpoint MAC/IP/TAP/bridge and NAT egress/source choices; the package must not infer endpoint identity, create links, or change IPv4 forwarding state.
+- `internal/hostnet/dhcp` bindings must use explicit MAC/IP pairs. The CoreDHCP implementation is in-process and process-memory only; after restart, upper layers must replay `Start` and `ApplyBinding` inputs. Router and DNS options must use explicit `DHCPOptionAddrs` modes, including disabled mode, and the package must not auto-allocate IP addresses.
 - Image-derived root volumes must always be full independent copies of source image bytes. Do not use qcow2 backing-file links, reflink-style logical sharing, or any image-to-root-disk link semantics in the current project scope.
 - Context/knowledge-base references must not be dangling: every `AGENTS.md` cross-reference, `#flow-*` anchor, docs path, and symbol reference added to this knowledge base must resolve to an existing section, file, or source symbol at the time it is written.
 - Control-plane persistent data storage follows the Kubernetes-inspired architecture and permanently considers only etcd. This is a fixed long-term decision on par with the no-libvirt rule: never introduce SQLite, PostgreSQL, MySQL, embedded KV stores, or any alternative metadata database. etcd is the sole persistence backend the project will ever target.
@@ -471,6 +521,9 @@ Govirta/
 - Do not let `internal/hostnet/firewall` create bridge/TAP devices; host link primitives belong under `internal/hostnet/link`.
 - Do not let `internal/hostnet/firewall` infer endpoint MAC, IP, TAP, bridge, egress interface, or guest CIDR; callers must pass every behavior-affecting firewall field explicitly.
 - Do not flush, delete, or rewrite non-Govirta firewall rules from `internal/hostnet/firewall`; only Govirta-owned rules selected by explicit owner/purpose identity may be reconciled.
+- Do not let `internal/hostnet/dhcp` create or modify QEMU processes, TAP devices, bridges, routes, firewall rules, or guest state; callers must prepare those resources explicitly through their owning packages.
+- Do not send DHCPNAK for unknown MACs or conflicting requested IPs in the current DHCP wrapper; silently do not respond so callers do not imply ownership of non-Govirta guests.
+- Do not add DHCP persistence or automatic IP allocation in `internal/hostnet/dhcp`; upper layers own replay, identity, and address assignment.
 - Do not spend implementation effort on distributed scheduling, Kubernetes integration, live migration, hot-plug, or multi-node control before the single-node cold-operation closure is complete.
 - Do not implement cold snapshot, cold resize, or cold config modification against a running VM; these operations must require a stopped/offline VM until a later hot-operation phase is explicitly designed.
 - Do not add qemu-nbd, qemu-storage-daemon, qemu-io, CSI sidecars, gRPC storage services, or libvirt-derived storage abstractions in the current phase.
@@ -519,6 +572,7 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - Full acceptance includes the hostnet bridge/TAP path: `TestHostnetLinkBridgeTapEndToEnd` creates a real bridge + TAP with `internal/hostnet/link/linux`, direct-kernel boots CirrOS with QEMU, waits for QMP running state and serial login marker, then verifies host-to-guest ping over the bridge/TAP path.
 - Full acceptance includes the hostnet route path: `TestHostnetRoutePrimitives` creates a real dummy link, checks IPv4 forwarding readiness, exercises add/list/get/replace/delete route primitives through `internal/hostnet/route/linux`, and relies on `scripts/acceptance.sh` to enable `net.ipv4.ip_forward=1` for the guest test run.
 - Full acceptance includes the hostnet firewall path: `TestHostnetFirewallMasqueradePrimitives` and `TestHostnetFirewallAntiSpoofingPrimitives` exercise real nftables masquerade and endpoint anti-spoofing lifecycle behavior through `internal/hostnet/firewall/linux` without validating full guest internet egress.
+- Full acceptance includes the hostnet DHCP path: `TestHostnetDHCPBindingEndToEnd` starts the CoreDHCP-backed manager on a real bridge/TAP, applies an explicit CirrOS MAC/IP binding, boots the guest without static IP commands, and verifies the lease reaches `LeaseStateBound`. The test disables the Router option to avoid CirrOS metadata-delay behavior; Router option rendering is covered by unit tests.
 - `test/log/*.log` is gitignored; keep `test/log/.gitkeep` tracked and do not commit generated acceptance logs.
 - Setup required before pushing: `git config core.hooksPath .githooks`.
 - Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
@@ -530,5 +584,6 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - Development temporary artifacts belong under project `.tmp/`; do not use global `/tmp` for debugging artifacts.
 - Storage metadata is in memory only: after restart, callers must explicitly re-register pools and image catalog state; drivers do not scan storage roots or write metadata files.
 - File/image pool overcommit ratio is `1.0`; block pool overcommit ratio is `1.5`.
-- VM external networking still requires guest default-route, DNS, NAT, and orchestration-level connectivity beyond the current bridge/TAP/route/firewall primitives. The hostnet packages prove host primitive lifecycle behavior only; they do not provide end-to-end guest internet access.
+- VM external networking still requires guest default-route, DNS, NAT, and orchestration-level connectivity beyond the current bridge/TAP/route/firewall/DHCP primitives. The hostnet packages prove host primitive lifecycle behavior only — bridge/TAP, IPv4 route management and forwarding readiness, nftables masquerade/anti-spoofing, and static DHCP lease behavior — they do not provide end-to-end guest internet access.
+- This file keeps the original generated header metadata, but the current branch has appended DHCP knowledge-base entries for `internal/hostnet/dhcp`, CoreDHCP flow, and `TestHostnetDHCPBindingEndToEnd` acceptance coverage.
 - Call-graph evidence: AFT outline/zoom and direct source/test reads; LSP call hierarchy was not used end-to-end. `[降级]` LSP；`[已验证]` 源码与测试断言。
