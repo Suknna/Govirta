@@ -18,8 +18,12 @@
 // IPv4 forwarding with sysctl before go test, and additionally sets
 // GOVIRTA_ACCEPTANCE_LIMA_GUEST=1. Host networking acceptance covers real Linux
 // bridge/TAP, route, firewall, and DHCP static-binding primitive lifecycle
-// behavior. It does not yet verify full VM internet egress because guest
-// default route, DNS, NAT, and orchestration-level connectivity are validated
-// in a later end-to-end flow.
+// behavior.
+//   - Full VM internet egress through the network orchestration API
+//     (NetworkService/NICService one-shot create-network plus attach-NIC): a
+//     CirrOS guest auto-configures its IP, default route, and DNS via DHCP, then
+//     reaches the external internet, first by pinging 8.8.8.8 by IP (NAT,
+//     forward-accept, and default route) and then a domain (DNS option delivery).
+//
 // Host-side acceptance logs are archived under test/log/*.log.
 package acceptance
