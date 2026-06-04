@@ -341,6 +341,56 @@ func TestStopExistingServerClosesWaitsAndRemovesRuntime(t *testing.T) {
 	}
 }
 
+// TestRestartReplayRestoresBindings encodes the process-memory-only contract
+// documented on the DHCP Manager: bindings live solely in the runtime's memory,
+// so Stop discards them and a restarted server starts empty. Upper layers must
+// replay Start + ApplyBinding to restore a binding; the manager never persists
+// or auto-restores it. This proves both halves: the binding is gone after a
+// stop/start cycle, and an explicit replay brings it back.
+func TestRestartReplayRestoresBindings(t *testing.T) {
+	spec := validServerSpec()
+	mac := "02:00:00:00:00:01"
+	ip := "192.168.100.10"
+
+	manager := newManager(&fakeStarter{servers: &fakeServers{}})
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("first Start returned error: %v", err)
+	}
+	if _, err := manager.ApplyBinding(context.Background(), bindingRequest(spec.ID, mac, ip)); err != nil {
+		t.Fatalf("first ApplyBinding returned error: %v", err)
+	}
+	query := dhcp.BindingQuery{ServerID: spec.ID, MAC: mustMAC(mac)}
+	if _, err := manager.GetLease(context.Background(), query); err != nil {
+		t.Fatalf("GetLease before restart returned error: %v", err)
+	}
+
+	if err := manager.Stop(context.Background(), spec.ID); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+
+	// Re-Start the same logical server with a fresh listener (the first
+	// fakeServers is closed). Bindings are process-memory only, so the
+	// restarted runtime must start empty until the caller replays them.
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("second Start returned error: %v", err)
+	}
+	if _, err := manager.GetLease(context.Background(), query); !errors.Is(err, dhcperr.ErrNotFound) {
+		t.Fatalf("binding must not survive restart (process-memory only), GetLease error = %v, want ErrNotFound", err)
+	}
+
+	// Explicit replay restores the binding; nothing auto-restores it.
+	replayed, err := manager.ApplyBinding(context.Background(), bindingRequest(spec.ID, mac, ip))
+	if err != nil {
+		t.Fatalf("replay ApplyBinding returned error: %v", err)
+	}
+	if replayed.State != dhcp.LeaseStateReserved || replayed.IP != netip.MustParseAddr(ip) {
+		t.Fatalf("replayed lease = %#v, want reserved lease for %s", replayed, ip)
+	}
+	if _, err := manager.GetLease(context.Background(), query); err != nil {
+		t.Fatalf("GetLease after replay returned error: %v", err)
+	}
+}
+
 // TestStopCanceledContextStillCleansUp encodes the post-fix contract: once Stop
 // is reached with a valid (non-nil) context and a running server, a canceled
 // caller context must NOT abort cleanup. Stop takes ownership and runs
