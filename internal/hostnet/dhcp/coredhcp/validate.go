@@ -43,6 +43,11 @@ func validateServerSpec(spec dhcp.ServerSpec) error {
 	if err := validateAddressRange(spec.Subnet, spec.Pool); err != nil {
 		return err
 	}
+	// The responder's own address must not fall inside the assignable pool, or a
+	// guest could be bound to the server's IP and collide with the responder.
+	if spec.ServerAddr.Compare(spec.Pool.Start) >= 0 && spec.ServerAddr.Compare(spec.Pool.End) <= 0 {
+		return fmt.Errorf("%w: server address must not be inside the pool range", dhcperr.ErrInvalidRequest)
+	}
 	if spec.LeaseDuration <= 0 {
 		return fmt.Errorf("%w: lease duration must be positive", dhcperr.ErrInvalidRequest)
 	}

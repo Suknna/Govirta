@@ -279,6 +279,7 @@ func TestValidateServerSpecRejectsInvalidFields(t *testing.T) {
 		{name: "invalid subnet", mut: func(s *dhcp.ServerSpec) { s.Subnet = netip.Prefix{} }, want: dhcperr.ErrInvalidRequest},
 		{name: "pool outside subnet", mut: func(s *dhcp.ServerSpec) { s.Pool.End = netip.MustParseAddr("192.168.101.10") }, want: dhcperr.ErrInvalidRequest},
 		{name: "pool start after end", mut: func(s *dhcp.ServerSpec) { s.Pool.Start, s.Pool.End = s.Pool.End, s.Pool.Start }, want: dhcperr.ErrInvalidRequest},
+		{name: "pool contains server address", mut: func(s *dhcp.ServerSpec) { s.Pool.Start = s.ServerAddr }, want: dhcperr.ErrInvalidRequest},
 		{name: "zero lease", mut: func(s *dhcp.ServerSpec) { s.LeaseDuration = 0 }, want: dhcperr.ErrInvalidRequest},
 		{name: "empty router mode", mut: func(s *dhcp.ServerSpec) { s.Router.Mode = "" }, want: dhcperr.ErrInvalidRequest},
 		{name: "enabled router without address", mut: func(s *dhcp.ServerSpec) { s.Router = dhcp.DHCPOptionAddrs{Mode: dhcp.DHCPOptionEnabled} }, want: dhcperr.ErrInvalidRequest},
@@ -421,6 +422,36 @@ func TestStopKeepsRuntimeStoppingUntilWaitCompletes(t *testing.T) {
 	_, err = manager.GetServer(context.Background(), spec.ID)
 	if !errors.Is(err, dhcperr.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after stop completed, got %v", err)
+	}
+}
+
+// TestApplyBindingDuringStopReturnsNotRunning proves the binding state gate: a
+// concurrent Stop transitions the runtime to Stopping (blocked here on Wait via
+// the release channel), and ApplyBinding must refuse with ErrNotRunning rather
+// than orphan a binding on a listener that is tearing down.
+func TestApplyBindingDuringStopReturnsNotRunning(t *testing.T) {
+	servers := newBlockingServers()
+	manager := newManager(&fakeStarter{servers: servers})
+	spec := validServerSpec()
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- manager.Stop(context.Background(), spec.ID)
+	}()
+	waitForClosed(t, servers.closed, "server close")
+
+	// The runtime is now Stopping (Stop is blocked on Wait until release).
+	_, err := manager.ApplyBinding(context.Background(), bindingRequest(spec.ID, "02:00:00:00:00:01", "192.168.100.10"))
+	if !errors.Is(err, dhcperr.ErrNotRunning) {
+		t.Fatalf("ApplyBinding during Stop error = %v, want ErrNotRunning", err)
+	}
+
+	close(servers.release)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error after release: %v", err)
 	}
 }
 

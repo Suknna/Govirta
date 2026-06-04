@@ -53,6 +53,35 @@ func TestApplyBindingIsIdempotentForSameMACAndIP(t *testing.T) {
 	}
 }
 
+func TestApplyBindingReconcilesChangedHostname(t *testing.T) {
+	manager, spec := startBindingTestManager(t)
+	mac := "02:00:00:00:00:01"
+	first := bindingRequest(spec.ID, mac, "192.168.100.10")
+	first.Hostname = dhcp.BindingHostname{Value: "guest-a", Set: true}
+	if _, err := manager.ApplyBinding(context.Background(), first); err != nil {
+		t.Fatalf("first ApplyBinding returned error: %v", err)
+	}
+
+	// Re-apply the same MAC+IP with a changed hostname: the mutable hostname
+	// must be reconciled toward the requested state, not silently dropped.
+	second := bindingRequest(spec.ID, mac, "192.168.100.10")
+	second.Hostname = dhcp.BindingHostname{Value: "guest-b", Set: true}
+	lease, err := manager.ApplyBinding(context.Background(), second)
+	if err != nil {
+		t.Fatalf("second ApplyBinding returned error: %v", err)
+	}
+	if lease.Hostname != second.Hostname {
+		t.Fatalf("returned lease hostname = %#v, want %#v", lease.Hostname, second.Hostname)
+	}
+	stored, err := manager.GetLease(context.Background(), dhcp.BindingQuery{ServerID: spec.ID, MAC: second.MAC})
+	if err != nil {
+		t.Fatalf("GetLease returned error: %v", err)
+	}
+	if stored.Hostname != second.Hostname {
+		t.Fatalf("stored lease hostname = %#v, want %#v", stored.Hostname, second.Hostname)
+	}
+}
+
 func TestApplyBindingRejectsSameMACDifferentIP(t *testing.T) {
 	manager, spec := startBindingTestManager(t)
 	mac := "02:00:00:00:00:01"

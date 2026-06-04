@@ -104,10 +104,25 @@ func (rt *serverRuntime) applyBinding(req dhcp.BindingRequest, _ time.Time) (dhc
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
+	// Gate binding mutation on runtime state: a concurrent Stop transitions the
+	// runtime to stopping/stopped, after which a new binding would be orphaned
+	// (the listener is tearing down and upper layers must replay on restart).
+	// Mirror bindLease, which already refuses to bind a lease once stopping.
+	if rt.state == dhcp.ServerStateStopping || rt.state == dhcp.ServerStateStopped {
+		return dhcp.LeaseInfo{}, fmt.Errorf("%w: DHCP server %s is %s", dhcperr.ErrNotRunning, req.ServerID, rt.state)
+	}
+
 	key := macKey(req.MAC)
 	if existing := rt.bindingsByMAC[key]; existing != nil {
 		if existing.ip != req.IP {
 			return dhcp.LeaseInfo{}, fmt.Errorf("%w: MAC %s already bound to %s", dhcperr.ErrConflict, req.MAC, existing.ip)
+		}
+		// Reconcile the mutable hostname toward the requested state so a
+		// re-ApplyBinding with the same MAC+IP but a changed hostname is not
+		// silently dropped (observed-state-as-truth). Immutable identity (MAC,
+		// IP) is unchanged; only the hostname is updated.
+		if existing.hostname != req.Hostname {
+			existing.hostname = req.Hostname
 		}
 		return leaseInfo(existing), nil
 	}
@@ -131,6 +146,13 @@ func (rt *serverRuntime) applyBinding(req dhcp.BindingRequest, _ time.Time) (dhc
 func (rt *serverRuntime) removeBinding(query dhcp.BindingQuery) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+
+	// Gate on runtime state, symmetric with applyBinding: once a concurrent Stop
+	// has moved the runtime to stopping/stopped the binding table is being torn
+	// down, so a mutation returns ErrNotRunning rather than racing teardown.
+	if rt.state == dhcp.ServerStateStopping || rt.state == dhcp.ServerStateStopped {
+		return fmt.Errorf("%w: DHCP server %s is %s", dhcperr.ErrNotRunning, query.ServerID, rt.state)
+	}
 
 	key := macKey(query.MAC)
 	record := rt.bindingsByMAC[key]
