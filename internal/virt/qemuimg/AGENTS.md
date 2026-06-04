@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 6c06c5f
+  base_commit: 3edfafd
   files:
     - internal/virt/qemuimg/client.go
     - internal/virt/qemuimg/client_test.go

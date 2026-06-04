@@ -1,12 +1,12 @@
 # PROJECT AGENTS KNOWLEDGE BASE
 
-**Generated:** 2026-06-01
-**Commit:** 981938d
+**Generated:** 2026-06-04
+**Commit:** 3edfafd
 **Branch:** main
 
 <!--
 Verified-against:
-  base_commit: 981938d
+  base_commit: 3edfafd
   files:
     - cmd/govirtad/main.go
     - cmd/govirtlet/main.go
@@ -326,17 +326,17 @@ Govirta/
 | `firewalllinux.Manager.EnsureEndpointAntiSpoofing` | method | `internal/hostnet/firewall/linux/manager_linux.go:51` | validate explicit endpoint spec → ensure bridge-chain guard rule group → return observed logical endpoint rule info |
 | `firewalllinux.Manager.EnsureForwardAccept` | method | `internal/hostnet/firewall/linux/manager_linux.go:65` | validate explicit forward spec → ensure two-rule filter-forward accept group (egress + conntrack return) → return observed logical rule info |
 | `dhcp.Manager` | interface | `internal/hostnet/dhcp/dhcp.go:12-34` | host DHCP primitive API：`Start` / `Stop` / `ApplyBinding` / `RemoveBinding` / `GetServer` / `GetLease` / `ListLeases` |
-| `coredhcp.Manager` | struct | `internal/hostnet/dhcp/coredhcp/manager.go:29-34` | CoreDHCP-backed in-process implementation of `dhcp.Manager` |
+| `coredhcp.Manager` | struct | `internal/hostnet/dhcp/coredhcp/manager.go:30-34` | CoreDHCP-backed in-process implementation of `dhcp.Manager` |
 | `coredhcp.NewManager` | func | `internal/hostnet/dhcp/coredhcp/manager.go:38-41` | constructs the real CoreDHCP-backed manager while hiding CoreDHCP from the root contract |
-| `coredhcp.Manager.Start` | method | `internal/hostnet/dhcp/coredhcp/manager.go:47-120` | validate explicit `ServerSpec` → register runtime/plugin → start CoreDHCP listener → return observed server info |
-| `coredhcp.Manager.ApplyBinding` | method | `internal/hostnet/dhcp/coredhcp/manager.go:193-218` | validate explicit MAC/IP/hostname → update process-memory binding indexes → return reserved lease info |
+| `coredhcp.Manager.Start` | method | `internal/hostnet/dhcp/coredhcp/manager.go:47-124` | validate explicit `ServerSpec` → register runtime/plugin → start CoreDHCP listener → return observed server info |
+| `coredhcp.Manager.ApplyBinding` | method | `internal/hostnet/dhcp/coredhcp/manager.go:197-222` | validate explicit MAC/IP/hostname → update process-memory binding indexes → return reserved lease info |
 | `coredhcp.newHandler4` | internal helper | `internal/hostnet/dhcp/coredhcp/handler.go:26-55` | CoreDHCP DHCPv4 handler bridge；known MACs get OFFER/ACK, unknown or conflicting requests are silently dropped |
-| `storage.VolumeService` | struct | `internal/storage/service.go:14` | VM-facing block volume API；所有操作显式 PoolName |
-| `storage.ImageService` | struct | `internal/storage/image_service.go:12` | file image byte-stream API；Put/Get/Delete |
-| `pool.Service` | struct | `internal/storage/pool/service.go:16` | pool registry, capacity accounting, in-memory indexes |
-| `local.Driver` | struct | `internal/storage/local/driver.go:38` | host-local qcow2 block driver using qemu-img |
-| `localfile.Driver` | struct | `internal/storage/localfile/driver.go:39` | host-local raw/qcow2 image byte store |
-| `qemu.NewVM` / `Builder.Build` / `VM.Argv` | funcs/methods | `internal/virt/qemu/vm.go:178-377` | typed VM composition → deterministic QEMU argv |
+| `storage.VolumeService` | struct | `internal/storage/service.go:16` | VM-facing block volume API；所有操作显式 PoolName |
+| `storage.ImageService` | struct | `internal/storage/image_service.go:13` | file image byte-stream API；Put/Get/Delete |
+| `pool.Service` | struct | `internal/storage/pool/service.go:17` | pool registry, capacity accounting, in-memory indexes |
+| `local.Driver` | struct | `internal/storage/local/driver.go:41` | host-local qcow2 block driver using qemu-img |
+| `localfile.Driver` | struct | `internal/storage/localfile/driver.go:42` | host-local raw/qcow2 image byte store |
+| `qemu.NewVM` / `Builder.Build` / `VM.Argv` | funcs/methods | `internal/virt/qemu/vm.go:185-394` | typed VM composition → deterministic QEMU argv |
 | `qemuimg.NewClient` | func | `internal/virt/qemuimg/client.go:81` | qemu-img client 聚合入口 |
 | `imgexec.Runner.Run` | interface | `internal/virt/qemuimg/internal/exec/exec.go:18` | binary + `[]string` 外部命令执行边界 |
 | `version.String` | func | `internal/version/version.go:12` | 拼接 `"govirta 0.1.0-dev"` |
@@ -371,8 +371,8 @@ Govirta/
   6. `internal/node/agent.go:52 (Agent.Run)` — `select { <-ctx.Done() / default: return nil }`，未调用 QMP/network
   7. (future) `internal/virt/qmp/client.go:76 (SocketClient.Connect)` — 连接 QMP unix socket [详见 `internal/virt/qmp/AGENTS.md#flow-qmp-ready`]
   8. (future) `internal/network/service.go:33 (NetworkService.EnsureNetwork)` — 未来用真实 netlink/nftables/CoreDHCP 原语替换 no-op，编排 guest egress 闭环 [详见 `internal/network/AGENTS.md#flow-network-ensure`]
-  9. (future) `internal/storage/service.go:171 (VolumeService.PublishVolume)` — 获取 root disk file attachment [详见 `internal/storage/AGENTS.md#flow-storage-volume`]
- 10. (future) `internal/virt/qemu/vm.go:340 (VM.Argv)` — 构建 QEMU argv 并 spawn 子进程 [详见 `internal/virt/qemu/AGENTS.md#flow-argv-build`]
+  9. (future) `internal/storage/service.go:179 (VolumeService.PublishVolume)` — 获取 root disk file attachment [详见 `internal/storage/AGENTS.md#flow-storage-volume`]
+ 10. (future) `internal/virt/qemu/vm.go:354 (VM.Argv)` — 构建 QEMU argv 并 spawn 子进程 [详见 `internal/virt/qemu/AGENTS.md#flow-argv-build`]
 - Data: `context.Context` + 注入的 `qmp.Client` / `NetworkService` / `NICService`；未来会接收 VM spec + storage attachment
 - Boundaries: 当前 in-proc no-op；未来跨进程 QMP unix socket、QEMU 子进程、内核 bridge/TAP
 - Sinks: 当前仅启动日志；未来 sinks 包括 QMP 命令、netlink 操作、QEMU 子进程生命周期
@@ -462,11 +462,11 @@ Govirta/
 
 ### Flow: hostnet DHCP static binding {#flow-hostnet-dhcp}
 
-- Trigger: `internal/hostnet/dhcp/coredhcp/manager.go:47 (Manager.Start)` and `:193 (Manager.ApplyBinding)` (caller wants an in-process DHCP listener to answer explicit static MAC/IP bindings on an existing host interface)
+- Trigger: `internal/hostnet/dhcp/coredhcp/manager.go:47 (Manager.Start)` and `:197 (Manager.ApplyBinding)` (caller wants an in-process DHCP listener to answer explicit static MAC/IP bindings on an existing host interface)
 - Cross-module chain:
   1. `internal/hostnet/dhcp/dhcp.go:12 (Manager)` — root contract requires caller context and explicit `ServerSpec`, `BindingRequest`, or `BindingQuery`
   2. `internal/hostnet/dhcp/coredhcp/manager.go:47 (Manager.Start)` — validate context/spec, register the Govirta CoreDHCP plugin runtime, start the CoreDHCP listener, and return observed `ServerInfo`
-  3. `internal/hostnet/dhcp/coredhcp/manager.go:193 (Manager.ApplyBinding)` — validate explicit server ID, MAC, IP-in-pool, and hostname, then update process-memory binding indexes as a reserved lease
+  3. `internal/hostnet/dhcp/coredhcp/manager.go:197 (Manager.ApplyBinding)` — validate explicit server ID, MAC, IP-in-pool, and hostname, then update process-memory binding indexes as a reserved lease
   4. `internal/hostnet/dhcp/coredhcp/handler.go:26 (newHandler4)` — CoreDHCP dispatches guest DHCPv4 packets to the Govirta handler; known MAC `DISCOVER` returns `OFFER`, matching `REQUEST` returns `ACK` and marks the lease bound
   5. `internal/hostnet/dhcp/coredhcp/handler.go:32 (newHandler4)` — unknown MACs, stopped servers, unsupported message types, or conflicting requested IPs return no response instead of DHCPNAK
   6. `test/acceptance/hostnet_dhcp_test.go:24 (TestHostnetDHCPBindingEndToEnd)` — Lima boots CirrOS on a real bridge/TAP and verifies the guest reaches the bound static lease
@@ -476,11 +476,11 @@ Govirta/
 
 ### Flow: storage block volume lifecycle {#flow-storage-volume}
 
-- Trigger: `internal/storage/service.go:80 (VolumeService.CreateVolume)` / `:171 (PublishVolume)` / `:206 (DeleteVolume)` (future VM orchestration caller)
+- Trigger: `internal/storage/service.go:82 (VolumeService.CreateVolume)` / `:179 (PublishVolume)` / `:214 (DeleteVolume)` (future VM orchestration caller)
 - Cross-module chain:
-  1. `internal/storage/service.go:80 (VolumeService.CreateVolume)` — 校验 explicit `PoolName` + VM/disk identity [详见 `internal/storage/AGENTS.md#flow-storage-volume`]
+  1. `internal/storage/service.go:82 (VolumeService.CreateVolume)` — 校验 explicit `PoolName` + VM/disk identity [详见 `internal/storage/AGENTS.md#flow-storage-volume`]
   2. `internal/storage/pool/service.go:158 (pool.Service.CreateVolume)` — block pool lookup + capacity admission + in-memory index update
-  3. `internal/storage/local/driver.go:87 (local.Driver.Create)` — driver-owned qcow2 path + `qemu-img create`
+  3. `internal/storage/local/driver.go:92 (local.Driver.Create)` — driver-owned qcow2 path + `qemu-img create`
   4. `internal/virt/qemuimg/client.go:105 (QCOW2Client.Create)` — qemu-img builder [详见 `internal/virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 - Data: `CreateVolumeRequest` → `block.CreateRequest` → `volume.Volume` → optional `volume.PublishedVolume`
 - Boundaries: in-proc service/driver calls; qemu-img subprocess via runner; filesystem under trusted storage root
@@ -488,12 +488,12 @@ Govirta/
 
 ### Flow: storage image lifecycle {#flow-storage-image}
 
-- Trigger: `internal/storage/image_service.go:42 (ImageService.PutImage)` / `:57 (GetImage)` / `:68 (DeleteImage)` (future control-plane image catalog caller)
+- Trigger: `internal/storage/image_service.go:44 (ImageService.PutImage)` / `:59 (GetImage)` / `:70 (DeleteImage)` (future control-plane image catalog caller)
 - Cross-module chain:
-  1. `internal/storage/image_service.go:42 (ImageService.PutImage)` — 校验 explicit `PoolName` + image request [详见 `internal/storage/AGENTS.md#flow-storage-image`]
-  2. `internal/storage/pool/service.go:397 (pool.Service.PutImage)` — reserve capacity + create pending image record
-  3. `internal/storage/localfile/driver.go:71 (localfile.Driver.Put)` — open `target.tmp` writer under file pool
-  4. `internal/storage/pool/service.go:606 (pendingImageWriter.Close)` — driver commit success 后将 pending → ready
+  1. `internal/storage/image_service.go:44 (ImageService.PutImage)` — 校验 explicit `PoolName` + image request [详见 `internal/storage/AGENTS.md#flow-storage-image`]
+  2. `internal/storage/pool/service.go:455 (pool.Service.PutImage)` — reserve capacity + create pending image record
+  3. `internal/storage/localfile/driver.go:74 (localfile.Driver.Put)` — open `target.tmp` writer under file pool
+  4. `internal/storage/pool/service.go:685 (pendingImageWriter.Close)` — driver commit success 后将 pending → ready
 - Data: `PutImageRequest` → `image.PutRequest` → `image.ImageWriter` → `pool.ImageRecord{pending|ready|deleting}`
 - Boundaries: in-proc writer; filesystem hard-link commit; metadata only in memory
 - Sinks: raw/qcow2 image bytes under `StorageRoot/pool/<pool>/images`, in-memory `Pool.images`
@@ -502,10 +502,10 @@ Govirta/
 
 - Trigger: future orchestration path uses `ImageService.GetImage` then `VolumeService.CreateRootVolumeFromReader`
 - Cross-module chain:
-  1. `internal/storage/image_service.go:57 (ImageService.GetImage)` — open ready image reader [详见 `internal/storage/AGENTS.md#flow-storage-image-root-volume`]
-  2. `internal/storage/service.go:123 (VolumeService.CreateRootVolumeFromReader)` — require explicit `PoolName` and `diskformat.Format`
-  3. `internal/storage/pool/service.go:206 (pool.Service.CreateVolumeFromReader)` — block pool capacity/index lifecycle
-  4. `internal/storage/local/driver.go:126 (local.Driver.CreateFromReader)` — qcow2 full copy or raw→qcow2 convert
+  1. `internal/storage/image_service.go:59 (ImageService.GetImage)` — open ready image reader [详见 `internal/storage/AGENTS.md#flow-storage-image-root-volume`]
+  2. `internal/storage/service.go:128 (VolumeService.CreateRootVolumeFromReader)` — require explicit `PoolName` and `diskformat.Format`
+  3. `internal/storage/pool/service.go:213 (pool.Service.CreateVolumeFromReader)` — block pool capacity/index lifecycle
+  4. `internal/storage/local/driver.go:152 (local.Driver.CreateFromReader)` — qcow2 full copy or raw→qcow2 convert
   5. `internal/virt/qemuimg/client.go:115 (QCOW2Client.Convert)` / `:120 (Resize)` — qemu-img subprocess [详见 `internal/virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 - Data: image `io.ReadCloser` + explicit `Format` → `block.CreateFromReaderRequest` → independent qcow2 `volume.Volume`
 - Boundaries: byte-stream read/write; qemu-img convert/resize subprocess for raw or capacity expansion

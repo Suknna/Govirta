@@ -2,8 +2,9 @@
 
 <!--
 Verified-against:
-  base_commit: 6c06c5f
+  base_commit: 3edfafd
   files:
+    - cmd/qemucli/main.go
     - internal/virt/qemu/vm.go
     - internal/virt/qemu/vm_test.go
     - internal/virt/qemu/machine/machine.go
@@ -20,6 +21,7 @@ Verified-against:
   flows:
     - anchor: flow-argv-build
       sources:
+        - cmd/qemucli/main.go
         - internal/virt/qemu/vm.go
         - internal/virt/qemu/machine/machine.go
         - internal/virt/qemu/blockdev/blockdev.go
@@ -39,10 +41,11 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 | Task | Location | Notes |
 | --- | --- | --- |
 | Builder API + argv flatten | `vm.go` | `NewVM`, `Builder` fluent setters, `Build`, `VM.Argv` |
-| Argv ordering contract | `vm_test.go:21` | Golden test asserts full argv slice for x86_64 prod VM |
-| Reject matrix | `vm_test.go:93` | Table-driven `TestBuildRejectsInvalidConfig` covers 16 cases |
+| Argv ordering contract | `vm_test.go:22` | `TestVMArgvBuildsRequiredQEMUCommand` golden test asserts full argv slice for x86_64 prod VM |
+| Reject matrix | `vm_test.go:157` | Table-driven `TestBuildRejectsInvalidConfig` covers 27 cases |
+| Explicit no-NIC | `vm.go:293`, `vm_test.go:94` | `Builder.NoNIC()` renders `-nic none`; `TestVMArgvRendersExplicitNoNIC` + reject test at `:116` |
 | Machine profile whitelist | `machine/machine.go:8` | `ProfileX86_64Q35KVM`, `ProfileAArch64VirtKVM` |
-| qcow2 backing | `blockdev/blockdev.go:14` | `Qcow2{NodeName, File, Cache, AIO}` + `Arg()` |
+| qcow2 backing | `blockdev/blockdev.go:22` | `Qcow2{NodeName, File, Cache, AIO}` + `Arg()` (`:46`) renders nested `file.driver=file` + `file.filename` |
 | virtio-blk / virtio-net | `device/device.go:13` | `VirtioBlkPCI`, `VirtioNetPCI` with optional fields |
 | Firmware BIOS | `firmware/firmware.go:8` | `BIOS{Path}` renders the value for typed `Builder.BIOS` |
 | TAP netdev | `netdev/netdev.go:10` | `Tap{ID, IfName, Script, DownScript, Vhost}` |
@@ -58,7 +61,8 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 - Optional `OnOff` fields default to empty string (unset → omitted); never compare to `"on"`/`"off"` directly, use `qflag.On`/`qflag.Off`.
 - Optional integers (e.g. `VirtioBlkPCI.BootIndex`) use `qflag.OptionalInt` so 0 is distinguishable from unset.
 - Subpackages depend only on `qflag`; never cross-import sibling subpackages outside `device` (which legitimately references `blockdev` + `netdev` ref types).
-- Adding a new device: implement `Arg() (string, error)` matching the `Device` interface (`vm.go:99`), validate with `qopt`, and pass it via `Builder.AddDevice`. No core switch changes required (`vm_test.go:266` covers this contract).
+- Machine network defaults are not implicit: a VM either declares network devices (`AddNetdev`/virtio-net `AddDevice`) or calls `NoNIC()` to render an explicit `-nic none`. `Build()` rejects combining the two (`vm.go:335`).
+- Adding a new device: implement `Arg() (string, error)` matching the `Device` interface (`vm.go:154`), validate with `qopt`, and pass it via `Builder.AddDevice`. No core switch changes required (`vm_test.go:475` covers this contract).
 
 ## ANTI-PATTERNS
 
@@ -77,20 +81,21 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 
 - Entry from root flow: `cmd/qemucli/main.go:35 (buildDefaultArgv)` — 来自 `cmd/qemucli/main.go:24 (main)` 的根 flow `#flow-qemucli-argv`
 - Local chain:
-  1. `internal/virt/qemu/vm.go:178 (NewVM)` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
-  2. `internal/virt/qemu/vm.go:212 (Builder.Name)` / `:225 (Builder.Machine)` / `:231 (Builder.CPU)` / `:233 (Builder.SMP)` / `:235 (Builder.Memory)` — 写入命名字段
-  3. `internal/virt/qemu/vm.go:237 (Builder.AddBlockdev)` / `:242 (Builder.AddDevice)` / `:251 (Builder.AddNetdev)` / `:256 (Builder.AddChardev)` / `:261 (Builder.BIOS)` / `:266 (Builder.Monitor)` / `:271 (Builder.Serial)` — 保留 package-internal typed renderer
-  4. `internal/virt/qemu/vm.go:242 (Builder.AddDevice)` — 反射 nil 检查 `isNilDevice`，防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
-  5. `internal/virt/qemu/vm.go:288 (Builder.Build)` — 校验 binary/name/SMP/CPU/memory/display/msg/profile + typed renderer + external generic arguments allowlist；任一失败 wrap `ErrInvalidVM` 返回
-  6. `internal/virt/qemu/vm.go:335 (Builder.Build)` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
-  7. `internal/virt/qemu/vm.go:340 (VM.Argv)` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片 → -display → -no-reboot → -no-shutdown → -msg → -pidfile
+  1. `internal/virt/qemu/vm.go:185 (NewVM)` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
+  2. `internal/virt/qemu/vm.go:215 (Builder.Name)` / `:228 (Builder.Machine)` / `:234 (Builder.CPU)` / `:236 (Builder.SMP)` / `:238 (Builder.Memory)` — 写入命名字段
+  3. `internal/virt/qemu/vm.go:240 (Builder.AddBlockdev)` / `:245 (Builder.AddDevice)` / `:258 (Builder.AddNetdev)` / `:264 (Builder.AddChardev)` / `:269 (Builder.BIOS)` / `:274 (Builder.Monitor)` / `:279 (Builder.Serial)` — 保留 package-internal typed renderer；`AddNetdev` 与 virtio-net `AddDevice` 置 `b.network=true`
+  4. `internal/virt/qemu/vm.go:245 (Builder.AddDevice)` — 反射 nil 检查 `isNilDevice`，防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
+  5. `internal/virt/qemu/vm.go:293 (Builder.NoNIC)` — 置 `b.noNIC=true`，要求显式 `-nic none`，与 `b.network` 互斥
+  6. `internal/virt/qemu/vm.go:299 (Builder.Build)` — 校验 binary/name/SMP/CPU/memory/display/msg/profile + NoNIC/network 互斥(`:335`) + typed renderer + external generic arguments allowlist；任一失败 wrap `ErrInvalidVM` 返回
+  7. `internal/virt/qemu/vm.go:349 (Builder.Build)` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
+  8. `internal/virt/qemu/vm.go:354 (VM.Argv)` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片 → -nic none(若 NoNIC) → -display → -no-reboot → -no-shutdown → -msg → -pidfile
 - Data (within module): `Arch` → `*Builder` (字段化配置) → `VM` (不可变快照) → `[]string` (argv)
 - Side effects (within module): 无；纯值变换。错误经 `errors.Is(err, ErrInvalidVM)` 可命中
 - Exit / next hop: `cmd/qemucli/main.go:29 (main)` — `strings.Join(argv, " ")` 写 stdout（当前唯一消费者；future runtime 会传给 `os/exec.CommandContext`）
 
 引用契约要点：
 - 头部段（`-name`/`-machine`/`-cpu`/`-smp`/`-m`/`-display`/`-no-reboot`/`-no-shutdown`/`-msg`/`-pidfile`）的渲染顺序由 `Argv()` 内 if 链固定，调用方 setter 顺序无影响。
-- 中段段（`-blockdev`/`-device`/`-netdev`/`-chardev`/`-mon`/`-serial`/`AddArgument`）严格按调用顺序输出，由 `Builder.ordered` 切片保序。这是 `vm_test.go:21` 黄金测试中第二个 `-chardev (serial)` 出现在 `-mon` 之后、`-serial` 之前的来源。
+- 中段段（`-blockdev`/`-device`/`-netdev`/`-chardev`/`-mon`/`-serial`/`AddArgument`）严格按调用顺序输出，由 `Builder.ordered` 切片保序。这是 `vm_test.go:22` 黄金测试中第二个 `-chardev (serial)` 出现在 `-mon` 之后、`-serial` 之前的来源。
 
 `[已验证]` 数据流证据来源：直接读取 `vm.go` 与黄金测试断言（`reflect.DeepEqual` 比对 19 项命令行），无需 LSP 调用图反查。
 

@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 7a9533f
+  base_commit: 3edfafd
   files:
     - internal/storage/service.go
     - internal/storage/image_service.go
@@ -77,49 +77,49 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
 
 ### Flow: storage block volume lifecycle {#flow-storage-volume}
 
-- Entry from root flow: `internal/storage/service.go:80 (VolumeService.CreateVolume)` / `:171 (PublishVolume)` / `:206 (DeleteVolume)`
+- Entry from root flow: `internal/storage/service.go:82 (VolumeService.CreateVolume)` / `:179 (PublishVolume)` / `:214 (DeleteVolume)`
 - Local chain:
-  1. `internal/storage/service.go:80 (VolumeService.CreateVolume)` — validate `ctx`, explicit `PoolName`, VM and disk identity; derive `volume.ID`
-  2. `internal/storage/service.go:90 (VolumeService.CreateVolume → pool.Service.CreateVolume)` — convert VM-facing request to `block.CreateRequest`
+  1. `internal/storage/service.go:82 (VolumeService.CreateVolume)` — validate `ctx`, explicit `PoolName`, VM and disk identity; derive `volume.ID`
+  2. `internal/storage/service.go:91 (VolumeService.CreateVolume → pool.Service.CreateVolume)` — convert VM-facing request to `block.CreateRequest`
   3. `internal/storage/pool/service.go:158 (Service.CreateVolume)` — lookup named block pool, check idempotency/conflicts, reserve capacity under pool lock
-  4. `internal/storage/local/driver.go:87 (Driver.Create)` — allocate driver-owned qcow2 path and run qemu-img create
-  5. `internal/storage/pool/service.go:197 (Service.CreateVolume)` — normalize returned volume and store clone in `Pool.volumes`
-  6. `internal/storage/pool/service.go:267 (Service.PublishVolume)` — validate VM ownership, call driver publish, record attachment state
+  4. `internal/storage/local/driver.go:92 (Driver.Create)` — allocate driver-owned qcow2 path and run qemu-img create
+  5. `internal/storage/pool/service.go:203 (Service.CreateVolume → recordCreatedVolumeLocked)` — normalize returned volume and store clone in `Pool.volumes` (map write at `:290`)
+  6. `internal/storage/pool/service.go:325 (Service.PublishVolume)` — validate VM ownership, call driver publish, record attachment state
 - Data (within module): `CreateVolumeRequest` → `block.CreateRequest` → `volume.Volume` → `volume.PublishedVolume{AttachmentFile,qcow2,path}`
 - Side effects (within module): creates/deletes qcow2 under `StorageRoot/pool/<pool>/...`; mutates in-memory `Pool.volumes`; publish records attachment state only
-- Exit / next hop: `internal/virt/qemuimg/client.go:105 (QCOW2Client.Create)` / `:110 (Info)` / `:135 (Remove)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+- Exit / next hop: `internal/virt/qemuimg/client.go:105 (QCOW2Client.Create)` / `:110 (Info)` / `:135 (QCOW2Client.Remove)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 
 ### Flow: storage image lifecycle {#flow-storage-image}
 
-- Entry from root flow: `internal/storage/image_service.go:42 (ImageService.PutImage)` / `:57 (GetImage)` / `:68 (DeleteImage)`
+- Entry from root flow: `internal/storage/image_service.go:44 (ImageService.PutImage)` / `:59 (GetImage)` / `:70 (DeleteImage)`
 - Local chain:
-  1. `internal/storage/image_service.go:42 (ImageService.PutImage)` — validate `ctx` and explicit `PoolName`, forward `image.PutRequest`
-  2. `internal/storage/pool/service.go:397 (Service.PutImage)` — validate image ID/format/declared size, require file pool, reserve capacity
-  3. `internal/storage/pool/service.go:426 (Service.PutImage)` — insert `ImageRecord{State: pending}` before opening backend writer
-  4. `internal/storage/localfile/driver.go:71 (Driver.Put)` — create per-image directory and `target.tmp` writer
-  5. `internal/storage/localfile/driver.go:197 (imageWriter.Close)` — close tmp and hard-link tmp → target as no-overwrite commit point
-  6. `internal/storage/pool/service.go:606 (pendingImageWriter.Close)` — change pending record to ready; `Cancel` deletes pending metadata
+  1. `internal/storage/image_service.go:44 (ImageService.PutImage)` — validate `ctx` and explicit `PoolName`, forward `image.PutRequest`
+  2. `internal/storage/pool/service.go:455 (Service.PutImage)` — validate image ID/format/declared size, require file pool, reserve capacity
+  3. `internal/storage/pool/service.go:483 (Service.PutImage)` — insert `ImageRecord{State: pending}` before opening backend writer
+  4. `internal/storage/localfile/driver.go:74 (Driver.Put)` — create per-image directory and `target.tmp` writer
+  5. `internal/storage/localfile/driver.go:254 (imageWriter.Close)` — close tmp and hard-link tmp → target as no-overwrite commit point (`os.Link` at `:266`)
+  6. `internal/storage/pool/service.go:685 (pendingImageWriter.Close)` — change pending record to ready; `Cancel` deletes pending metadata
 - Data (within module): `PutImageRequest` → `image.PutRequest` → `image.ImageWriter` → `ImageRecord{pending}` → `ImageRecord{ready}`
 - Side effects (within module): writes image bytes under `StorageRoot/pool/<pool>/images/<imageID>/`; mutates in-memory `Pool.images`
 - Exit / next hop: filesystem image bytes for future `ImageService.GetImage`; no downstream process
 
 ### Flow: image-derived root volume {#flow-storage-image-root-volume}
 
-- Entry from root flow: `internal/storage/image_service.go:57 (ImageService.GetImage)` then `internal/storage/service.go:123 (VolumeService.CreateRootVolumeFromReader)`
+- Entry from root flow: `internal/storage/image_service.go:59 (ImageService.GetImage)` then `internal/storage/service.go:128 (VolumeService.CreateRootVolumeFromReader)`
 - Local chain:
-  1. `internal/storage/pool/service.go:441 (Service.GetImage)` — require ready file-pool image and return backend reader
-  2. `internal/storage/service.go:123 (VolumeService.CreateRootVolumeFromReader)` — require explicit block pool, reader, `diskformat.Format`, VM identity, capacity
-  3. `internal/storage/pool/service.go:206 (Service.CreateVolumeFromReader)` — block pool lookup, idempotency/conflict checks, capacity reserve
-  4. `internal/storage/local/driver.go:126 (Driver.CreateFromReader)` — copy reader to temp path under block pool
-  5. `internal/storage/local/driver.go:160 (Driver.CreateFromReader)` — qcow2 input links temp to final as full copy; raw input calls qemu-img convert with explicit source format
-  6. `internal/storage/local/driver.go:172 (Driver.CreateFromReader)` — optional qemu-img resize for requested capacity, then remove temp
+  1. `internal/storage/pool/service.go:499 (Service.GetImage)` — require ready file-pool image and return backend reader
+  2. `internal/storage/service.go:128 (VolumeService.CreateRootVolumeFromReader)` — require explicit block pool, reader, `diskformat.Format`, VM identity, capacity
+  3. `internal/storage/pool/service.go:213 (Service.CreateVolumeFromReader)` — block pool lookup, idempotency/conflict checks, capacity reserve
+  4. `internal/storage/local/driver.go:152 (Driver.CreateFromReader)` — copy reader to temp path under block pool
+  5. `internal/storage/local/driver.go:186 (Driver.CreateFromReader)` — qcow2 input copies reader bytes to a full independent file (`:195` raw input calls qemu-img convert with explicit source format)
+  6. `internal/storage/local/driver.go:206 (Driver.CreateFromReader)` — optional qemu-img resize for requested capacity, then commit temp via hard-link (`commitTempImage` at `:215`)
 - Data (within module): `io.ReadCloser` + `diskformat.Format` → `block.CreateFromReaderRequest` → independent qcow2 `volume.Volume`
 - Side effects (within module): reads source image, writes standalone qcow2 root disk, updates `Pool.volumes`; source image remains independent
 - Exit / next hop: `internal/virt/qemuimg/client.go:115 (QCOW2Client.Convert)` / `:120 (Resize)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 
 ## NOTES
 
-- `local.Driver.Publish` validates a regular `.qcow2` file and runs `qemu-img info` before returning a file attachment for QEMU.
-- `localfile.imageWriter.Close` treats temp cleanup after hard-link commit as best-effort; returning that cleanup error would roll back metadata for an already durable target.
+- `local.Driver.Publish` (`local/driver.go:290`) validates a regular `.qcow2` file and runs `qemu-img info` before returning a file attachment for QEMU.
+- `localfile.imageWriter.Close` (`localfile/driver.go:254`) returns `image.ErrImageCleanupFailed` when the hard-link commit succeeds but removing the source tmp fails: the target is already durable, so the commit is honored and only the cleanup failure is surfaced. `pendingImageWriter.Close` (`pool/service.go:685`) detects that sentinel, still transitions the record to ready via `markReady`, and `errors.Join`s the cleanup error so the caller sees a committed-but-not-cleaned image rather than a rolled-back one.
 - Focused verification: `go test -count=1 ./internal/storage/... ./internal/virt/qemuimg/...`; concurrency-sensitive storage changes also run `go test -race -count=1 ./internal/storage/...`.
 - Evidence: read-only subagent scan + AFT outline/zoom + direct source reads. `[已验证]` / `[降级: LSP call hierarchy]`

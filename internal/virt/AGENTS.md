@@ -2,12 +2,13 @@
 
 <!--
 Verified-against:
-  base_commit: 6c06c5f
+  base_commit: 3edfafd
   files:
     - internal/virt/qemu/vm.go
     - internal/virt/qemuimg/client.go
     - internal/virt/qemuimg/resize/resize.go
     - internal/virt/qmp/client.go
+    - internal/node/agent.go
   flows: []
 -->
 
@@ -22,7 +23,7 @@ Local virtualization boundary aggregator. Owns three sibling packages: typed QEM
 | Build QEMU argv | `qemu/AGENTS.md` | Full Builder API, profile whitelist, golden test contract |
 | qemu-img subcommands | `qemuimg/AGENTS.md` | Create/Info/Convert/Resize/Snapshot/Check/Remove builders + Runner boundary |
 | QMP boundary | `qmp/AGENTS.md` | Project-owned QMP client; root facade + internal go-qemu direct socket subset |
-| Composition by node agent | `../node/agent.go:18` | `NewAgent` injects `qmp.NewNoopClient()` (composition lives in `internal/node`) |
+| Composition by node agent | `../node/agent.go:28` | `NewAgent` injects `qmp.NewNoopClient()` + shared `netpool` core (composition lives in `internal/node`) |
 
 ## CONVENTIONS
 

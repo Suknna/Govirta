@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: e057cc0
+  base_commit: 3edfafd
   files:
     - internal/network/service.go
     - internal/network/nic_service.go
