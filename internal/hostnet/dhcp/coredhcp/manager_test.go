@@ -340,7 +340,14 @@ func TestStopExistingServerClosesWaitsAndRemovesRuntime(t *testing.T) {
 	}
 }
 
-func TestStopCanceledContextBeforeOwnershipDoesNotCleanup(t *testing.T) {
+// TestStopCanceledContextStillCleansUp encodes the post-fix contract: once Stop
+// is reached with a valid (non-nil) context and a running server, a canceled
+// caller context must NOT abort cleanup. Stop takes ownership and runs
+// Close/Wait to completion so the CoreDHCP listener is released and the runtime
+// reaches stopped — never left running with state stuck in stopping. This
+// replaces the prior test that asserted the buggy early-return-on-cancel
+// behavior (a canceled Stop used to leak the listener).
+func TestStopCanceledContextStillCleansUp(t *testing.T) {
 	fake := &fakeServers{}
 	manager := newManager(&fakeStarter{servers: fake})
 	spec := validServerSpec()
@@ -350,19 +357,32 @@ func TestStopCanceledContextBeforeOwnershipDoesNotCleanup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := manager.Stop(ctx, spec.ID)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
+	if err := manager.Stop(ctx, spec.ID); err != nil {
+		t.Fatalf("Stop with canceled context returned error: %v", err)
+	}
+	if !fake.closed || !fake.waited {
+		t.Fatalf("canceled Stop must still Close/Wait once it owns cleanup, got closed=%v waited=%v", fake.closed, fake.waited)
+	}
+	_, err := manager.GetServer(context.Background(), spec.ID)
+	if !errors.Is(err, dhcperr.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after canceled Stop completed cleanup, got %v", err)
+	}
+}
+
+func TestStopNilContextReturnsInvalidRequest(t *testing.T) {
+	fake := &fakeServers{}
+	manager := newManager(&fakeStarter{servers: fake})
+	spec := validServerSpec()
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	//nolint:staticcheck // intentionally passing a nil context to assert validation
+	if err := manager.Stop(nil, spec.ID); !errors.Is(err, dhcperr.ErrInvalidRequest) {
+		t.Fatalf("Stop(nil ctx) error = %v, want ErrInvalidRequest", err)
 	}
 	if fake.closed || fake.waited {
-		t.Fatalf("canceled Stop before cleanup ownership must not Close/Wait, got closed=%v waited=%v", fake.closed, fake.waited)
-	}
-	info, err := manager.GetServer(context.Background(), spec.ID)
-	if err != nil {
-		t.Fatalf("GetServer returned error: %v", err)
-	}
-	if info.State != dhcp.ServerStateReady {
-		t.Fatalf("server state = %s, want ready", info.State)
+		t.Fatalf("nil-context Stop must reject before any cleanup, got closed=%v waited=%v", fake.closed, fake.waited)
 	}
 }
 

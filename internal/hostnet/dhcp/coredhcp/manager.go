@@ -124,8 +124,15 @@ func (m *Manager) Start(ctx context.Context, spec dhcp.ServerSpec) (dhcp.ServerI
 }
 
 func (m *Manager) Stop(ctx context.Context, id dhcp.ServerID) error {
-	if err := checkContext(ctx); err != nil {
-		return err
+	// Stop validates only that ctx is non-nil and does NOT short-circuit on a
+	// canceled ctx. Once Stop takes cleanup ownership below (state -> Stopping)
+	// it must run Close/Wait to completion even if the caller's ctx is already
+	// canceled — returning ctx.Err() here would leave the CoreDHCP server
+	// running with Govirta state stuck, leaking the listener. This is symmetric
+	// with the existing "owns cleanup, finishes even if ctx canceled" guard
+	// below.
+	if ctx == nil {
+		return fmt.Errorf("%w: context is nil", dhcperr.ErrInvalidRequest)
 	}
 	if err := validateServerID(id); err != nil {
 		return err
