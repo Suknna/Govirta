@@ -210,6 +210,9 @@ func (m Manager) List(ctx context.Context, filter link.ListFilter) ([]link.LinkI
 	if err != nil {
 		return nil, translateError("list links", err)
 	}
+	// Resolve master names from the already-fetched dump instead of issuing a
+	// fresh full LinkList per enslaved link (the previous O(n²) behavior).
+	resolveMaster := masterResolverFromLinks(nlLinks)
 	infos := make([]link.LinkInfo, 0, len(nlLinks))
 	for _, nlLink := range nlLinks {
 		kind, err := kindOf(nlLink)
@@ -225,7 +228,7 @@ func (m Manager) List(ctx context.Context, filter link.ListFilter) ([]link.LinkI
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		info, err := linkInfo(m.handle, nlLink)
+		info, err := linkInfoWith(m.handle, nlLink, resolveMaster)
 		if err != nil {
 			return nil, err
 		}

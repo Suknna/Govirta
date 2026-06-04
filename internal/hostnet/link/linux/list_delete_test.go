@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -109,17 +110,52 @@ func TestGetPropagatesMasterLookupDumpInterrupted(t *testing.T) {
 	}
 }
 
-func TestListDoesNotSilentlyDropMasterNameOnLinkListError(t *testing.T) {
+func TestListResolvesMasterNamesFromSingleDump(t *testing.T) {
 	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "br0", Index: 10}}
-	tap := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "tap0", MasterIndex: 10}, Mode: netlink.TUNTAP_MODE_TAP}
-	fake := newFakeHandle(bridge, tap)
-	fake.injectFailure("LinkList", nil)
-	fake.injectFailure("LinkList", netlink.ErrDumpInterrupted)
+	tap0 := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "tap0", Index: 11, MasterIndex: 10}, Mode: netlink.TUNTAP_MODE_TAP}
+	tap1 := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "tap1", Index: 12, MasterIndex: 10}, Mode: netlink.TUNTAP_MODE_TAP}
+	fake := newFakeHandle(bridge, tap0, tap1)
 	manager := NewManagerWithHandle(fake)
 
-	_, err := manager.List(context.Background(), link.ListFilter{Kind: link.KindTap})
-	if !errors.Is(err, linkerr.ErrIncompleteList) {
-		t.Fatalf("expected ErrIncompleteList instead of partial info without master, got %v", err)
+	infos, err := manager.List(context.Background(), link.ListFilter{Kind: link.KindTap})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	for _, info := range infos {
+		if info.MasterName != "br0" {
+			t.Fatalf("tap %q master name = %q, want br0", info.Name, info.MasterName)
+		}
+	}
+}
+
+// TestListIssuesSingleLinkListRegardlessOfEnslavedCount pins the new contract
+// after the O(n²) fix: List dumps links once and resolves every enslaved link's
+// master name from that single slice, so the LinkList call count stays constant
+// (1) no matter how many TAPs are enslaved. Before the fix, each enslaved link
+// triggered a fresh full LinkList (N TAPs => N+1 dumps).
+func TestListIssuesSingleLinkListRegardlessOfEnslavedCount(t *testing.T) {
+	links := []netlink.Link{&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "br0", Index: 10}}}
+	for i := 0; i < 8; i++ {
+		links = append(links, &netlink.Tuntap{
+			LinkAttrs: netlink.LinkAttrs{Name: fmt.Sprintf("tap%d", i), Index: 11 + i, MasterIndex: 10},
+			Mode:      netlink.TUNTAP_MODE_TAP,
+		})
+	}
+	fake := newFakeHandle(links...)
+	manager := NewManagerWithHandle(fake)
+
+	if _, err := manager.List(context.Background(), link.ListFilter{Kind: link.KindAny}); err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	linkListCalls := 0
+	for _, call := range fake.calls {
+		if call == "LinkList" {
+			linkListCalls++
+		}
+	}
+	if linkListCalls != 1 {
+		t.Fatalf("LinkList call count = %d, want 1 (O(n²) master resolution regression)", linkListCalls)
 	}
 }
 
