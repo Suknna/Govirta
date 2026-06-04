@@ -3,6 +3,7 @@
 package linux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/suknna/govirta/internal/hostnet/firewall"
 	"github.com/suknna/govirta/internal/hostnet/firewall/firewallerr"
 )
@@ -273,6 +275,46 @@ func TestEnsureEndpointAntiSpoofingCanceledContextRecordsNoHandleCalls(t *testin
 		t.Fatalf("EnsureEndpointAntiSpoofing error = %v, want %v", err, context.Canceled)
 	}
 	assertNoHandleCalls(t, fh)
+}
+
+// TestEndpointInterfaceExprsBindKernelForwardHookSemantics pins the absolute
+// kernel fact that a symmetric build+parse swap cannot satisfy: in the bridge
+// forward hook, MetaKeyIIFNAME is the receive port (the guest TAP) and
+// MetaKeyBRIIIFNAME is the bridge. Asserting the raw built expressions against
+// literal interface names is what catches the reversed-binding blocker that the
+// round-trip parser tests cannot see.
+func TestEndpointInterfaceExprsBindKernelForwardHookSemantics(t *testing.T) {
+	const bridge firewall.InterfaceName = "govirta0"
+	const tap firewall.InterfaceName = "gv-tap0"
+
+	exprs := endpointInterfaceExprs(bridge, tap)
+	if len(exprs) != 4 {
+		t.Fatalf("endpointInterfaceExprs len = %d, want 4", len(exprs))
+	}
+
+	iifMeta, ok := exprs[0].(*expr.Meta)
+	if !ok || iifMeta.Key != expr.MetaKeyIIFNAME || iifMeta.Register != regMatch {
+		t.Fatalf("exprs[0] = %+v, want Meta IIFNAME into regMatch", exprs[0])
+	}
+	iifCmp, ok := exprs[1].(*expr.Cmp)
+	if !ok || iifCmp.Op != expr.CmpOpEq || iifCmp.Register != regMatch {
+		t.Fatalf("exprs[1] = %+v, want Cmp eq on regMatch", exprs[1])
+	}
+	if !bytes.Equal(iifCmp.Data, interfaceNameData(tap)) {
+		t.Fatalf("iifname compares to %q, want the TAP %q (receive port)", interfaceNameFromData(iifCmp.Data), tap)
+	}
+
+	briMeta, ok := exprs[2].(*expr.Meta)
+	if !ok || briMeta.Key != expr.MetaKeyBRIIIFNAME || briMeta.Register != regMatch {
+		t.Fatalf("exprs[2] = %+v, want Meta BRIIIFNAME into regMatch", exprs[2])
+	}
+	briCmp, ok := exprs[3].(*expr.Cmp)
+	if !ok || briCmp.Op != expr.CmpOpEq || briCmp.Register != regMatch {
+		t.Fatalf("exprs[3] = %+v, want Cmp eq on regMatch", exprs[3])
+	}
+	if !bytes.Equal(briCmp.Data, interfaceNameData(bridge)) {
+		t.Fatalf("ibrname compares to %q, want the bridge %q", interfaceNameFromData(briCmp.Data), bridge)
+	}
 }
 
 func taskEndpointAntiSpoofingSpec() firewall.EndpointAntiSpoofingSpec {
