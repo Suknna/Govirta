@@ -179,6 +179,14 @@ func validateIPv4Prefix(prefix netip.Prefix) error {
 	if !prefix.IsValid() || !prefix.Addr().Is4() || prefix.Bits() == 0 {
 		return routeerr.ErrInvalidRequest
 	}
+	// Require canonical form (no host bits set). destinationIPNet masks the
+	// prefix for the kernel, but exactRouteMatch / routeInfoMatchesFilter compare
+	// the raw spec.Destination against the canonical observed destination, so a
+	// non-canonical prefix (e.g. 198.51.100.5/24) would never match its own
+	// observed route and silently fail re-read, list, and delete.
+	if prefix != prefix.Masked() {
+		return routeerr.ErrInvalidRequest
+	}
 
 	return nil
 }
