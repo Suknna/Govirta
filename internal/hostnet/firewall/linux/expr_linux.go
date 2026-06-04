@@ -115,11 +115,6 @@ type observedRuleDetail struct {
 	guard endpointGuardKind
 }
 
-func observedRuleInfo(table *nftables.Table, chain *nftables.Chain, rule *nftables.Rule) (firewall.RuleInfo, bool, error) {
-	detail, recognized, err := observedRuleDetailFor(table, chain, rule)
-	return detail.info, recognized, err
-}
-
 func observedRuleDetailFor(table *nftables.Table, chain *nftables.Chain, rule *nftables.Rule) (observedRuleDetail, bool, error) {
 	metadata, ok, err := parseRuleUserData(rule.UserData)
 	if err != nil || !ok {

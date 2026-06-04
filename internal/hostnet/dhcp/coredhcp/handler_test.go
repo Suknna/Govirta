@@ -399,7 +399,7 @@ func TestHandlerConcurrentWithBindingMutation(t *testing.T) {
 				// Errors are expected and benign here (e.g. removing a
 				// not-yet-present binding); the test only asserts the absence
 				// of data races, so the outcomes are intentionally ignored.
-				_, _ = rt.applyBinding(dhcp.BindingRequest{ServerID: spec.ID, MAC: mac, IP: ip}, time.Time{})
+				_, _ = rt.applyBinding(dhcp.BindingRequest{ServerID: spec.ID, MAC: mac, IP: ip})
 				_ = rt.removeBinding(dhcp.BindingQuery{ServerID: spec.ID, MAC: mac})
 			}
 		}(i)
@@ -437,7 +437,7 @@ func handlerRuntime(t *testing.T) (*serverRuntime, dhcp.ServerSpec) {
 
 func bindHandlerLease(t *testing.T, rt *serverRuntime, serverID dhcp.ServerID, mac net.HardwareAddr, ip string) {
 	t.Helper()
-	if _, err := rt.applyBinding(dhcp.BindingRequest{ServerID: serverID, MAC: mac, IP: netip.MustParseAddr(ip)}, time.Time{}); err != nil {
+	if _, err := rt.applyBinding(dhcp.BindingRequest{ServerID: serverID, MAC: mac, IP: netip.MustParseAddr(ip)}); err != nil {
 		t.Fatalf("applyBinding returned error: %v", err)
 	}
 }

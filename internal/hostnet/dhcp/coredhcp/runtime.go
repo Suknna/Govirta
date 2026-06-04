@@ -100,7 +100,7 @@ func lookupRuntime(id dhcp.ServerID) (*serverRuntime, error) {
 	return rt, nil
 }
 
-func (rt *serverRuntime) applyBinding(req dhcp.BindingRequest, _ time.Time) (dhcp.LeaseInfo, error) {
+func (rt *serverRuntime) applyBinding(req dhcp.BindingRequest) (dhcp.LeaseInfo, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 

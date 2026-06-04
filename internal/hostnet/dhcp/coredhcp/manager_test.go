@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coredhcp/coredhcp/config"
+	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/plugins"
 
 	"github.com/suknna/govirta/internal/hostnet/dhcp"
@@ -710,4 +711,11 @@ func setRegisteredPlugin(plugin *plugins.Plugin) {
 		return
 	}
 	plugins.RegisteredPlugins[govirtaPluginName] = plugin
+}
+
+// placeholderSetup4 is a test-only CoreDHCP Setup4 that forwards to the real
+// runtime-backed handler builder. It exists so plugin-registration tests can
+// install a Setup4 without the production manager carrying a test-only shim.
+func placeholderSetup4(args ...string) (handler.Handler4, error) {
+	return setupHandler4(args...)
 }

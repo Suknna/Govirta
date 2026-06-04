@@ -18,6 +18,16 @@ func checkContext(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// Canonical Govirta firewall chain priorities, fixed per purpose. Each Govirta
+// behavior installs its rules in a chain at exactly one priority so the relative
+// ordering of NAT, bridge-filter, and forward-filter processing is deterministic
+// and not a caller-tunable knob. validatePriority enforces these exact values.
+const (
+	canonicalSrcNATPriority        = 100
+	canonicalBridgeFilterPriority  = -200
+	canonicalForwardFilterPriority = 0
+)
+
 func validateMasqueradeSpec(ctx context.Context, spec firewall.MasqueradeSpec) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -194,16 +204,16 @@ func validatePriority(priority firewall.Priority, expected firewall.PriorityName
 	}
 	switch expected {
 	case firewall.PriorityNameSrcNAT:
-		if priority.Value != 100 {
-			return invalidRequest("srcnat priority must be 100")
+		if priority.Value != canonicalSrcNATPriority {
+			return invalidRequest("srcnat priority must be %d", canonicalSrcNATPriority)
 		}
 	case firewall.PriorityNameBridgeFilter:
-		if priority.Value != -200 {
-			return invalidRequest("bridge filter priority must be -200")
+		if priority.Value != canonicalBridgeFilterPriority {
+			return invalidRequest("bridge filter priority must be %d", canonicalBridgeFilterPriority)
 		}
 	case firewall.PriorityNameForwardFilter:
-		if priority.Value != 0 {
-			return invalidRequest("forward filter priority must be 0")
+		if priority.Value != canonicalForwardFilterPriority {
+			return invalidRequest("forward filter priority must be %d", canonicalForwardFilterPriority)
 		}
 	default:
 		return invalidRequest("unsupported priority name")

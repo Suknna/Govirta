@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/coredhcp/coredhcp/config"
-	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/plugins"
 
 	"github.com/suknna/govirta/internal/hostnet/dhcp"
@@ -225,7 +223,7 @@ func (m *Manager) ApplyBinding(ctx context.Context, req dhcp.BindingRequest) (dh
 	if err := validateHostname(req.Hostname); err != nil {
 		return dhcp.LeaseInfo{}, err
 	}
-	return rt.applyBinding(req, time.Now())
+	return rt.applyBinding(req)
 }
 
 func (m *Manager) RemoveBinding(ctx context.Context, query dhcp.BindingQuery) error {
@@ -331,10 +329,6 @@ func registerPlaceholderPlugin() error {
 		return err
 	}
 	return nil
-}
-
-func placeholderSetup4(args ...string) (handler.Handler4, error) {
-	return setupHandler4(args...)
 }
 
 func cleanupStartedServer(servers coreServers) error {
