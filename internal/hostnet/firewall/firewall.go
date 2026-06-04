@@ -28,6 +28,12 @@ type Manager interface {
 	//
 	// Implementations return observed firewall state after success rather than a
 	// blind echo of spec.
+	//
+	// Scope: the guard covers untagged IPv4 (EtherType 0x0800) and ARP
+	// (EtherType 0x0806) frames only. VLAN-tagged frames (0x8100) and IPv6
+	// frames are out of scope and are not matched by the guard, so under an
+	// accept default policy they bypass source-MAC/IPv4 enforcement. Callers
+	// that require non-IPv4 or tagged isolation must enforce it separately.
 	EnsureEndpointAntiSpoofing(ctx context.Context, spec EndpointAntiSpoofingSpec) (RuleInfo, error)
 
 	// DeleteEndpointAntiSpoofing removes the endpoint anti-spoofing rule selected by ref.
