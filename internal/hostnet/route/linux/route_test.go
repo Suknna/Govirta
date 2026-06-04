@@ -112,6 +112,37 @@ func TestReplaceRouteExistingReplacesMetric(t *testing.T) {
 	}
 }
 
+func TestReplaceRouteDefaultRouteReObservedAndCleansStale(t *testing.T) {
+	// Regression for the default-route filter-mask bug: the kernel dumps a
+	// default route with Dst==nil, so the faithful fake stores it that way.
+	// Before the fix, observedRouteForSpec / cleanupStaleRoutesAfterReplace set
+	// RT_FILTER_DST with a non-nil 0.0.0.0/0 filter and netlink dropped the very
+	// route just written — ReplaceRoute would return ErrNotFound and the stale
+	// default route would leak.
+	manager, fake := newRouteTestManager()
+	spec := defaultRouteSpec()
+	if _, err := manager.AddRoute(context.Background(), spec); err != nil {
+		t.Fatalf("AddRoute(default) error = %v, want nil", err)
+	}
+	if fake.routes[0].Dst != nil {
+		t.Fatalf("stored default route Dst = %#v, want nil (kernel reality)", fake.routes[0].Dst)
+	}
+	replacement := spec
+	replacement.Metric = route.ExplicitMetric(50)
+
+	info, err := manager.ReplaceRoute(context.Background(), replacement)
+	if err != nil {
+		t.Fatalf("ReplaceRoute(default) error = %v, want nil", err)
+	}
+	assertRouteInfoMatchesSpec(t, info, replacement)
+	if len(fake.routes) != 1 {
+		t.Fatalf("route count = %d, want 1 (stale default route cleaned)", len(fake.routes))
+	}
+	if fake.routes[0].Priority != 50 {
+		t.Fatalf("remaining metric = %d, want 50", fake.routes[0].Priority)
+	}
+}
+
 func TestReplaceRouteCleanupFailureReturnsError(t *testing.T) {
 	manager, fake := newRouteTestManager()
 	spec := validRouteSpec()
