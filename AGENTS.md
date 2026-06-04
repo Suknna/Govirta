@@ -205,15 +205,17 @@ Verified-against:
 
 ## OVERVIEW
 
-Govirta is a Go virtualization infrastructure platform that starts at the QEMU layer and builds toward lightweight VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route/firewall primitives + CoreDHCP-backed static DHCP + zerolog, with OpenStack-style internal storage abstractions under `internal/storage` and a VM-facing network orchestration layer under `internal/network` that composes the hostnet primitives into a guest egress closure.
+Govirta is a Go distributed virtualization cluster platform — a Kubernetes-inspired master/node architecture where each compute node opens a long-lived, node-initiated connection to the control plane, registers itself, and executes VM tasks dispatched over that channel. It starts at the QEMU layer and builds upward into cluster-wide VM orchestration. Current stack: Go 1.26 + QEMU + QMP + qemu-img + Linux bridge/TAP/route/firewall primitives + CoreDHCP-backed static DHCP + zerolog, with OpenStack-style internal storage abstractions under `internal/storage` and a VM-facing network orchestration layer under `internal/network` that composes the hostnet primitives into a guest egress closure.
 
 ## CURRENT PHASE
 
-Govirta is in the single-node cold-operation closure phase. Prioritize the local QEMU/qemu-img/QMP/network/storage path before distributed scheduling, API orchestration, Kubernetes integration, live migration, hot-plug, or multi-node behavior.
+Govirta is a distributed cluster from the ground up. The architectural spine is the Kubernetes-inspired master/node model: each `govirtlet` compute node dials the `govirtad` control plane over a long-lived, node-initiated connection, registers, and receives dispatched VM tasks on that channel. The node-local capabilities listed below (storage / virt / hostnet / network) are the execution building blocks the master orchestrates onto nodes — not a standalone single-host product.
 
-Acceptance target: on one compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP, host route, firewall, and static DHCP primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped.
+Two scope deferrals are independent of this positioning and still hold: operations are cold-only for now (no hot-plug, no live migration yet), and the cluster is Kubernetes-inspired but not Kubernetes-integrated (no CRDs, does not run on or depend on Kubernetes).
 
-Current implementation priority:
+Node-local capability acceptance: on a compute node, explicitly register storage pools, store raw/qcow2 images, create independent qcow2 root volumes, prepare bridge/TAP, host route, firewall, and static DHCP primitives, render/start QEMU argv, observe/control QMP state, and perform snapshot/resize/config edits only while the VM is stopped. This proves the per-node execution surfaces the master dispatches onto; it is not the project's end goal.
+
+Current node-local capability priority:
 
 1. qemu-system CLI builder
 2. qemu-img qcow2 management
@@ -584,7 +586,8 @@ Govirta/
 - Do not generate, infer, or default network names, addresses, MACs, or firewall identities in `internal/network`; the control plane supplies every behavior-affecting field and the guest `MAC` is threaded unchanged to TAP + DHCP binding + anti-spoofing.
 - Do not let `internal/hostnet/firewall` forward-accept change the host `FORWARD` default policy or touch `ip_forward`; it only adds Govirta-owned accept rules for the guest CIDR across the egress interface.
 - Do not tear down already-created resources inside `network`/`netpool` `Ensure*` on partial failure (forward-only idempotent reconcile), and do not let `Delete*` short-circuit on the first error; reverse order and join failures.
-- Do not spend implementation effort on distributed scheduling, Kubernetes integration, live migration, hot-plug, or multi-node control before the single-node cold-operation closure is complete.
+- Distributed scheduling, multi-node control, and the master/node long-lived task channel are in scope — they are the project goal, not deferred work. Do not frame or gate them as something to attempt only after a single-node closure.
+- Do not spend implementation effort on live migration, hot-plug, or Kubernetes/CRD integration; these remain explicitly deferred (cold-only operations, k8s-inspired but not k8s-integrated).
 - Do not implement cold snapshot, cold resize, or cold config modification against a running VM; these operations must require a stopped/offline VM until a later hot-operation phase is explicitly designed.
 - Do not add qemu-nbd, qemu-storage-daemon, qemu-io, CSI sidecars, gRPC storage services, or libvirt-derived storage abstractions in the current phase.
 - Do not design public Go package APIs, HTTP APIs, or gRPC APIs that silently infer defaults, complete missing fields, choose storage/network/runtime behavior, or otherwise make caller decisions implicitly.
@@ -599,8 +602,8 @@ Govirta/
 ## UNIQUE STYLES
 
 - Project icon: `image/govirta_icon.png`; brand colors from non-white icon regions are primary violet-blue `#2000C0` and secondary teal `#00B0B0`.
-- Architecture is Kubernetes/OpenStack-inspired control plane / node / storage separation, but short-term scope excludes Kubernetes and CRD integration.
-- Current product shape is a single-node cold-operation loop: storage pools/images/root volumes, qemu-system argv, qemu-img qcow2 lifecycle, VM process lifecycle, minimal QMP control, local TAP/bridge, and offline mutation.
+- Architecture is a Kubernetes/OpenStack-inspired distributed cluster: control plane / node / storage separation with a master/node long-lived task channel. It is k8s-inspired, not k8s-integrated — CRD and Kubernetes integration stay excluded.
+- Product shape is a distributed VM cluster: a master (`govirtad`) dispatching cold VM operations onto nodes (`govirtlet`), where each node provides storage pools/images/root volumes, qemu-system argv, qemu-img qcow2 lifecycle, VM process lifecycle, minimal QMP control, and local TAP/bridge as execution surfaces.
 - `docs/superpowers/specs` and `docs/superpowers/plans` hold implementation design and execution plans; root docs stay high-level.
 - Current skeleton/no-op packages are intentional boundary placeholders, not proof that the feature is complete.
 - Every implementation handoff must report affected call relationships, for example `cmd/govirtlet/main.go -> internal/node.Agent.Run -> internal/storage.VolumeService -> internal/virt/qemu.Driver`.
