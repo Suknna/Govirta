@@ -167,9 +167,45 @@ func (f *fakeHandle) AddrReplace(nlLink netlink.Link, addr *netlink.Addr) error 
 	if _, ok := f.links[name]; !ok {
 		return fakeNotFound(name)
 	}
-	f.addresses[name] = []netlink.Addr{*addr}
+	// Mirror real netlink AddrReplace: add the prefix if absent, replace the
+	// matching prefix if present, and leave every other address untouched. The
+	// previous wipe-all behavior hid the stale-address divergence the prune fix
+	// targets (a changed GatewayCIDR must not leave the old gateway behind).
+	existing := f.addresses[name]
+	for i := range existing {
+		if existing[i].IPNet != nil && existing[i].IP.Equal(addr.IP) && string(existing[i].Mask) == string(addr.Mask) {
+			existing[i] = *addr
+			f.addresses[name] = existing
+			return nil
+		}
+	}
+	f.addresses[name] = append(existing, *addr)
 
 	return nil
+}
+
+func (f *fakeHandle) AddrDel(nlLink netlink.Link, addr *netlink.Addr) error {
+	name := nlLink.Attrs().Name
+	if addr == nil || addr.IPNet == nil {
+		f.record("AddrDel:" + name + ":<invalid>")
+		return fmt.Errorf("fake link %q address is required: %w", name, linkerr.ErrInvalidRequest)
+	}
+	f.record("AddrDel:" + name + ":" + addr.IPNet.String())
+	if err := f.nextFailure("AddrDel"); err != nil {
+		return err
+	}
+	if _, ok := f.links[name]; !ok {
+		return fakeNotFound(name)
+	}
+	existing := f.addresses[name]
+	for i := range existing {
+		if existing[i].IPNet != nil && existing[i].IP.Equal(addr.IP) && string(existing[i].Mask) == string(addr.Mask) {
+			f.addresses[name] = append(existing[:i:i], existing[i+1:]...)
+			return nil
+		}
+	}
+
+	return fakeNotFound(name)
 }
 
 func (f *fakeHandle) LinkList() ([]netlink.Link, error) {

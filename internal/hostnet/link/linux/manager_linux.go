@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/suknna/govirta/internal/hostnet/link"
 	"github.com/suknna/govirta/internal/hostnet/link/linkerr"
@@ -61,6 +62,12 @@ func (m Manager) EnsureBridge(ctx context.Context, spec link.BridgeSpec) (link.L
 		}
 		if err := m.handle.AddrReplace(nlLink, addr); err != nil {
 			return translateError("replace bridge address", err)
+		}
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		if err := m.pruneStaleBridgeAddresses(nlLink, addr); err != nil {
+			return err
 		}
 		if err := checkContext(ctx); err != nil {
 			return err
@@ -330,6 +337,54 @@ func (m Manager) rollbackCreatedLink(nlLink netlink.Link) error {
 	}
 
 	return nil
+}
+
+// pruneStaleBridgeAddresses converges the bridge's observed IPv4 addresses onto
+// the desired gateway. AddrReplace only adds/updates the desired prefix; without
+// pruning, a changed GatewayCIDR would leave the previous gateway on the bridge,
+// so observed Addresses would diverge from spec (contradicting observed-state-as
+// -truth and "exactly match spec"). Only IPv4 unicast global-scope addresses are
+// considered; IPv4 link-local (169.254.0.0/16) is left untouched, and IPv6 is
+// out of scope for the bridge gateway. Delete failures are joined so no error is
+// silently discarded.
+func (m Manager) pruneStaleBridgeAddresses(nlLink netlink.Link, desired *netlink.Addr) error {
+	current, err := m.handle.AddrList(nlLink, netlink.FAMILY_V4)
+	if err != nil {
+		return translateError("list bridge addresses for prune", err)
+	}
+
+	var pruneErrs []error
+	for i := range current {
+		existing := current[i]
+		if existing.IPNet == nil {
+			continue
+		}
+		if sameAddrPrefix(&existing, desired) {
+			continue
+		}
+		if existing.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		stale := existing
+		if err := m.handle.AddrDel(nlLink, &stale); err != nil {
+			pruneErrs = append(pruneErrs, translateError("delete stale bridge address", err))
+		}
+	}
+
+	return errors.Join(pruneErrs...)
+}
+
+// sameAddrPrefix reports whether two netlink addresses carry the same IP and
+// mask, i.e. represent the same on-link prefix.
+func sameAddrPrefix(left, right *netlink.Addr) bool {
+	if left.IPNet == nil || right.IPNet == nil {
+		return false
+	}
+	return left.IP.Equal(right.IP) && bytesEqual(left.Mask, right.Mask)
+}
+
+func bytesEqual(left, right net.IPMask) bool {
+	return string(left) == string(right)
 }
 
 func (m Manager) currentLinkInfo(ctx context.Context, name string) (link.LinkInfo, error) {

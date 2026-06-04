@@ -17,6 +17,7 @@ type handle interface {
 	LinkSetHardwareAddr(link netlink.Link, hwaddr net.HardwareAddr) error
 	LinkSetMaster(link netlink.Link, master netlink.Link) error
 	AddrReplace(link netlink.Link, addr *netlink.Addr) error
+	AddrDel(link netlink.Link, addr *netlink.Addr) error
 	LinkList() ([]netlink.Link, error)
 	AddrList(link netlink.Link, family int) ([]netlink.Addr, error)
 }
@@ -53,6 +54,10 @@ func (realHandle) LinkSetMaster(link netlink.Link, master netlink.Link) error {
 
 func (realHandle) AddrReplace(link netlink.Link, addr *netlink.Addr) error {
 	return netlink.AddrReplace(link, addr)
+}
+
+func (realHandle) AddrDel(link netlink.Link, addr *netlink.Addr) error {
+	return netlink.AddrDel(link, addr)
 }
 
 func (realHandle) LinkList() ([]netlink.Link, error) {
