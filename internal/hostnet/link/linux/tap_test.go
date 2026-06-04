@@ -161,9 +161,12 @@ func TestEnsureTapReturnsUnsupportedWhenVNetHeaderCannotBeObserved(t *testing.T)
 	oldObserve := observeTapVNetHeader
 	observeTapVNetHeader = func(netlink.Link) vnetHeaderObserved { return vnetHeaderObservedUnknown }
 	t.Cleanup(func() { observeTapVNetHeader = oldObserve })
+	// Owner/Group must match validTapSpec() (1000/1000) so the identity-conflict
+	// checks in ensureTapLink pass and execution reaches the VNetHeader
+	// observation path this test exercises.
 	fake := newFakeHandle(
 		&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "br0"}},
-		&netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "tap0"}, Mode: netlink.TUNTAP_MODE_TAP},
+		&netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: "tap0"}, Mode: netlink.TUNTAP_MODE_TAP, Owner: 1000, Group: 1000},
 	)
 	manager := NewManagerWithHandle(fake)
 
