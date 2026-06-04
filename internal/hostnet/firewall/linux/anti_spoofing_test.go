@@ -41,7 +41,7 @@ func TestEnsureEndpointAntiSpoofingCreatesBridgeChainFourGuardsAndFlushes(t *tes
 		t.Fatalf("calls = %v, want Flush", fh.calls)
 	}
 
-	wantRef := firewall.RuleRef{Owner: "govirta-test", Purpose: firewall.RulePurposeEndpointAntiSpoofing, Family: firewall.TableFamilyBridge, TableName: "gv_filter", ChainName: "forward", Handle: 1}
+	wantRef := firewall.RuleRef{Owner: "govirta-test", Purpose: firewall.RulePurposeEndpointAntiSpoofing, Family: firewall.TableFamilyBridge, TableName: "gv_filter", ChainName: "forward", Handle: 1, GroupKey: "gv-tap0"}
 	if info.Ref != wantRef {
 		t.Fatalf("RuleInfo.Ref = %+v, want %+v", info.Ref, wantRef)
 	}

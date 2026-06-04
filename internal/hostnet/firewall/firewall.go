@@ -98,6 +98,13 @@ type EndpointAntiSpoofingSpec struct {
 
 // RuleRef identifies an existing firewall rule selected by explicit owner,
 // purpose, family, table, chain, and platform rule handle.
+//
+// GroupKey is the stable logical discriminator for behaviors implemented by a
+// multi-rule group (endpoint anti-spoofing, forward-accept); implementations
+// populate it on observed RuleInfo and callers round-trip it back into the
+// matching Delete operation so the group is resolved by stable identity rather
+// than by a platform handle the kernel can renumber. It is empty for
+// single-rule behaviors such as masquerade.
 type RuleRef struct {
 	Owner     RuleOwner
 	Purpose   RulePurpose
@@ -105,6 +112,7 @@ type RuleRef struct {
 	TableName TableName
 	ChainName ChainName
 	Handle    RuleHandle
+	GroupKey  RuleGroupKey
 }
 
 // RuleQuery selects a single observed firewall rule.

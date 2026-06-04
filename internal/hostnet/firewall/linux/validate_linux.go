@@ -115,6 +115,21 @@ func validateRuleRef(ctx context.Context, ref firewall.RuleRef, purpose firewall
 	return nil
 }
 
+// validateGroupDeleteRef adds the group-delete precondition on top of the basic
+// rule ref validity check: a multi-rule group delete (endpoint anti-spoofing,
+// forward-accept) resolves the group by its stable logical GroupKey, so the ref
+// must carry one. GetRule is intentionally not subject to this check because it
+// selects a single observed rule by handle.
+func validateGroupDeleteRef(ctx context.Context, ref firewall.RuleRef, purpose firewall.RulePurpose) error {
+	if err := validateRuleRef(ctx, ref, purpose); err != nil {
+		return err
+	}
+	if ref.GroupKey == "" {
+		return invalidRequest("rule group key must be set for group rule deletes")
+	}
+	return nil
+}
+
 func validateRuleQuery(ctx context.Context, query firewall.RuleQuery) error {
 	switch query.Ref.Purpose {
 	case firewall.RulePurposeMasquerade, firewall.RulePurposeEndpointAntiSpoofing, firewall.RulePurposeForwardAccept:

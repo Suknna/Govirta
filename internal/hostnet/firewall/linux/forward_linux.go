@@ -150,9 +150,13 @@ func deleteObservedForwardGroup(h handle, ref firewall.RuleRef) error {
 		groups[key] = append(groups[key], detail)
 	}
 
+	// Resolve the group by its stable logical key (the guest CIDR) rather than
+	// by lowest-handle equality: the kernel can renumber handles and an
+	// out-of-band rule change can shift which handle is lowest, but the guest
+	// CIDR identity is stable, so a group delete stays correct under either.
 	var selected []observedRuleDetail
-	for _, group := range groups {
-		if endpointGroupLowestHandle(group) == ref.Handle {
+	for key, group := range groups {
+		if firewall.RuleGroupKey(key.String()) == ref.GroupKey {
 			selected = group
 			break
 		}
@@ -260,7 +264,10 @@ func logicalForwardInfo(details []observedRuleDetail) (firewall.RuleInfo, error)
 		return firewall.RuleInfo{}, fmt.Errorf("%w: forward-accept rule has no summary", firewallerr.ErrInvalidObservedState)
 	}
 	ref := base.info.Ref
-	ref.Handle = base.info.Ref.Handle
+	// GroupKey is the stable logical identity of this forward-accept group (the
+	// guest CIDR), so a group delete resolves by identity rather than by a
+	// handle the kernel can renumber.
+	ref.GroupKey = firewall.RuleGroupKey(baseSummary.GuestCIDR.String())
 	merged := firewall.ForwardAcceptSummary{
 		GuestCIDR:           baseSummary.GuestCIDR,
 		EgressInterfaceName: baseSummary.EgressInterfaceName,

@@ -19,6 +19,18 @@ type RuleOwner string
 // RuleHandle identifies an observed platform rule handle.
 type RuleHandle uint64
 
+// RuleGroupKey identifies the logical rule group an observed rule belongs to.
+//
+// A single host firewall behavior can be implemented by more than one platform
+// rule (for example, endpoint anti-spoofing is four guard rules and
+// forward-accept is two). RuleGroupKey is the stable logical discriminator of
+// that group (the guarded TAP for endpoint anti-spoofing, the guest CIDR for
+// forward-accept), independent of any single rule's platform handle. It is
+// empty for single-rule behaviors such as masquerade. Implementations populate
+// it on observed RuleInfo so a group delete resolves the group by stable
+// identity rather than by a handle that the kernel can renumber.
+type RuleGroupKey string
+
 // RulePurpose identifies the Govirta behavior implemented by a firewall rule.
 type RulePurpose string
 
