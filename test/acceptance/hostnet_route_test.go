@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	hostlink "github.com/suknna/govirta/internal/hostnet/link"
-	"github.com/suknna/govirta/internal/hostnet/route"
-	routelinux "github.com/suknna/govirta/internal/hostnet/route/linux"
+	hostlink "github.com/suknna/govirta/pkg/hostnet/link"
+	"github.com/suknna/govirta/pkg/hostnet/route"
+	routelinux "github.com/suknna/govirta/pkg/hostnet/route/linux"
 	"github.com/vishvananda/netlink"
 )
 

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/suknna/govirta/internal/virt/qmp"
+	"github.com/suknna/govirta/pkg/virt/qmp"
 )
 
 const (

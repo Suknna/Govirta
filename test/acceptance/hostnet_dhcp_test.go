@@ -14,11 +14,11 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 
-	hostdhcp "github.com/suknna/govirta/internal/hostnet/dhcp"
-	"github.com/suknna/govirta/internal/hostnet/dhcp/coredhcp"
-	hostlink "github.com/suknna/govirta/internal/hostnet/link"
-	linklinux "github.com/suknna/govirta/internal/hostnet/link/linux"
-	"github.com/suknna/govirta/internal/virt/qmp"
+	hostdhcp "github.com/suknna/govirta/pkg/hostnet/dhcp"
+	"github.com/suknna/govirta/pkg/hostnet/dhcp/coredhcp"
+	hostlink "github.com/suknna/govirta/pkg/hostnet/link"
+	linklinux "github.com/suknna/govirta/pkg/hostnet/link/linux"
+	"github.com/suknna/govirta/pkg/virt/qmp"
 )
 
 func TestHostnetDHCPBindingEndToEnd(t *testing.T) {

@@ -16,7 +16,7 @@ import (
 	"github.com/suknna/govirta/internal/storage/block"
 	"github.com/suknna/govirta/internal/storage/diskformat"
 	"github.com/suknna/govirta/internal/storage/volume"
-	"github.com/suknna/govirta/internal/virt/qemuimg"
+	"github.com/suknna/govirta/pkg/virt/qemuimg"
 )
 
 func TestNewDriverValidatesConfig(t *testing.T) {

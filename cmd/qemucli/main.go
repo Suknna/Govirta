@@ -8,16 +8,16 @@ import (
 	"os"
 	"strings"
 
-	"github.com/suknna/govirta/internal/virt/qemu"
-	"github.com/suknna/govirta/internal/virt/qemu/blockdev"
-	"github.com/suknna/govirta/internal/virt/qemu/chardev"
-	"github.com/suknna/govirta/internal/virt/qemu/cpu"
-	"github.com/suknna/govirta/internal/virt/qemu/device"
-	"github.com/suknna/govirta/internal/virt/qemu/display"
-	"github.com/suknna/govirta/internal/virt/qemu/machine"
-	"github.com/suknna/govirta/internal/virt/qemu/monitor"
-	"github.com/suknna/govirta/internal/virt/qemu/netdev"
-	"github.com/suknna/govirta/internal/virt/qemu/serial"
+	"github.com/suknna/govirta/pkg/virt/qemu"
+	"github.com/suknna/govirta/pkg/virt/qemu/blockdev"
+	"github.com/suknna/govirta/pkg/virt/qemu/chardev"
+	"github.com/suknna/govirta/pkg/virt/qemu/cpu"
+	"github.com/suknna/govirta/pkg/virt/qemu/device"
+	"github.com/suknna/govirta/pkg/virt/qemu/display"
+	"github.com/suknna/govirta/pkg/virt/qemu/machine"
+	"github.com/suknna/govirta/pkg/virt/qemu/monitor"
+	"github.com/suknna/govirta/pkg/virt/qemu/netdev"
+	"github.com/suknna/govirta/pkg/virt/qemu/serial"
 )
 
 func main() {

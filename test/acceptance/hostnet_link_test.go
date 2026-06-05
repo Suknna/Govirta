@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	hostlink "github.com/suknna/govirta/internal/hostnet/link"
-	linklinux "github.com/suknna/govirta/internal/hostnet/link/linux"
-	"github.com/suknna/govirta/internal/virt/qmp"
+	hostlink "github.com/suknna/govirta/pkg/hostnet/link"
+	linklinux "github.com/suknna/govirta/pkg/hostnet/link/linux"
+	"github.com/suknna/govirta/pkg/virt/qmp"
 )
 
 func TestHostnetLinkBridgeTapEndToEnd(t *testing.T) {

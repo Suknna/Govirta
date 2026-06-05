@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/suknna/govirta/internal/hostnet/dhcp"
-	"github.com/suknna/govirta/internal/hostnet/dhcp/dhcperr"
-	"github.com/suknna/govirta/internal/hostnet/firewall"
-	"github.com/suknna/govirta/internal/hostnet/link"
-	"github.com/suknna/govirta/internal/hostnet/route"
-	"github.com/suknna/govirta/internal/hostnet/route/routeerr"
 	"github.com/suknna/govirta/internal/network/networker"
+	"github.com/suknna/govirta/pkg/hostnet/dhcp"
+	"github.com/suknna/govirta/pkg/hostnet/dhcp/dhcperr"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
+	"github.com/suknna/govirta/pkg/hostnet/link"
+	"github.com/suknna/govirta/pkg/hostnet/route"
+	"github.com/suknna/govirta/pkg/hostnet/route/routeerr"
 )
 
 // NetworkStatus is observed network state aggregated live from the primitives.

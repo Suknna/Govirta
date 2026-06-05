@@ -7,8 +7,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/suknna/govirta/internal/hostnet/firewall"
 	"github.com/suknna/govirta/internal/network/networker"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 func TestRegisterNetworkRejectsEmptyName(t *testing.T) {

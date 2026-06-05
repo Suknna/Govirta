@@ -38,9 +38,9 @@ The connection is always initiated by the node. `govirtlet` dials `govirtad` and
 - `internal/scheduler`: placement boundary.
 - `internal/store`: state boundary.
 - `internal/node`: node agent composition.
-- `internal/virt/qemu`: QEMU process abstraction.
-- `internal/virt/qmp`: QMP protocol abstraction.
-- `internal/network`: VM-facing network orchestration layer over `internal/hostnet/*` host primitives (link/route/firewall/dhcp).
+- `pkg/virt/qemu`: QEMU process abstraction.
+- `pkg/virt/qmp`: QMP protocol abstraction.
+- `internal/network`: VM-facing network orchestration layer over `pkg/hostnet/*` host primitives (link/route/firewall/dhcp).
 
 ## Fast Iteration Policy
 

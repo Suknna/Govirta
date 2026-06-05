@@ -4,13 +4,13 @@ import (
 	"context"
 
 	"github.com/rs/zerolog"
-	hostdhcp "github.com/suknna/govirta/internal/hostnet/dhcp"
-	hostfirewall "github.com/suknna/govirta/internal/hostnet/firewall"
-	hostlink "github.com/suknna/govirta/internal/hostnet/link"
-	hostroute "github.com/suknna/govirta/internal/hostnet/route"
 	"github.com/suknna/govirta/internal/network"
 	"github.com/suknna/govirta/internal/network/netpool"
-	"github.com/suknna/govirta/internal/virt/qmp"
+	hostdhcp "github.com/suknna/govirta/pkg/hostnet/dhcp"
+	hostfirewall "github.com/suknna/govirta/pkg/hostnet/firewall"
+	hostlink "github.com/suknna/govirta/pkg/hostnet/link"
+	hostroute "github.com/suknna/govirta/pkg/hostnet/route"
+	"github.com/suknna/govirta/pkg/virt/qmp"
 )
 
 // Agent coordinates compute-node local virtualization dependencies.

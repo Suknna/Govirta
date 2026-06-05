@@ -6,11 +6,11 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/suknna/govirta/internal/hostnet/dhcp"
-	"github.com/suknna/govirta/internal/hostnet/firewall"
-	"github.com/suknna/govirta/internal/hostnet/link"
-	"github.com/suknna/govirta/internal/hostnet/route"
 	"github.com/suknna/govirta/internal/network/networker"
+	"github.com/suknna/govirta/pkg/hostnet/dhcp"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
+	"github.com/suknna/govirta/pkg/hostnet/link"
+	"github.com/suknna/govirta/pkg/hostnet/route"
 )
 
 // Service registers logical network/NIC definitions and orchestrates the host

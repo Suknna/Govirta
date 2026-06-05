@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/suknna/govirta/internal/virt/qemuimg"
+	"github.com/suknna/govirta/pkg/virt/qemuimg"
 )
 
 func TestQEMUImgLifecycle(t *testing.T) {

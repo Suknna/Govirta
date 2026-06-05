@@ -3,8 +3,8 @@ package network
 import (
 	"context"
 
-	"github.com/suknna/govirta/internal/hostnet/firewall"
 	"github.com/suknna/govirta/internal/network/netpool"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 // NICService is the VM-facing API for per-VM network interfaces. It shares the

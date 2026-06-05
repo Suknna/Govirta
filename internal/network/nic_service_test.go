@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/suknna/govirta/internal/hostnet/firewall"
 	"github.com/suknna/govirta/internal/network/netpool"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 func TestNICServiceCanceledContext(t *testing.T) {

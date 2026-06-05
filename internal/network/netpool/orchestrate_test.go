@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/suknna/govirta/internal/hostnet/firewall"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 // macEqual compares two hardware addresses by their canonical string form.

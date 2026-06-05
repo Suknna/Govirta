@@ -11,9 +11,9 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/suknna/govirta/internal/hostnet/dhcp"
-	"github.com/suknna/govirta/internal/hostnet/firewall"
-	"github.com/suknna/govirta/internal/hostnet/link"
+	"github.com/suknna/govirta/pkg/hostnet/dhcp"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
+	"github.com/suknna/govirta/pkg/hostnet/link"
 )
 
 // NetworkName is the explicit, caller-provided identifier for a logical network.

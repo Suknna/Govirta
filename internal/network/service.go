@@ -8,8 +8,8 @@ package network
 import (
 	"context"
 
-	"github.com/suknna/govirta/internal/hostnet/firewall"
 	"github.com/suknna/govirta/internal/network/netpool"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 // NetworkService is the VM-facing API for shared network segments.

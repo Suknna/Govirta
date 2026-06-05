@@ -13,16 +13,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/suknna/govirta/internal/hostnet/dhcp"
-	hostdhcpcore "github.com/suknna/govirta/internal/hostnet/dhcp/coredhcp"
-	"github.com/suknna/govirta/internal/hostnet/firewall"
-	hostfirewalllinux "github.com/suknna/govirta/internal/hostnet/firewall/linux"
-	"github.com/suknna/govirta/internal/hostnet/link"
-	hostlinklinux "github.com/suknna/govirta/internal/hostnet/link/linux"
-	hostroutelinux "github.com/suknna/govirta/internal/hostnet/route/linux"
 	"github.com/suknna/govirta/internal/network"
 	"github.com/suknna/govirta/internal/network/netpool"
-	"github.com/suknna/govirta/internal/virt/qmp"
+	"github.com/suknna/govirta/pkg/hostnet/dhcp"
+	hostdhcpcore "github.com/suknna/govirta/pkg/hostnet/dhcp/coredhcp"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
+	hostfirewalllinux "github.com/suknna/govirta/pkg/hostnet/firewall/linux"
+	"github.com/suknna/govirta/pkg/hostnet/link"
+	hostlinklinux "github.com/suknna/govirta/pkg/hostnet/link/linux"
+	hostroutelinux "github.com/suknna/govirta/pkg/hostnet/route/linux"
+	"github.com/suknna/govirta/pkg/virt/qmp"
 )
 
 // Govirta-owned logical identities for the egress network under test. They are

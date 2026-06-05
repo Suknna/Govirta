@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/suknna/govirta/internal/hostnet/firewall"
-	firewalllinux "github.com/suknna/govirta/internal/hostnet/firewall/linux"
-	hostlink "github.com/suknna/govirta/internal/hostnet/link"
-	linklinux "github.com/suknna/govirta/internal/hostnet/link/linux"
+	"github.com/suknna/govirta/pkg/hostnet/firewall"
+	firewalllinux "github.com/suknna/govirta/pkg/hostnet/firewall/linux"
+	hostlink "github.com/suknna/govirta/pkg/hostnet/link"
+	linklinux "github.com/suknna/govirta/pkg/hostnet/link/linux"
 )
 
 const firewallAcceptanceOwner firewall.RuleOwner = "govirta-acceptance"
