@@ -77,13 +77,7 @@ func observedRouteForSpec(h handle, operation string, spec route.RouteSpec) (rou
 	if err != nil {
 		return route.RouteInfo{}, err
 	}
-	dstMask, dst, err := dstFilterForDestination(spec.Destination)
-	if err != nil {
-		return route.RouteInfo{}, err
-	}
-	nlFilter.Dst = dst
-	mask := uint64(netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF|netlink.RT_FILTER_GW|netlink.RT_FILTER_PRIORITY) | dstMask
-	nlRoutes, err := h.RouteListFiltered(netlink.FAMILY_V4, &nlFilter, mask)
+	nlRoutes, err := h.RouteListFiltered(netlink.FAMILY_V4, &nlFilter, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF|netlink.RT_FILTER_DST|netlink.RT_FILTER_GW|netlink.RT_FILTER_PRIORITY)
 	if err != nil {
 		return route.RouteInfo{}, translateError(operation, err)
 	}
@@ -105,16 +99,7 @@ func cleanupStaleRoutesAfterReplace(h handle, spec route.RouteSpec) error {
 	if err != nil {
 		return err
 	}
-	dstMask, dst, err := dstFilterForDestination(spec.Destination)
-	if err != nil {
-		return err
-	}
-	// Mirror kernel reality: a default route is dumped with Dst==nil, so the
-	// stale-comparison target Dst must also be nil for sameNetIPNet to match,
-	// and RT_FILTER_DST must be omitted (see dstFilterForDestination).
-	nlFilter.Dst = dst
-	mask := uint64(netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF|netlink.RT_FILTER_GW) | dstMask
-	nlRoutes, err := h.RouteListFiltered(netlink.FAMILY_V4, &nlFilter, mask)
+	nlRoutes, err := h.RouteListFiltered(netlink.FAMILY_V4, &nlFilter, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF|netlink.RT_FILTER_DST|netlink.RT_FILTER_GW)
 	if err != nil {
 		return translateError("replace route cleanup", err)
 	}
@@ -193,12 +178,12 @@ func netlinkFilterForRouteFilter(h handle, filter route.RouteFilter) (netlink.Ro
 	}
 
 	if filter.Destination.Mode == route.DestinationCIDR || filter.Destination.Mode == route.DestinationDefault {
-		dstMask, dst, err := dstFilterForDestination(filter.Destination)
+		destination, err := destinationIPNet(filter.Destination)
 		if err != nil {
 			return netlink.Route{}, 0, err
 		}
-		nlFilter.Dst = dst
-		mask |= dstMask
+		nlFilter.Dst = destination
+		mask |= netlink.RT_FILTER_DST
 	}
 
 	if filter.Gateway.Mode == route.GatewayIPv4 {
@@ -220,25 +205,6 @@ func destinationIPNet(destination route.Destination) (*net.IPNet, error) {
 	default:
 		return nil, routeerr.ErrInvalidRequest
 	}
-}
-
-// dstFilterForDestination reports the netlink filter mask bit and Dst for a
-// route destination. The Linux kernel dumps a default route (0.0.0.0/0) with
-// Dst==nil, so RT_FILTER_DST must NOT be set for a default destination:
-// netlink's RouteListFiltered would otherwise compare the kernel's nil Dst
-// against a non-nil 0.0.0.0/0 via ipNetEqual (which returns false) and silently
-// drop the very route we manage. For default destinations the kernel-side
-// filter is widened (no Dst bit) and the Go-side exactRouteMatch /
-// routeInfoMatchesFilter narrowing selects the default route by mode.
-func dstFilterForDestination(d route.Destination) (uint64, *net.IPNet, error) {
-	if d.Mode == route.DestinationDefault {
-		return 0, nil, nil
-	}
-	dst, err := destinationIPNet(d)
-	if err != nil {
-		return 0, nil, err
-	}
-	return uint64(netlink.RT_FILTER_DST), dst, nil
 }
 
 func netlinkRouteInfo(h handle, observed netlink.Route) (route.RouteInfo, error) {

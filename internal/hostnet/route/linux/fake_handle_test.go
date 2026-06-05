@@ -71,14 +71,13 @@ func (f *fakeHandle) RouteAdd(route *netlink.Route) error {
 	if f.routeAddErr != nil {
 		return f.routeAddErr
 	}
-	stored := normalizeKernelDst(*route)
 	for _, existing := range f.routes {
-		if sameRouteIdentity(existing, stored) {
+		if sameRouteIdentity(existing, *route) {
 			return fmt.Errorf("route exists: %w", routeerr.ErrAlreadyExists)
 		}
 	}
-	f.routes = append(f.routes, cloneRoute(stored))
-	f.addedRoutes = append(f.addedRoutes, cloneRoute(stored))
+	f.routes = append(f.routes, cloneRoute(*route))
+	f.addedRoutes = append(f.addedRoutes, cloneRoute(*route))
 	f.lastAddedRouteFamily = route.Family
 	return nil
 }
@@ -88,17 +87,16 @@ func (f *fakeHandle) RouteReplace(route *netlink.Route) error {
 	if f.routeReplaceErr != nil {
 		return f.routeReplaceErr
 	}
-	stored := normalizeKernelDst(*route)
 	for i, existing := range f.routes {
-		if sameRouteIdentity(existing, stored) {
-			f.routes[i] = cloneRoute(stored)
-			f.addedRoutes = append(f.addedRoutes, cloneRoute(stored))
+		if sameRouteIdentity(existing, *route) {
+			f.routes[i] = cloneRoute(*route)
+			f.addedRoutes = append(f.addedRoutes, cloneRoute(*route))
 			f.lastAddedRouteFamily = route.Family
 			return nil
 		}
 	}
-	f.routes = append(f.routes, cloneRoute(stored))
-	f.addedRoutes = append(f.addedRoutes, cloneRoute(stored))
+	f.routes = append(f.routes, cloneRoute(*route))
+	f.addedRoutes = append(f.addedRoutes, cloneRoute(*route))
 	f.lastAddedRouteFamily = route.Family
 	return nil
 }
@@ -108,11 +106,10 @@ func (f *fakeHandle) RouteDel(route *netlink.Route) error {
 	if f.routeDelErr != nil {
 		return f.routeDelErr
 	}
-	target := normalizeKernelDst(*route)
 	next := f.routes[:0]
 	deleted := false
 	for _, existing := range f.routes {
-		if sameRouteIdentity(existing, target) {
+		if sameRouteIdentity(existing, *route) {
 			deleted = true
 			continue
 		}
@@ -164,28 +161,6 @@ func cloneRoute(route netlink.Route) netlink.Route {
 		cloned.Gw = append(net.IP(nil), route.Gw...)
 	}
 	return cloned
-}
-
-// normalizeKernelDst mirrors Linux kernel route semantics: a 0.0.0.0/0
-// destination is collapsed to "no RTA_DST", so the kernel stores and dumps a
-// default route with Dst==nil. The fake normalizes incoming mutation routes the
-// same way so stored routes match real kernel dump behavior. Filters passed to
-// RouteListFiltered are intentionally NOT normalized: when a caller sets
-// RT_FILTER_DST with a non-nil 0.0.0.0/0 filter, netlink compares it against the
-// stored nil Dst via ipNetEqual (which returns false), dropping the default
-// route. Modeling that mismatch is what lets the unit suite reproduce the
-// default-route filter bug without a real kernel.
-func normalizeKernelDst(r netlink.Route) netlink.Route {
-	if r.Dst == nil {
-		return r
-	}
-	ones, bits := r.Dst.Mask.Size()
-	if ones == 0 && bits == ipv4Bits {
-		cloned := cloneRoute(r)
-		cloned.Dst = nil
-		return cloned
-	}
-	return r
 }
 
 func routeMatchesNetlinkFilter(candidate, filter netlink.Route, mask uint64) bool {
