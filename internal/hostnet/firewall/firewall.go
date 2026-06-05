@@ -36,7 +36,10 @@ type Manager interface {
 	// that require non-IPv4 or tagged isolation must enforce it separately.
 	EnsureEndpointAntiSpoofing(ctx context.Context, spec EndpointAntiSpoofingSpec) (RuleInfo, error)
 
-	// DeleteEndpointAntiSpoofing removes the endpoint anti-spoofing rule selected by ref.
+	// DeleteEndpointAntiSpoofing removes the endpoint anti-spoofing rule group
+	// selected by ref. ref must carry the GroupKey from the observed RuleInfo
+	// returned by Ensure/List/Get; a missing GroupKey is rejected with an
+	// invalid-request error.
 	DeleteEndpointAntiSpoofing(ctx context.Context, ref RuleRef) error
 
 	// EnsureForwardAccept creates or reconciles the explicit filter-forward
@@ -48,6 +51,9 @@ type Manager interface {
 	EnsureForwardAccept(ctx context.Context, spec ForwardAcceptSpec) (RuleInfo, error)
 
 	// DeleteForwardAccept removes the forward-accept rule group selected by ref.
+	// ref must carry the GroupKey from the observed RuleInfo returned by
+	// Ensure/List/Get; a missing GroupKey is rejected with an invalid-request
+	// error.
 	DeleteForwardAccept(ctx context.Context, ref RuleRef) error
 
 	// GetRule returns the observed firewall rule selected by query.

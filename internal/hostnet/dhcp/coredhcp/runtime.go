@@ -121,9 +121,7 @@ func (rt *serverRuntime) applyBinding(req dhcp.BindingRequest) (dhcp.LeaseInfo, 
 		// re-ApplyBinding with the same MAC+IP but a changed hostname is not
 		// silently dropped (observed-state-as-truth). Immutable identity (MAC,
 		// IP) is unchanged; only the hostname is updated.
-		if existing.hostname != req.Hostname {
-			existing.hostname = req.Hostname
-		}
+		existing.hostname = req.Hostname
 		return leaseInfo(existing), nil
 	}
 	if existing := rt.bindingsByIP[req.IP]; existing != nil {

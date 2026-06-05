@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 
 	"github.com/suknna/govirta/internal/hostnet/link"
 	"github.com/suknna/govirta/internal/hostnet/link/linkerr"
@@ -346,10 +345,10 @@ func (m Manager) rollbackCreatedLink(nlLink netlink.Link) error {
 // the desired gateway. AddrReplace only adds/updates the desired prefix; without
 // pruning, a changed GatewayCIDR would leave the previous gateway on the bridge,
 // so observed Addresses would diverge from spec (contradicting observed-state-as
-// -truth and "exactly match spec"). Only IPv4 unicast global-scope addresses are
-// considered; IPv4 link-local (169.254.0.0/16) is left untouched, and IPv6 is
-// out of scope for the bridge gateway. Delete failures are joined so no error is
-// silently discarded.
+// -truth and "exactly match spec"). IPv4 link-local (169.254.0.0/16) is
+// preserved; every other observed IPv4 prefix that is not the desired gateway is
+// pruned. IPv6 is out of scope for the bridge gateway (only FAMILY_V4 is listed).
+// Delete failures are joined so no error is silently discarded.
 func (m Manager) pruneStaleBridgeAddresses(nlLink netlink.Link, desired *netlink.Addr) error {
 	current, err := m.handle.AddrList(nlLink, netlink.FAMILY_V4)
 	if err != nil {
@@ -383,11 +382,7 @@ func sameAddrPrefix(left, right *netlink.Addr) bool {
 	if left.IPNet == nil || right.IPNet == nil {
 		return false
 	}
-	return left.IP.Equal(right.IP) && bytesEqual(left.Mask, right.Mask)
-}
-
-func bytesEqual(left, right net.IPMask) bool {
-	return string(left) == string(right)
+	return left.IP.Equal(right.IP) && string(left.Mask) == string(right.Mask)
 }
 
 func (m Manager) currentLinkInfo(ctx context.Context, name string) (link.LinkInfo, error) {
