@@ -227,6 +227,81 @@ Current node-local capability priority:
 8. Cold disk expansion
 9. Cold CPU/memory/disk/NIC modification
 
+## FIRST-CLASS CITIZENS（一等公民）
+
+Govirta 有两类一等公民：被编排的**领域资源实体**（系统管理的"名词"），以及必须始终在场的**横切能力**（可观测性）。一等公民判据：有专属契约/类型、调用方显式提供身份（绝不自动生成/推断）、有系统管理的生命周期、自身即权威事实源（上下一致），并被显式编排而非隐式假定。
+
+### 领域资源实体（被编排的名词）
+
+| 一等公民 | 契约 / 类型 | 为何是一等公民 |
+| --- | --- | --- |
+| 存储池 Storage Pool | `pool.Service`（`internal/storage/pool/service.go`） | 显式注册、强类型 backend kind、容量核算；一切卷/镜像操作必须显式 `PoolName`，无默认池。 |
+| 卷 Volume | `storage.VolumeService` + `volume.Volume`（`internal/storage/service.go`） | 显式 `RoleRoot`/`RoleData` + 显式 `DiskIndex`；image 派生 root 卷永远是完整独立副本，无 backing-file 链。 |
+| 镜像 Image | `storage.ImageService` + `pool.ImageRecord`（`internal/storage/image_service.go`） | 调用方提供 ID，重复 ID 拒绝；强类型生命周期态 pending/ready/deleting。 |
+| 网络 Network | `network.NetworkService` + `netpool.NetworkDefinition`（`internal/network/service.go`） | 声明式逻辑意图；编排 bridge + forwarding 检查 + masquerade + forward-accept + DHCP。 |
+| 网卡 NIC | `network.NICService` + `netpool.NICDefinition`（`internal/network/nic_service.go`） | 声明式逻辑意图；编排 TAP + DHCP binding + anti-spoofing；MAC 由控制面提供并原样贯穿。 |
+| 虚拟机 VM | `internal/virt/qemu`（argv builder）+ `qmp.Client`（`internal/virt/qmp/client.go`） | 被编排的产品实体；进程生命周期与编排器解耦，运行中 QEMU + QMP 状态是其唯一事实源（当前仍为骨架）。 |
+| 主机网络原语 Host Net Primitives | `link.Manager` / `route.Manager` / `firewall.Manager` / `dhcp.Manager` | 每个都是稳定的可替换接口边界；上层只依赖契约，不依赖 Linux 具体实现。 |
+| 节点 Node / 控制面 Control Plane | `node.Agent`（`internal/node/agent.go`）/ `controlplane.Service`（`internal/controlplane/service.go`） | master/node 长连接分布式骨架：节点拨号注册、接收派发的 VM 任务（当前为 no-op 骨架）。 |
+
+### 横切能力
+
+- **可观测性 Observability** —— 与领域资源实体同等重要的一等公民，作为强制规约约束所有层的日志、指标、追踪与节点资源汇报。详见 `## OBSERVABILITY（可观测性 — 强制规约）`。
+
+## OBSERVABILITY（可观测性 — 强制规约）
+
+可观测性是与领域资源实体并列的一等公民，必须在每一层显式在场，且遵循项目既有铁律：积木式可替换分层（上层只依赖观测契约，后端可整体替换）、显式优于隐式、`ctx` 端到端、上下一致/单一事实源、`errors.Join` 向上传播。三支柱 + 节点资源汇报均为**强制要求**，实现违反即视为违规。
+
+后端绑定方式（契约优先、后端可替换）：
+
+- **Logs** 已由 `zerolog` 承担（root logger 在 `cmd/*/main.go` 构造，内部包通过 `zerolog.Ctx(ctx)` 取用）。
+- **Metrics + Traces** 以 **OpenTelemetry** 为目标后端（Go 事实标准，traces/metrics 一体且可与日志做 trace 关联）。上层只依赖项目自有的 `Meter`/`Tracer` 抽象边界（待引入），可整体替换实现；禁止业务层直接散落具体后端 API 造成耦合。
+  - [前瞻] `Meter`/`Tracer` 契约与 OTel 集成尚未落地；引入前须按第十一/十七章用子代理联网核实最新权威来源再锁版本，本节只定规约不锁版本。
+
+### 1. Logs（日志 — 已有实践 + 强制细则）
+
+- 全部使用 `zerolog` 结构化字段；运行时库日志禁止 `fmt.Println`/`fmt.Printf`（`fmt` 仅允许 CLI 用户输出）。
+- root logger 在 `cmd/*/main.go` 构造并挂 `process` + `Timestamp`；内部包一律 `zerolog.Ctx(ctx)`，禁止自建脱离 `ctx` 的 logger。
+- **强制字段词汇表**（出现即用统一 key，禁止同义异名）：
+  - 进程/拓扑：`process`、`node_id`、`component`、`operation`、`outcome`（`success`/`failure`）。
+  - 资源身份：`pool`、`volume`、`image`、`vm_id`、`network`、`nic`、`bridge`、`tap`、`mac`、`route`、`rule`。
+  - 关联：`trace_id`、`span_id`（追踪落地后强制随日志输出，实现日志↔追踪关联）。
+  - 错误：`error`（经 `Err(err)`）+ 错误分类（对应 sentinel 类）。
+- **每个资源生命周期操作必须记起始 + 结果两条事件**（或一条带 `outcome` 的结果事件），且带齐资源身份字段。
+- level 语义边界：`Error`=操作失败/需人工介入；`Warn`=可恢复异常或降级；`Info`=资源生命周期里程碑（create/start/stop/delete/ensure/reconcile）；`Debug`=排障细节。禁止用错 level 制造噪音或淹没失败。
+
+### 2. Metrics（指标 — 强制规约）
+
+- **必须源自 live 真实资源（上下一致）**：指标从实际运行/存在的资源读出（运行中 QEMU+QMP、真实 qcow2/池用量、真实 bridge/TAP/规则），禁止从上层缓存/账本统计，避免漂移成第二事实源。
+- **标签基数纪律**：标签复用资源身份词汇表且必须有界；禁止把无界值（任意错误字符串、时间戳、高基数随机维度）放进标签。
+- **业务指标（按资源生命周期）**：
+  - 各资源按状态计数（pool/volume/image/network/nic/vm 当前态分布，如 vm running/stopped、image pending/ready/deleting）。
+  - 各生命周期操作的调用计数 + 时延分布 + 错误计数（create/start/stop/delete/ensure/reconcile/publish 等），错误按 sentinel 分类打标签。
+  - 存储池容量：`capacity_bytes` / `allocated_bytes` / overcommit 维度。
+  - 节点：心跳/在线状态、注册态、与控制面长连接健康。
+- **基础资源使用指标（节点级 + VM 级）**：
+  - 节点级：CPU 使用率/负载、内存使用/可用、存储（池/挂载点）已用/可用、网络吞吐。
+  - VM 级：每个 guest 的 vCPU 使用、内存占用、磁盘容量/IO、网卡流量（经 QMP/qemu-img/host 侧真实读取）。
+  - 基础指标同样遵守 live 真实资源原则与资源身份标签词汇表（`vm_id`/`node_id`/`pool` 等）。
+
+### 3. Traces（追踪 — 强制规约）
+
+- **trace context 必须随 `ctx` 端到端传播**（复用既有 ctx 铁律）：control-plane → node 任务分发 → storage/virt/network 编排 → qemu-img/QMP/netlink/nftables sink；跨进程（master↔node 长连接）必须传递 trace context。
+- 关键边界打 span：每个资源生命周期操作、每次跨层调用、每个外部命令/系统调用 sink（qemu-img 子进程、QMP 命令、netlink/nftables 操作）。
+- span 命名与属性复用同一资源身份词汇表（`vm_id`/`pool`/`network` 等）；失败 span 必须记录错误并标注对应 sentinel 错误类，与日志/指标的错误分类一致。
+
+### 4. 节点资源汇报（横切收口 — 绑定上下一致）
+
+- 节点周期性向控制面汇报的，是 **live 实际资源**：运行中 QEMU 进程 + QMP 状态、真实 qcow2/存储池用量、真实 bridge/TAP/路由/规则、真实节点 CPU/内存/存储/网络用量。
+- **绝不汇报私有账本/缓存投影**；控制面记录与实际资源冲突时以实际资源为准并向其 reconcile（上下一致铁律）。每个上层面（控制面记录、调度视图、未来 `govirtctl`/web 前端）都从这一单一事实源派生，跨入口报告一致。
+- 汇报通道复用 master/node 长连接；汇报内容的字段/标签/错误分类必须与日志、指标、追踪的词汇表一致，形成统一可观测面。
+
+### 错误处理（可观测性基座 — 已成熟，强制延续）
+
+- 每个领域/原语包提供稳定 sentinel 错误类（`linkerr`/`routeerr`/`firewallerr`/`dhcperr`/`networker` 及 storage 错误），`%w` 包裹保因，`errors.Is`/`errors.As` 可分类。
+- 全部错误向上传播，禁止吞错/`_ = err`/log-and-continue；主错误 + 清理/回滚错误用 `errors.Join` 合并保全。
+- 错误分类是三支柱共享的统一维度：日志 `error` 字段、指标错误标签、追踪失败 span 必须打同一套 sentinel 分类，保证三支柱可交叉关联。
+
 ## AGENTS TREE
 
 ```text
@@ -564,6 +639,8 @@ Govirta/
 - Layered, swappable-by-design architecture (积木式拼接): every layer must hide its internal implementation behind a stable interface/contract so replacing one layer's internals has zero impact on the layers above. Upper layers depend only on abstractions (interfaces, request/result types), never on concrete lower-layer implementations. The codebase must stay composable like building blocks — any driver/runner/client implementation can be swapped (for example `block.Driver`, `image.Driver`, `qmp.Client`, `bridge.Manager`, `imgexec.Runner`) without rippling changes upward. Minimize cross-layer coupling and never leak a lower layer's implementation details across its boundary. (This is orthogonal to 上下一致: vertical consistency governs which data is authoritative, this rule governs how implementations are decoupled and replaceable.)
 - The VM orchestration layer (`govirtad`/`govirtlet`) process lifecycle must stay decoupled from the QEMU process lifecycle. An orchestrator crash, panic, fatal error, or restart must never terminate, kill, or destabilize running QEMU processes. Spawn QEMU so guests survive orchestrator death and reattach to existing processes (QMP socket + pidfile) on restart instead of relying on the parent-child relationship. The orchestrator manages QEMU; it must not be a single point of failure for already-running guests.
 - Vertical consistency and single source of truth (上下一致): the authoritative state of every resource (storage volume/image, network bridge/TAP, VM process + QMP state) is the actually existing/running resource itself, not any upper-layer cache, record, or projection. Lower-layer reality defines the truth and the upper layer must always match the lower layer, never the reverse. Every upper surface (control-plane records, scheduler view, future `govirtctl` CLI, future web frontend) must derive resource information from this single authoritative source so a VM, volume, image, or network created or mutated through any path is reported identically everywhere. When an upper-layer record conflicts with the actual resource, the actual resource is the fact standard and the upper layer reconciles toward it.
+- Observability is a first-class cross-cutting mandate (详见 `## OBSERVABILITY（可观测性 — 强制规约）`): logs use `zerolog`; metrics and traces target OpenTelemetry behind a project-owned `Meter`/`Tracer` abstraction so the backend stays swappable. All three pillars plus node resource reporting share one resource-identity field vocabulary and one sentinel error classification, propagate trace context through `ctx`, and read from live resources (single source of truth) — never from upper-layer caches/records.
+- Node resource reporting (running QEMU+QMP, real qcow2/pool usage, real bridge/TAP/route/rule, real node CPU/memory/storage/network usage) must reflect live actual resources; the control plane reconciles its records toward the reported reality, never the reverse.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -598,6 +675,9 @@ Govirta/
 - Do not couple the QEMU process lifecycle to the orchestrator process. Do not spawn QEMU with a parent-death signal (`SysProcAttr.Pdeathsig`), do not keep QEMU in a process group where orchestrator termination signals propagate to it, and do not make QEMU depend on orchestrator-held stdio/pipes/QMP connections for survival. An orchestrator crash or restart must leave running guests untouched.
 - Do not let any upper layer become an independent source of truth that can drift from actual resources, and do not give each frontend (CLI vs web) its own private, unreconciled view of VM/storage/network state. Do not report, cache, or persist a resource state that contradicts the real qcow2 file, bridge/TAP, or QEMU process + QMP state; the running resource is the fact standard and every surface must reflect it consistently.
 - Do not use `git push --no-verify` to bypass the main-branch full Lima acceptance gate; pushing `main` must pass the configured hook and `scripts/acceptance.sh full`.
+- Do not call a concrete metrics/tracing backend (e.g., the OpenTelemetry SDK) directly from business/orchestration layers; depend only on the project-owned `Meter`/`Tracer` abstraction so the observability backend stays swappable (same 积木式 rule as drivers/managers).
+- Do not derive metrics, traces, or node resource reports from upper-layer caches/records/projections; read from live resources (上下一致). Do not invent per-pillar field names or per-pillar error categories — reuse the single resource-identity vocabulary and sentinel classification across logs/metrics/traces/reporting.
+- Do not emit unbounded-cardinality metric/trace label values (arbitrary error strings, timestamps, high-cardinality random dimensions); labels must reuse the bounded resource-identity vocabulary.
 
 ## UNIQUE STYLES
 
@@ -651,3 +731,4 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - The hostnet packages prove host primitive lifecycle behavior only — bridge/TAP, IPv4 route management and forwarding readiness, nftables masquerade/anti-spoofing, and static DHCP lease behavior. The `internal/network` orchestration layer (`NetworkService`/`NICService` over `netpool.Service`) composes those primitives into the guest external-egress closure (bridge + forwarding readiness + masquerade + forward-accept + static DHCP + endpoint anti-spoofing), proven end-to-end by `TestNetworkEgressEndToEnd`. See `internal/network/AGENTS.md`.
 - This file keeps the original generated header metadata, but the current branch has appended DHCP knowledge-base entries for `internal/hostnet/dhcp` and the `internal/network` orchestration layer (forward-accept primitive, `NetworkService`/`NICService`/`netpool.Service`, the network-orchestrate/guest-egress flows, and `TestNetworkEgressEndToEnd` acceptance coverage); the dead `internal/network/bridge` skeleton was removed.
 - Call-graph evidence: AFT outline/zoom and direct source/test reads; LSP call hierarchy was not used end-to-end. `[降级]` LSP；`[已验证]` 源码与测试断言。
+- 一等公民与可观测性：`## FIRST-CLASS CITIZENS（一等公民）` 显式收录被编排的领域资源实体（Storage Pool / Volume / Image / Network / NIC / VM / Host Net Primitives / Node·Control Plane）与横切的可观测性；`## OBSERVABILITY（可观测性 — 强制规约）` 定义日志/指标/追踪三支柱 + 节点资源汇报的强制细则（A1 契约优先、OTel 为目标后端、`Meter`/`Tracer` 抽象待引入）。可观测性指标含节点级与 VM 级 CPU/内存/存储/网络基础资源使用。
