@@ -1,35 +1,35 @@
-# internal/virt/qemu Knowledge Base
+# pkg/virt/qemu Knowledge Base
 
 <!--
 Verified-against:
-  base_commit: 3edfafd
+  base_commit: ec0c430
   files:
     - cmd/qemucli/main.go
-    - internal/virt/qemu/vm.go
-    - internal/virt/qemu/vm_test.go
-    - internal/virt/qemu/machine/machine.go
-    - internal/virt/qemu/blockdev/blockdev.go
-    - internal/virt/qemu/chardev/chardev.go
-    - internal/virt/qemu/cpu/cpu.go
-    - internal/virt/qemu/device/device.go
-    - internal/virt/qemu/display/display.go
-    - internal/virt/qemu/firmware/firmware.go
-    - internal/virt/qemu/monitor/monitor.go
-    - internal/virt/qemu/netdev/netdev.go
-    - internal/virt/qemu/qflag/qflag.go
-    - internal/virt/qemu/serial/serial.go
+    - pkg/virt/qemu/vm.go
+    - pkg/virt/qemu/vm_test.go
+    - pkg/virt/qemu/machine/machine.go
+    - pkg/virt/qemu/blockdev/blockdev.go
+    - pkg/virt/qemu/chardev/chardev.go
+    - pkg/virt/qemu/cpu/cpu.go
+    - pkg/virt/qemu/device/device.go
+    - pkg/virt/qemu/display/display.go
+    - pkg/virt/qemu/firmware/firmware.go
+    - pkg/virt/qemu/monitor/monitor.go
+    - pkg/virt/qemu/netdev/netdev.go
+    - pkg/virt/qemu/qflag/qflag.go
+    - pkg/virt/qemu/serial/serial.go
   flows:
     - anchor: flow-argv-build
       sources:
         - cmd/qemucli/main.go
-        - internal/virt/qemu/vm.go
-        - internal/virt/qemu/machine/machine.go
-        - internal/virt/qemu/blockdev/blockdev.go
-        - internal/virt/qemu/device/device.go
-        - internal/virt/qemu/netdev/netdev.go
-        - internal/virt/qemu/chardev/chardev.go
-        - internal/virt/qemu/monitor/monitor.go
-        - internal/virt/qemu/serial/serial.go
+        - pkg/virt/qemu/vm.go
+        - pkg/virt/qemu/machine/machine.go
+        - pkg/virt/qemu/blockdev/blockdev.go
+        - pkg/virt/qemu/device/device.go
+        - pkg/virt/qemu/netdev/netdev.go
+        - pkg/virt/qemu/chardev/chardev.go
+        - pkg/virt/qemu/monitor/monitor.go
+        - pkg/virt/qemu/serial/serial.go
 -->
 
 ## OVERVIEW
@@ -69,7 +69,7 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 - Do not add `machine.WithAccel`, `machine.WithKernelIRQChip`, `TypeQ35`, `TypeVirt`, or other free-composition APIs. Profiles only.
 - Do not bypass `Build()` validation by appending raw strings to `Builder.ordered` from outside the package; it is unexported.
 - Do not start QEMU processes from this package; argv is the deliverable. Process spawn lives above this typed boundary.
-- Do not reference TAP names that are not pre-created on the host. This package consumes TAP names; `internal/hostnet/link` owns host TAP/bridge lifecycle and `internal/network` orchestrates it.
+- Do not reference TAP names that are not pre-created on the host. This package consumes TAP names; `pkg/hostnet/link` owns host TAP/bridge lifecycle and `internal/network` orchestrates it.
 - Do not silently widen the machine profile whitelist; `Profile.IsSupported()` (`machine.go:20`) is the single source of truth.
 - Do not let unit tests require a real `qemu-system-*` binary; tests assert argv strings only.
 
@@ -77,18 +77,18 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 
 ### Flow: argv build {#flow-argv-build}
 
-承接根 flow `qemucli argv rendering` 在 `internal/virt/qemu` 内的展开。也是任何未来 runtime VM spawn 的输入路径。
+承接根 flow `qemucli argv rendering` 在 `pkg/virt/qemu` 内的展开。也是任何未来 runtime VM spawn 的输入路径。
 
 - Entry from root flow: `cmd/qemucli/main.go:35 (buildDefaultArgv)` — 来自 `cmd/qemucli/main.go:24 (main)` 的根 flow `#flow-qemucli-argv`
 - Local chain:
-  1. `internal/virt/qemu/vm.go:185 (NewVM)` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
-  2. `internal/virt/qemu/vm.go:215 (Builder.Name)` / `:228 (Builder.Machine)` / `:234 (Builder.CPU)` / `:236 (Builder.SMP)` / `:238 (Builder.Memory)` — 写入命名字段
-  3. `internal/virt/qemu/vm.go:240 (Builder.AddBlockdev)` / `:245 (Builder.AddDevice)` / `:258 (Builder.AddNetdev)` / `:264 (Builder.AddChardev)` / `:269 (Builder.BIOS)` / `:274 (Builder.Monitor)` / `:279 (Builder.Serial)` — 保留 package-internal typed renderer；`AddNetdev` 与 virtio-net `AddDevice` 置 `b.network=true`
-  4. `internal/virt/qemu/vm.go:245 (Builder.AddDevice)` — 反射 nil 检查 `isNilDevice`，防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
-  5. `internal/virt/qemu/vm.go:293 (Builder.NoNIC)` — 置 `b.noNIC=true`，要求显式 `-nic none`，与 `b.network` 互斥
-  6. `internal/virt/qemu/vm.go:299 (Builder.Build)` — 校验 binary/name/SMP/CPU/memory/display/msg/profile + NoNIC/network 互斥(`:335`) + typed renderer + external generic arguments allowlist；任一失败 wrap `ErrInvalidVM` 返回
-  7. `internal/virt/qemu/vm.go:349 (Builder.Build)` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
-  8. `internal/virt/qemu/vm.go:354 (VM.Argv)` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片 → -nic none(若 NoNIC) → -display → -no-reboot → -no-shutdown → -msg → -pidfile
+  1. `pkg/virt/qemu/vm.go:185 (NewVM)` — `binaryForArch(arch)` 选 `qemu-system-x86_64` / `qemu-system-aarch64` → 返回 `*Builder{binary}`
+  2. `pkg/virt/qemu/vm.go:215 (Builder.Name)` / `:228 (Builder.Machine)` / `:234 (Builder.CPU)` / `:236 (Builder.SMP)` / `:238 (Builder.Memory)` — 写入命名字段
+  3. `pkg/virt/qemu/vm.go:240 (Builder.AddBlockdev)` / `:245 (Builder.AddDevice)` / `:258 (Builder.AddNetdev)` / `:264 (Builder.AddChardev)` / `:269 (Builder.BIOS)` / `:274 (Builder.Monitor)` / `:279 (Builder.Serial)` — 保留 package-internal typed renderer；`AddNetdev` 与 virtio-net `AddDevice` 置 `b.network=true`
+  4. `pkg/virt/qemu/vm.go:245 (Builder.AddDevice)` — 反射 nil 检查 `isNilDevice`，防止 typed-nil 接口在 `Argv()` 阶段 nil-deref
+  5. `pkg/virt/qemu/vm.go:293 (Builder.NoNIC)` — 置 `b.noNIC=true`，要求显式 `-nic none`，与 `b.network` 互斥
+  6. `pkg/virt/qemu/vm.go:299 (Builder.Build)` — 校验 binary/name/SMP/CPU/memory/display/msg/profile + NoNIC/network 互斥(`:335`) + typed renderer + external generic arguments allowlist；任一失败 wrap `ErrInvalidVM` 返回
+  7. `pkg/virt/qemu/vm.go:349 (Builder.Build)` — 拷贝 Builder 与 ordered slice 进入 `VM` 值，避免 Argv() 期间外部 mutate
+  8. `pkg/virt/qemu/vm.go:354 (VM.Argv)` — 固定段顺序 flatten：binary → -name → -machine → -cpu → -smp → -m → ordered 切片 → -nic none(若 NoNIC) → -display → -no-reboot → -no-shutdown → -msg → -pidfile
 - Data (within module): `Arch` → `*Builder` (字段化配置) → `VM` (不可变快照) → `[]string` (argv)
 - Side effects (within module): 无；纯值变换。错误经 `errors.Is(err, ErrInvalidVM)` 可命中
 - Exit / next hop: `cmd/qemucli/main.go:29 (main)` — `strings.Join(argv, " ")` 写 stdout（当前唯一消费者；future runtime 会传给 `os/exec.CommandContext`）

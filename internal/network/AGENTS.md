@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 3edfafd
+  base_commit: ec0c430
   files:
     - internal/network/service.go
     - internal/network/nic_service.go
@@ -10,34 +10,34 @@ Verified-against:
     - internal/network/netpool/service.go
     - internal/network/netpool/orchestrate.go
     - internal/network/networker/errors.go
-    - internal/hostnet/link/link.go
-    - internal/hostnet/link/linux/manager_linux.go
-    - internal/hostnet/route/route.go
-    - internal/hostnet/route/linux/manager_linux.go
-    - internal/hostnet/firewall/firewall.go
-    - internal/hostnet/firewall/constants.go
-    - internal/hostnet/firewall/linux/manager_linux.go
-    - internal/hostnet/firewall/linux/forward_linux.go
-    - internal/hostnet/firewall/linux/forward_expr_linux.go
-    - internal/hostnet/dhcp/dhcp.go
-    - internal/hostnet/dhcp/coredhcp/manager.go
+    - pkg/hostnet/link/link.go
+    - pkg/hostnet/link/linux/manager_linux.go
+    - pkg/hostnet/route/route.go
+    - pkg/hostnet/route/linux/manager_linux.go
+    - pkg/hostnet/firewall/firewall.go
+    - pkg/hostnet/firewall/constants.go
+    - pkg/hostnet/firewall/linux/manager_linux.go
+    - pkg/hostnet/firewall/linux/forward_linux.go
+    - pkg/hostnet/firewall/linux/forward_expr_linux.go
+    - pkg/hostnet/dhcp/dhcp.go
+    - pkg/hostnet/dhcp/coredhcp/manager.go
     - test/acceptance/network_egress_test.go
   flows:
     - anchor: flow-network-ensure
       sources:
         - internal/network/service.go
         - internal/network/netpool/orchestrate.go
-        - internal/hostnet/link/linux/manager_linux.go
-        - internal/hostnet/route/linux/manager_linux.go
-        - internal/hostnet/firewall/linux/manager_linux.go
-        - internal/hostnet/dhcp/coredhcp/manager.go
+        - pkg/hostnet/link/linux/manager_linux.go
+        - pkg/hostnet/route/linux/manager_linux.go
+        - pkg/hostnet/firewall/linux/manager_linux.go
+        - pkg/hostnet/dhcp/coredhcp/manager.go
     - anchor: flow-nic-ensure
       sources:
         - internal/network/nic_service.go
         - internal/network/netpool/orchestrate.go
-        - internal/hostnet/link/linux/manager_linux.go
-        - internal/hostnet/dhcp/coredhcp/manager.go
-        - internal/hostnet/firewall/linux/manager_linux.go
+        - pkg/hostnet/link/linux/manager_linux.go
+        - pkg/hostnet/dhcp/coredhcp/manager.go
+        - pkg/hostnet/firewall/linux/manager_linux.go
     - anchor: flow-guest-egress
       sources:
         - internal/network/service.go
@@ -48,7 +48,7 @@ Verified-against:
 
 ## OVERVIEW
 
-VM-facing network orchestration layer mirroring the `internal/storage` layering: `NetworkService`/`NICService` are the VM-facing API, `netpool.Service` is the shared registration + orchestration core, and the `internal/hostnet/*` managers (link/route/firewall/dhcp) are the driver layer. The core stores declarative logical intent only; observed resource state is always read live from the primitives, never cached.
+VM-facing network orchestration layer mirroring the `internal/storage` layering: `NetworkService`/`NICService` are the VM-facing API, `netpool.Service` is the shared registration + orchestration core, and the `pkg/hostnet/*` managers (link/route/firewall/dhcp) are the driver layer. The core stores declarative logical intent only; observed resource state is always read live from the primitives, never cached.
 
 `EnsureNetwork`/`EnsureNIC` reconcile host primitives in a fixed dependency order and are idempotent; they never tear down already-created resources on partial failure. `DeleteNetwork`/`DeleteNIC` tear down in reverse order with `errors.Join` so every failure is preserved. The guest egress closure (bridge + IPv4 forwarding readiness + masquerade + forward-accept + static DHCP + endpoint anti-spoofing) is what turns the host primitives into real guest internet access.
 
@@ -62,7 +62,7 @@ VM-facing network orchestration layer mirroring the `internal/storage` layering:
 | Orchestration + live status | `netpool/orchestrate.go` | `EnsureNetwork`/`EnsureNIC`/`DeleteNetwork`/`DeleteNIC` order; `GetNetworkStatus`/`GetNICStatus` read live from primitives |
 | Logical definitions | `netpool/network.go` | `NetworkName`, `VMID`, `NetworkDefinition`, `NICDefinition`, `networkRecord` + clone funcs |
 | Error sentinels | `networker/errors.go` | `ErrInvalidRequest` / `ErrNotFound` / `ErrAlreadyExists` / `ErrConflict` / `ErrNotReady` |
-| Host primitives (drivers) | `internal/hostnet/{link,route,firewall,dhcp}` | observed-truth managers injected into `netpool.Service`; see root `AGENTS.md` hostnet flows |
+| Host primitives (drivers) | `pkg/hostnet/{link,route,firewall,dhcp}` | observed-truth managers injected into `netpool.Service`; see root `AGENTS.md` hostnet flows |
 | End-to-end egress acceptance | `test/acceptance/network_egress_test.go` | `TestNetworkEgressEndToEnd`: boots CirrOS via orchestration API, guest pings `8.8.8.8` + `one.one.one.one` |
 
 ## CONVENTIONS
@@ -100,7 +100,7 @@ VM-facing network orchestration layer mirroring the `internal/storage` layering:
   8. `internal/network/netpool/orchestrate.go:105 (Service.EnsureNetwork → GetNetworkStatus)` then `:234 (Service.GetNetworkStatus)` — aggregate observed state live
 - Data (within module): `NetworkName` → cloned `NetworkDefinition` → primitive specs (`link.BridgeSpec`, `firewall.MasqueradeSpec`, `firewall.ForwardAcceptSpec`, `dhcp.ServerSpec`) → observed `netpool.NetworkStatus`
 - Side effects (within module): host bridge, masquerade + forward-accept nftables rules, DHCP listener; no in-memory observed-state cache, no IPv4 forwarding mutation
-- Exit / next hop: `internal/hostnet/link/linux/manager_linux.go:33 (Manager.EnsureBridge)` [详见 `../../AGENTS.md#flow-hostnet-bridge`] · `internal/hostnet/route/linux/manager_linux.go:87 (Manager.CheckIPv4Forwarding)` [详见 `../../AGENTS.md#flow-hostnet-route`] · `internal/hostnet/firewall/linux/manager_linux.go:37 (Manager.EnsureMasquerade)` / `:65 (Manager.EnsureForwardAccept)` [详见 `../../AGENTS.md#flow-hostnet-firewall`] · `internal/hostnet/dhcp/coredhcp/manager.go:47 (Manager.Start)` [详见 `../../AGENTS.md#flow-hostnet-dhcp`]
+- Exit / next hop: `pkg/hostnet/link/linux/manager_linux.go:33 (Manager.EnsureBridge)` [详见 `../../AGENTS.md#flow-hostnet-bridge`] · `pkg/hostnet/route/linux/manager_linux.go:87 (Manager.CheckIPv4Forwarding)` [详见 `../../AGENTS.md#flow-hostnet-route`] · `pkg/hostnet/firewall/linux/manager_linux.go:37 (Manager.EnsureMasquerade)` / `:65 (Manager.EnsureForwardAccept)` [详见 `../../AGENTS.md#flow-hostnet-firewall`] · `pkg/hostnet/dhcp/coredhcp/manager.go:45 (Manager.Start)` [详见 `../../AGENTS.md#flow-hostnet-dhcp`]
 
 ### Flow: NIC ensure {#flow-nic-ensure}
 
@@ -114,7 +114,7 @@ VM-facing network orchestration layer mirroring the `internal/storage` layering:
   6. `internal/network/netpool/orchestrate.go:163 (Service.EnsureNIC → GetNICStatus)` then `:287 (Service.GetNICStatus)` — aggregate observed TAP + lease + anti-spoofing state live
 - Data (within module): `NetworkName` + `VMID` → cloned `NICDefinition` → primitive specs (`link.TapSpec`, `dhcp.BindingRequest`, `firewall.EndpointAntiSpoofingSpec`) → observed `netpool.NICStatus`; one `MAC` threaded unchanged to all three primitives
 - Side effects (within module): host TAP enslaved to the bridge, DHCP static binding, bridge-chain anti-spoofing guard; no observed-state cache
-- Exit / next hop: `internal/hostnet/link/linux/manager_linux.go:80 (Manager.EnsureTap)` [详见 `../../AGENTS.md#flow-hostnet-tap`] · `internal/hostnet/dhcp/coredhcp/manager.go:197 (Manager.ApplyBinding)` [详见 `../../AGENTS.md#flow-hostnet-dhcp`] · `internal/hostnet/firewall/linux/manager_linux.go:51 (Manager.EnsureEndpointAntiSpoofing)` [详见 `../../AGENTS.md#flow-hostnet-firewall`]
+- Exit / next hop: `pkg/hostnet/link/linux/manager_linux.go:86 (Manager.EnsureTap)` [详见 `../../AGENTS.md#flow-hostnet-tap`] · `pkg/hostnet/dhcp/coredhcp/manager.go:202 (Manager.ApplyBinding)` [详见 `../../AGENTS.md#flow-hostnet-dhcp`] · `pkg/hostnet/firewall/linux/manager_linux.go:51 (Manager.EnsureEndpointAntiSpoofing)` [详见 `../../AGENTS.md#flow-hostnet-firewall`]
 
 ### Flow: guest egress closure {#flow-guest-egress}
 

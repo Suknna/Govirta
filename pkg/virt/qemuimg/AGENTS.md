@@ -1,31 +1,31 @@
-# internal/virt/qemuimg Knowledge Base
+# pkg/virt/qemuimg Knowledge Base
 
 <!--
 Verified-against:
-  base_commit: 3edfafd
+  base_commit: ec0c430
   files:
-    - internal/virt/qemuimg/client.go
-    - internal/virt/qemuimg/client_test.go
-    - internal/virt/qemuimg/check/check.go
-    - internal/virt/qemuimg/info/info.go
-    - internal/virt/qemuimg/convert/convert.go
-    - internal/virt/qemuimg/create/create.go
-    - internal/virt/qemuimg/remove/remove.go
-    - internal/virt/qemuimg/resize/resize.go
-    - internal/virt/qemuimg/snapshot/snapshot.go
-    - internal/virt/qemuimg/internal/exec/exec.go
+    - pkg/virt/qemuimg/client.go
+    - pkg/virt/qemuimg/client_test.go
+    - pkg/virt/qemuimg/check/check.go
+    - pkg/virt/qemuimg/info/info.go
+    - pkg/virt/qemuimg/convert/convert.go
+    - pkg/virt/qemuimg/create/create.go
+    - pkg/virt/qemuimg/remove/remove.go
+    - pkg/virt/qemuimg/resize/resize.go
+    - pkg/virt/qemuimg/snapshot/snapshot.go
+    - pkg/virt/qemuimg/internal/exec/exec.go
   flows:
     - anchor: flow-qcow2-do
       sources:
-        - internal/virt/qemuimg/client.go
-        - internal/virt/qemuimg/check/check.go
-        - internal/virt/qemuimg/info/info.go
-        - internal/virt/qemuimg/convert/convert.go
-        - internal/virt/qemuimg/create/create.go
-        - internal/virt/qemuimg/snapshot/snapshot.go
-        - internal/virt/qemuimg/remove/remove.go
-        - internal/virt/qemuimg/resize/resize.go
-        - internal/virt/qemuimg/internal/exec/exec.go
+        - pkg/virt/qemuimg/client.go
+        - pkg/virt/qemuimg/check/check.go
+        - pkg/virt/qemuimg/info/info.go
+        - pkg/virt/qemuimg/convert/convert.go
+        - pkg/virt/qemuimg/create/create.go
+        - pkg/virt/qemuimg/snapshot/snapshot.go
+        - pkg/virt/qemuimg/remove/remove.go
+        - pkg/virt/qemuimg/resize/resize.go
+        - pkg/virt/qemuimg/internal/exec/exec.go
 -->
 
 ## OVERVIEW
@@ -71,7 +71,7 @@ Offline qemu-img wrapper. `Client.QCOW2()` exposes per-subcommand fluent builder
 
 This is the canonical execution path for every subcommand exposed via `QCOW2Client`. There is no current direct `cmd/*` caller; `internal/storage/local` calls it today for qcow2 volume create/convert/resize/info/remove, and future node-agent runtime code will also use it.
 
-- Entry from root flow: `internal/virt/qemuimg/client.go:81 (NewClient)` / `:105 (QCOW2Client.Create)` / `:115 (Convert)` / `:120 (Resize)` — invoked by storage local driver and future node runtime callers
+- Entry from root flow: `pkg/virt/qemuimg/client.go:81 (NewClient)` / `:105 (QCOW2Client.Create)` / `:115 (Convert)` / `:120 (Resize)` — invoked by storage local driver and future node runtime callers
 - Local chain:
   1. `client.go:81 (NewClient)` — fill defaults: `binary` falls back to `"qemu-img"`, `runner` falls back to `imgexec.OSRunner{}`
   2. `client.go:95 (ExecClient.QCOW2)` — return value-typed `QCOW2Client{binary, runner}`; each call returns a fresh copy but shares the runner interface

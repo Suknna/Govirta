@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 3edfafd
+  base_commit: ec0c430
   files:
     - internal/storage/service.go
     - internal/storage/image_service.go
@@ -16,14 +16,14 @@ Verified-against:
     - internal/storage/diskformat/format.go
     - internal/storage/local/driver.go
     - internal/storage/localfile/driver.go
-    - internal/virt/qemuimg/client.go
+    - pkg/virt/qemuimg/client.go
   flows:
     - anchor: flow-storage-volume
       sources:
         - internal/storage/service.go
         - internal/storage/pool/service.go
         - internal/storage/local/driver.go
-        - internal/virt/qemuimg/client.go
+        - pkg/virt/qemuimg/client.go
     - anchor: flow-storage-image
       sources:
         - internal/storage/image_service.go
@@ -35,7 +35,7 @@ Verified-against:
         - internal/storage/service.go
         - internal/storage/pool/service.go
         - internal/storage/local/driver.go
-        - internal/virt/qemuimg/client.go
+        - pkg/virt/qemuimg/client.go
 -->
 
 ## OVERVIEW
@@ -53,7 +53,7 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
 | Image driver contract | `image/driver.go` | raw/qcow2 byte image `Put/Get/Delete` + `ImageWriter` |
 | Volume model | `volume/` | `Volume`, `PublishedVolume`, file attachment contract |
 | Explicit source format | `diskformat/format.go` | only `qcow2` and `raw` are valid |
-| Local block backend | `local/driver.go` | host-local qcow2 volumes via `internal/virt/qemuimg` |
+| Local block backend | `local/driver.go` | host-local qcow2 volumes via `pkg/virt/qemuimg` |
 | Local file backend | `localfile/driver.go` | host-local raw/qcow2 image byte store |
 
 ## CONVENTIONS
@@ -87,7 +87,7 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
   6. `internal/storage/pool/service.go:325 (Service.PublishVolume)` — validate VM ownership, call driver publish, record attachment state
 - Data (within module): `CreateVolumeRequest` → `block.CreateRequest` → `volume.Volume` → `volume.PublishedVolume{AttachmentFile,qcow2,path}`
 - Side effects (within module): creates/deletes qcow2 under `StorageRoot/pool/<pool>/...`; mutates in-memory `Pool.volumes`; publish records attachment state only
-- Exit / next hop: `internal/virt/qemuimg/client.go:105 (QCOW2Client.Create)` / `:110 (Info)` / `:135 (QCOW2Client.Remove)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+- Exit / next hop: `pkg/virt/qemuimg/client.go:105 (QCOW2Client.Create)` / `:110 (Info)` / `:135 (QCOW2Client.Remove)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 
 ### Flow: storage image lifecycle {#flow-storage-image}
 
@@ -115,11 +115,11 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
   6. `internal/storage/local/driver.go:206 (Driver.CreateFromReader)` — optional qemu-img resize for requested capacity, then commit temp via hard-link (`commitTempImage` at `:215`)
 - Data (within module): `io.ReadCloser` + `diskformat.Format` → `block.CreateFromReaderRequest` → independent qcow2 `volume.Volume`
 - Side effects (within module): reads source image, writes standalone qcow2 root disk, updates `Pool.volumes`; source image remains independent
-- Exit / next hop: `internal/virt/qemuimg/client.go:115 (QCOW2Client.Convert)` / `:120 (Resize)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+- Exit / next hop: `pkg/virt/qemuimg/client.go:115 (QCOW2Client.Convert)` / `:120 (Resize)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 
 ## NOTES
 
 - `local.Driver.Publish` (`local/driver.go:290`) validates a regular `.qcow2` file and runs `qemu-img info` before returning a file attachment for QEMU.
 - `localfile.imageWriter.Close` (`localfile/driver.go:254`) returns `image.ErrImageCleanupFailed` when the hard-link commit succeeds but removing the source tmp fails: the target is already durable, so the commit is honored and only the cleanup failure is surfaced. `pendingImageWriter.Close` (`pool/service.go:685`) detects that sentinel, still transitions the record to ready via `markReady`, and `errors.Join`s the cleanup error so the caller sees a committed-but-not-cleaned image rather than a rolled-back one.
-- Focused verification: `go test -count=1 ./internal/storage/... ./internal/virt/qemuimg/...`; concurrency-sensitive storage changes also run `go test -race -count=1 ./internal/storage/...`.
+- Focused verification: `go test -count=1 ./internal/storage/... ./pkg/virt/qemuimg/...`; concurrency-sensitive storage changes also run `go test -race -count=1 ./internal/storage/...`.
 - Evidence: read-only subagent scan + AFT outline/zoom + direct source reads. `[已验证]` / `[降级: LSP call hierarchy]`

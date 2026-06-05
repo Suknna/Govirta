@@ -1,13 +1,13 @@
-# internal/virt Knowledge Base
+# pkg/virt Knowledge Base
 
 <!--
 Verified-against:
-  base_commit: 3edfafd
+  base_commit: ec0c430
   files:
-    - internal/virt/qemu/vm.go
-    - internal/virt/qemuimg/client.go
-    - internal/virt/qemuimg/resize/resize.go
-    - internal/virt/qmp/client.go
+    - pkg/virt/qemu/vm.go
+    - pkg/virt/qemuimg/client.go
+    - pkg/virt/qemuimg/resize/resize.go
+    - pkg/virt/qmp/client.go
     - internal/node/agent.go
   flows: []
 -->
@@ -27,7 +27,7 @@ Local virtualization boundary aggregator. Owns three sibling packages: typed QEM
 
 ## CONVENTIONS
 
-- This package tree renders deterministic argv and exposes typed command boundaries; process spawn / QMP lifecycle / TAP creation belongs above (`internal/node`) or beside (`internal/hostnet/link` primitives orchestrated by `internal/network`) this layer.
+- This package tree renders deterministic argv and exposes typed command boundaries; process spawn / QMP lifecycle / TAP creation belongs above (`internal/node`) or beside (`pkg/hostnet/link` primitives orchestrated by `internal/network`) this layer.
 - New virtualization boundaries (e.g., a future `nbd/` or `migration/` package) sit at this level only when they own a distinct external command/protocol surface; otherwise extend an existing subpackage.
 
 ## ANTI-PATTERNS
