@@ -155,7 +155,10 @@ func logicalEndpointInfo(details []observedRuleDetail) (firewall.RuleInfo, error
 		return firewall.RuleInfo{}, fmt.Errorf("%w: endpoint anti-spoofing rule has no endpoint summary", firewallerr.ErrInvalidObservedState)
 	}
 	ref := base.info.Ref
-	ref.Handle = base.info.Ref.Handle
+	// GroupKey is the stable logical identity of this endpoint guard group (the
+	// guarded TAP), so a group delete resolves by identity rather than by a
+	// handle the kernel can renumber.
+	ref.GroupKey = firewall.RuleGroupKey(baseSummary.TapName)
 	merged := firewall.EndpointAntiSpoofingSummary{
 		BridgeName: baseSummary.BridgeName,
 		TapName:    baseSummary.TapName,

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coredhcp/coredhcp/config"
+	"github.com/coredhcp/coredhcp/handler"
 	"github.com/coredhcp/coredhcp/plugins"
 
 	"github.com/suknna/govirta/internal/hostnet/dhcp"
@@ -279,6 +280,7 @@ func TestValidateServerSpecRejectsInvalidFields(t *testing.T) {
 		{name: "invalid subnet", mut: func(s *dhcp.ServerSpec) { s.Subnet = netip.Prefix{} }, want: dhcperr.ErrInvalidRequest},
 		{name: "pool outside subnet", mut: func(s *dhcp.ServerSpec) { s.Pool.End = netip.MustParseAddr("192.168.101.10") }, want: dhcperr.ErrInvalidRequest},
 		{name: "pool start after end", mut: func(s *dhcp.ServerSpec) { s.Pool.Start, s.Pool.End = s.Pool.End, s.Pool.Start }, want: dhcperr.ErrInvalidRequest},
+		{name: "pool contains server address", mut: func(s *dhcp.ServerSpec) { s.Pool.Start = s.ServerAddr }, want: dhcperr.ErrInvalidRequest},
 		{name: "zero lease", mut: func(s *dhcp.ServerSpec) { s.LeaseDuration = 0 }, want: dhcperr.ErrInvalidRequest},
 		{name: "empty router mode", mut: func(s *dhcp.ServerSpec) { s.Router.Mode = "" }, want: dhcperr.ErrInvalidRequest},
 		{name: "enabled router without address", mut: func(s *dhcp.ServerSpec) { s.Router = dhcp.DHCPOptionAddrs{Mode: dhcp.DHCPOptionEnabled} }, want: dhcperr.ErrInvalidRequest},
@@ -340,7 +342,64 @@ func TestStopExistingServerClosesWaitsAndRemovesRuntime(t *testing.T) {
 	}
 }
 
-func TestStopCanceledContextBeforeOwnershipDoesNotCleanup(t *testing.T) {
+// TestRestartReplayRestoresBindings encodes the process-memory-only contract
+// documented on the DHCP Manager: bindings live solely in the runtime's memory,
+// so Stop discards them and a restarted server starts empty. Upper layers must
+// replay Start + ApplyBinding to restore a binding; the manager never persists
+// or auto-restores it. This proves both halves: the binding is gone after a
+// stop/start cycle, and an explicit replay brings it back.
+func TestRestartReplayRestoresBindings(t *testing.T) {
+	spec := validServerSpec()
+	mac := "02:00:00:00:00:01"
+	ip := "192.168.100.10"
+
+	manager := newManager(&fakeStarter{servers: &fakeServers{}})
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("first Start returned error: %v", err)
+	}
+	if _, err := manager.ApplyBinding(context.Background(), bindingRequest(spec.ID, mac, ip)); err != nil {
+		t.Fatalf("first ApplyBinding returned error: %v", err)
+	}
+	query := dhcp.BindingQuery{ServerID: spec.ID, MAC: mustMAC(mac)}
+	if _, err := manager.GetLease(context.Background(), query); err != nil {
+		t.Fatalf("GetLease before restart returned error: %v", err)
+	}
+
+	if err := manager.Stop(context.Background(), spec.ID); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+
+	// Re-Start the same logical server with a fresh listener (the first
+	// fakeServers is closed). Bindings are process-memory only, so the
+	// restarted runtime must start empty until the caller replays them.
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("second Start returned error: %v", err)
+	}
+	if _, err := manager.GetLease(context.Background(), query); !errors.Is(err, dhcperr.ErrNotFound) {
+		t.Fatalf("binding must not survive restart (process-memory only), GetLease error = %v, want ErrNotFound", err)
+	}
+
+	// Explicit replay restores the binding; nothing auto-restores it.
+	replayed, err := manager.ApplyBinding(context.Background(), bindingRequest(spec.ID, mac, ip))
+	if err != nil {
+		t.Fatalf("replay ApplyBinding returned error: %v", err)
+	}
+	if replayed.State != dhcp.LeaseStateReserved || replayed.IP != netip.MustParseAddr(ip) {
+		t.Fatalf("replayed lease = %#v, want reserved lease for %s", replayed, ip)
+	}
+	if _, err := manager.GetLease(context.Background(), query); err != nil {
+		t.Fatalf("GetLease after replay returned error: %v", err)
+	}
+}
+
+// TestStopCanceledContextStillCleansUp encodes the post-fix contract: once Stop
+// is reached with a valid (non-nil) context and a running server, a canceled
+// caller context must NOT abort cleanup. Stop takes ownership and runs
+// Close/Wait to completion so the CoreDHCP listener is released and the runtime
+// reaches stopped — never left running with state stuck in stopping. This
+// replaces the prior test that asserted the buggy early-return-on-cancel
+// behavior (a canceled Stop used to leak the listener).
+func TestStopCanceledContextStillCleansUp(t *testing.T) {
 	fake := &fakeServers{}
 	manager := newManager(&fakeStarter{servers: fake})
 	spec := validServerSpec()
@@ -350,19 +409,32 @@ func TestStopCanceledContextBeforeOwnershipDoesNotCleanup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := manager.Stop(ctx, spec.ID)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
+	if err := manager.Stop(ctx, spec.ID); err != nil {
+		t.Fatalf("Stop with canceled context returned error: %v", err)
+	}
+	if !fake.closed || !fake.waited {
+		t.Fatalf("canceled Stop must still Close/Wait once it owns cleanup, got closed=%v waited=%v", fake.closed, fake.waited)
+	}
+	_, err := manager.GetServer(context.Background(), spec.ID)
+	if !errors.Is(err, dhcperr.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after canceled Stop completed cleanup, got %v", err)
+	}
+}
+
+func TestStopNilContextReturnsInvalidRequest(t *testing.T) {
+	fake := &fakeServers{}
+	manager := newManager(&fakeStarter{servers: fake})
+	spec := validServerSpec()
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	//nolint:staticcheck // intentionally passing a nil context to assert validation
+	if err := manager.Stop(nil, spec.ID); !errors.Is(err, dhcperr.ErrInvalidRequest) {
+		t.Fatalf("Stop(nil ctx) error = %v, want ErrInvalidRequest", err)
 	}
 	if fake.closed || fake.waited {
-		t.Fatalf("canceled Stop before cleanup ownership must not Close/Wait, got closed=%v waited=%v", fake.closed, fake.waited)
-	}
-	info, err := manager.GetServer(context.Background(), spec.ID)
-	if err != nil {
-		t.Fatalf("GetServer returned error: %v", err)
-	}
-	if info.State != dhcp.ServerStateReady {
-		t.Fatalf("server state = %s, want ready", info.State)
+		t.Fatalf("nil-context Stop must reject before any cleanup, got closed=%v waited=%v", fake.closed, fake.waited)
 	}
 }
 
@@ -401,6 +473,36 @@ func TestStopKeepsRuntimeStoppingUntilWaitCompletes(t *testing.T) {
 	_, err = manager.GetServer(context.Background(), spec.ID)
 	if !errors.Is(err, dhcperr.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after stop completed, got %v", err)
+	}
+}
+
+// TestApplyBindingDuringStopReturnsNotRunning proves the binding state gate: a
+// concurrent Stop transitions the runtime to Stopping (blocked here on Wait via
+// the release channel), and ApplyBinding must refuse with ErrNotRunning rather
+// than orphan a binding on a listener that is tearing down.
+func TestApplyBindingDuringStopReturnsNotRunning(t *testing.T) {
+	servers := newBlockingServers()
+	manager := newManager(&fakeStarter{servers: servers})
+	spec := validServerSpec()
+	if _, err := manager.Start(context.Background(), spec); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- manager.Stop(context.Background(), spec.ID)
+	}()
+	waitForClosed(t, servers.closed, "server close")
+
+	// The runtime is now Stopping (Stop is blocked on Wait until release).
+	_, err := manager.ApplyBinding(context.Background(), bindingRequest(spec.ID, "02:00:00:00:00:01", "192.168.100.10"))
+	if !errors.Is(err, dhcperr.ErrNotRunning) {
+		t.Fatalf("ApplyBinding during Stop error = %v, want ErrNotRunning", err)
+	}
+
+	close(servers.release)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error after release: %v", err)
 	}
 }
 
@@ -609,4 +711,11 @@ func setRegisteredPlugin(plugin *plugins.Plugin) {
 		return
 	}
 	plugins.RegisteredPlugins[govirtaPluginName] = plugin
+}
+
+// placeholderSetup4 is a test-only CoreDHCP Setup4 that forwards to the real
+// runtime-backed handler builder. It exists so plugin-registration tests can
+// install a Setup4 without the production manager carrying a test-only shim.
+func placeholderSetup4(args ...string) (handler.Handler4, error) {
+	return setupHandler4(args...)
 }

@@ -56,7 +56,7 @@ func (m *Manager) EnsureEndpointAntiSpoofing(ctx context.Context, spec firewall.
 }
 
 func (m *Manager) DeleteEndpointAntiSpoofing(ctx context.Context, ref firewall.RuleRef) error {
-	if err := validateRuleRef(ctx, ref, firewall.RulePurposeEndpointAntiSpoofing); err != nil {
+	if err := validateGroupDeleteRef(ctx, ref, firewall.RulePurposeEndpointAntiSpoofing); err != nil {
 		return translateError("delete endpoint anti-spoofing", err)
 	}
 	return translateError("delete endpoint anti-spoofing", deleteObservedEndpointGroup(m.firewallHandle(), ref))
@@ -70,7 +70,7 @@ func (m *Manager) EnsureForwardAccept(ctx context.Context, spec firewall.Forward
 }
 
 func (m *Manager) DeleteForwardAccept(ctx context.Context, ref firewall.RuleRef) error {
-	if err := validateRuleRef(ctx, ref, firewall.RulePurposeForwardAccept); err != nil {
+	if err := validateGroupDeleteRef(ctx, ref, firewall.RulePurposeForwardAccept); err != nil {
 		return translateError("delete forward-accept", err)
 	}
 	return translateError("delete forward-accept", deleteObservedForwardGroup(m.firewallHandle(), ref))
@@ -106,13 +106,11 @@ func deleteObservedEndpointGroup(h handle, ref firewall.RuleRef) error {
 		groups[detail.info.Summary.EndpointAntiSpoofing.TapName] = append(groups[detail.info.Summary.EndpointAntiSpoofing.TapName], detail)
 	}
 
-	var selected []observedRuleDetail
-	for _, group := range groups {
-		if endpointGroupLowestHandle(group) == ref.Handle {
-			selected = group
-			break
-		}
-	}
+	// Resolve the group by its stable logical key (the guarded TAP) rather than
+	// by lowest-handle equality: the kernel can renumber handles and an
+	// out-of-band rule change can shift which handle is lowest, but the TAP
+	// identity is stable, so a group delete stays correct under either.
+	selected := groups[firewall.InterfaceName(ref.GroupKey)]
 	if len(selected) == 0 {
 		return nil
 	}
@@ -146,16 +144,6 @@ func deleteObservedEndpointGroup(h handle, ref firewall.RuleRef) error {
 		}
 	}
 	return nil
-}
-
-func endpointGroupLowestHandle(details []observedRuleDetail) firewall.RuleHandle {
-	var lowest firewall.RuleHandle
-	for _, detail := range details {
-		if lowest == 0 || detail.info.Ref.Handle < lowest {
-			lowest = detail.info.Ref.Handle
-		}
-	}
-	return lowest
 }
 
 func (m *Manager) ListRules(ctx context.Context, filter firewall.RuleFilter) ([]firewall.RuleInfo, error) {

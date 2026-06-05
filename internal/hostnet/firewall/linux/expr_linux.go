@@ -95,23 +95,24 @@ func endpointProtocolDropExprs(bridge firewall.InterfaceName, tap firewall.Inter
 	return exprs
 }
 
+// endpointInterfaceExprs binds the bridge-family forward-hook interface match.
+// In the kernel bridge forward hook, MetaKeyIIFNAME is the frame's receive port
+// (the guest TAP) and MetaKeyBRIIIFNAME is the bridge the port is enslaved to.
+// The guard therefore matches iifname==TAP AND ibrname==bridge; binding these
+// the other way round makes the conjunction unsatisfiable on real guest frames,
+// silently disabling every anti-spoofing DROP that follows.
 func endpointInterfaceExprs(bridge firewall.InterfaceName, tap firewall.InterfaceName) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: regMatch},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: regMatch, Data: interfaceNameData(bridge)},
-		&expr.Meta{Key: expr.MetaKeyBRIIIFNAME, Register: regMatch},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: regMatch, Data: interfaceNameData(tap)},
+		&expr.Meta{Key: expr.MetaKeyBRIIIFNAME, Register: regMatch},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: regMatch, Data: interfaceNameData(bridge)},
 	}
 }
 
 type observedRuleDetail struct {
 	info  firewall.RuleInfo
 	guard endpointGuardKind
-}
-
-func observedRuleInfo(table *nftables.Table, chain *nftables.Chain, rule *nftables.Rule) (firewall.RuleInfo, bool, error) {
-	detail, recognized, err := observedRuleDetailFor(table, chain, rule)
-	return detail.info, recognized, err
 }
 
 func observedRuleDetailFor(table *nftables.Table, chain *nftables.Chain, rule *nftables.Rule) (observedRuleDetail, bool, error) {
@@ -360,21 +361,23 @@ func parseEndpointDropExprs(exprs []expr.Any) (*firewall.EndpointAntiSpoofingSum
 	if len(exprs) != 7 && len(exprs) != 9 {
 		return nil, invalidObservedState("endpoint guard expression count is %d", len(exprs))
 	}
+	// Mirror endpointInterfaceExprs: exprs[0] (iifname) binds the receive port
+	// (the TAP) and exprs[2] (ibrname) binds the bridge.
 	meta, ok := exprs[0].(*expr.Meta)
 	if !ok || meta.Key != expr.MetaKeyIIFNAME || meta.Register != regMatch || meta.SourceRegister {
-		return nil, invalidObservedState("endpoint bridge expression is invalid")
+		return nil, invalidObservedState("endpoint TAP (iifname) expression is invalid")
 	}
-	cmpBridge, ok := exprs[1].(*expr.Cmp)
-	if !ok || cmpBridge.Op != expr.CmpOpEq || cmpBridge.Register != regMatch {
-		return nil, invalidObservedState("endpoint bridge comparison is invalid")
+	cmpTap, ok := exprs[1].(*expr.Cmp)
+	if !ok || cmpTap.Op != expr.CmpOpEq || cmpTap.Register != regMatch {
+		return nil, invalidObservedState("endpoint TAP (iifname) comparison is invalid")
 	}
 	meta, ok = exprs[2].(*expr.Meta)
 	if !ok || meta.Key != expr.MetaKeyBRIIIFNAME || meta.Register != regMatch || meta.SourceRegister {
-		return nil, invalidObservedState("endpoint TAP expression is invalid")
+		return nil, invalidObservedState("endpoint bridge (ibrname) expression is invalid")
 	}
-	cmpTap, ok := exprs[3].(*expr.Cmp)
-	if !ok || cmpTap.Op != expr.CmpOpEq || cmpTap.Register != regMatch {
-		return nil, invalidObservedState("endpoint TAP comparison is invalid")
+	cmpBridge, ok := exprs[3].(*expr.Cmp)
+	if !ok || cmpBridge.Op != expr.CmpOpEq || cmpBridge.Register != regMatch {
+		return nil, invalidObservedState("endpoint bridge (ibrname) comparison is invalid")
 	}
 	payloadIndex := len(exprs) - 3
 	payload, ok := exprs[payloadIndex].(*expr.Payload)

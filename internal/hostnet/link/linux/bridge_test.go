@@ -41,6 +41,7 @@ func TestEnsureBridgeCreatesBridge(t *testing.T) {
 		"LinkSetHardwareAddr:br0:02:00:00:00:00:01",
 		"LinkSetMTU:br0:1500",
 		"AddrReplace:br0:192.0.2.1/24",
+		"AddrList:br0:2",
 		"LinkSetUp:br0",
 		"LinkByName:br0",
 		"AddrList:br0:0",
@@ -66,6 +67,57 @@ func TestEnsureBridgeIsIdempotent(t *testing.T) {
 		if call == "LinkAdd:br0" {
 			t.Fatalf("existing bridge should not be recreated: %v", fake.calls)
 		}
+	}
+}
+
+func TestEnsureBridgePrunesStaleGatewayAddress(t *testing.T) {
+	// Reconcile convergence regression: AddrReplace only adds/updates the desired
+	// gateway, so without pruning a changed GatewayCIDR would leave the previous
+	// gateway on the bridge and observed Addresses would diverge from spec. The
+	// fake models real netlink AddrReplace/AddrDel semantics (preserving other
+	// addresses), so this test fails before the prune fix and passes after.
+	specA := validBridgeSpec()
+	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: string(specA.Name), Index: 10}}
+	fake := newFakeHandle(bridge)
+	manager := NewManagerWithHandle(fake)
+
+	if _, err := manager.EnsureBridge(context.Background(), specA); err != nil {
+		t.Fatalf("EnsureBridge(gwA) failed: %v", err)
+	}
+	// A link-local address that the prune must leave untouched.
+	fake.addresses[string(specA.Name)] = append(fake.addresses[string(specA.Name)], *mustParseAddr(t, "169.254.1.1/16"))
+
+	specB := specA
+	specB.GatewayCIDR = "192.0.2.129/25"
+	fake.calls = nil
+	info, err := manager.EnsureBridge(context.Background(), specB)
+	if err != nil {
+		t.Fatalf("EnsureBridge(gwB) failed: %v", err)
+	}
+
+	wantAddresses := []string{"169.254.1.1/16", "192.0.2.129/25"}
+	if !reflect.DeepEqual(info.Addresses, wantAddresses) {
+		t.Fatalf("addresses = %v, want %v (stale gateway pruned, link-local kept)", info.Addresses, wantAddresses)
+	}
+	assertCallsContain(t, fake.calls, "AddrDel:br0:192.0.2.1/24")
+}
+
+func TestEnsureBridgePruneFailureIsReturned(t *testing.T) {
+	specA := validBridgeSpec()
+	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: string(specA.Name), Index: 10}}
+	fake := newFakeHandle(bridge)
+	manager := NewManagerWithHandle(fake)
+	if _, err := manager.EnsureBridge(context.Background(), specA); err != nil {
+		t.Fatalf("EnsureBridge(gwA) failed: %v", err)
+	}
+
+	prune := errors.New("address delete failed")
+	fake.injectFailure("AddrDel", prune)
+	specB := specA
+	specB.GatewayCIDR = "192.0.2.129/25"
+
+	if _, err := manager.EnsureBridge(context.Background(), specB); !errors.Is(err, prune) {
+		t.Fatalf("EnsureBridge(gwB) error = %v, want prune failure", err)
 	}
 }
 

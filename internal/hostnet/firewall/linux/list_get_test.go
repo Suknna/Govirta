@@ -77,8 +77,8 @@ func TestListRulesReturnsSortedGovirtaRules(t *testing.T) {
 
 	got := refsFromInfos(infos)
 	want := []firewall.RuleRef{
-		endpointRef("vm-1", 5),
-		endpointRef("vm-2", 3),
+		endpointRef("vm-1", 5, "tap0"),
+		endpointRef("vm-2", 3, "tap1"),
 		masqueradeRef("vm-1", 10),
 		masqueradeRef("vm-2", 2),
 	}
@@ -111,7 +111,7 @@ func TestListRulesFilterByOwnerPurposeFamilyTableChain(t *testing.T) {
 
 func TestGetRuleReturnsRuleMatchingCompactRef(t *testing.T) {
 	fh, _ := seededRuleHandle()
-	ref := endpointRef("vm-1", 5)
+	ref := endpointRef("vm-1", 5, "tap0")
 
 	info, err := NewManagerWithHandle(fh).GetRule(context.Background(), firewall.RuleQuery{Ref: ref})
 	if err != nil {
@@ -161,7 +161,7 @@ func TestGetRuleRejectsCrossProtocolEndpointExpression(t *testing.T) {
 			}
 			fh.rules = append(fh.rules, rule)
 
-			_, err := NewManagerWithHandle(fh).GetRule(context.Background(), firewall.RuleQuery{Ref: endpointRef("vm-3", 22)})
+			_, err := NewManagerWithHandle(fh).GetRule(context.Background(), firewall.RuleQuery{Ref: endpointRef("vm-3", 22, "tap2")})
 			if !errors.Is(err, firewallerr.ErrInvalidObservedState) {
 				t.Fatalf("GetRule error = %v, want %v", err, firewallerr.ErrInvalidObservedState)
 			}
@@ -192,7 +192,7 @@ func TestDeleteEndpointAntiSpoofingRemovesOnlyMatchingRule(t *testing.T) {
 	fh, _ := seededRuleHandle()
 	manager := NewManagerWithHandle(fh)
 
-	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), endpointRef("vm-1", 5)); err != nil {
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), endpointRef("vm-1", 5, "tap0")); err != nil {
 		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
 	}
 
@@ -202,7 +202,57 @@ func TestDeleteEndpointAntiSpoofingRemovesOnlyMatchingRule(t *testing.T) {
 	}
 	got := refsFromInfos(infos)
 	want := []firewall.RuleRef{
-		endpointRef("vm-2", 3),
+		endpointRef("vm-2", 3, "tap1"),
+		masqueradeRef("vm-1", 10),
+		masqueradeRef("vm-2", 2),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("remaining refs = %+v, want %+v", got, want)
+	}
+}
+
+// TestDeleteEndpointAntiSpoofingResolvesGroupAfterLowestHandleRemoved is the
+// headline regression for the group-delete fix: the caller holds a ref whose
+// Handle is the group's lowest guard at observe time (handle 5 for tap0), but
+// that exact guard is removed out-of-band before the delete. The old code
+// selected the group by recomputing the lowest handle and comparing it to
+// ref.Handle, so after the lowest guard vanished the recomputed lowest (7) no
+// longer equaled ref.Handle (5) and the whole group was skipped, leaking the
+// remaining three guards. Resolving by the stable GroupKey (tap0) deletes the
+// remaining guards regardless of handle renumbering.
+func TestDeleteEndpointAntiSpoofingResolvesGroupAfterLowestHandleRemoved(t *testing.T) {
+	fh, _ := seededRuleHandle()
+	manager := NewManagerWithHandle(fh)
+
+	// Remove the lowest-handle guard of the tap0 group (handle 5) out-of-band,
+	// simulating an external mutation after the caller obtained the group ref.
+	remaining := fh.rules[:0]
+	for _, rule := range fh.rules {
+		if rule.Handle == 5 {
+			continue
+		}
+		remaining = append(remaining, rule)
+	}
+	fh.rules = remaining
+
+	// The caller still holds the original ref with Handle 5 and GroupKey tap0.
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), endpointRef("vm-1", 5, "tap0")); err != nil {
+		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
+	}
+
+	infos, err := manager.ListRules(context.Background(), validRuleFilter())
+	if err != nil {
+		t.Fatalf("ListRules after delete error = %v", err)
+	}
+	for _, info := range infos {
+		if eas := info.Summary.EndpointAntiSpoofing; eas != nil && eas.TapName == "tap0" {
+			t.Fatalf("tap0 guard still present after group delete, leaked: %+v", info.Ref)
+		}
+	}
+	// The unrelated tap1 group must be untouched.
+	got := refsFromInfos(infos)
+	want := []firewall.RuleRef{
+		endpointRef("vm-2", 3, "tap1"),
 		masqueradeRef("vm-1", 10),
 		masqueradeRef("vm-2", 2),
 	}
@@ -325,8 +375,8 @@ func masqueradeRef(owner firewall.RuleOwner, handle firewall.RuleHandle) firewal
 	return firewall.RuleRef{Owner: owner, Purpose: firewall.RulePurposeMasquerade, Family: firewall.TableFamilyIPv4, TableName: "govirta_nat", ChainName: "postrouting", Handle: handle}
 }
 
-func endpointRef(owner firewall.RuleOwner, handle firewall.RuleHandle) firewall.RuleRef {
-	return firewall.RuleRef{Owner: owner, Purpose: firewall.RulePurposeEndpointAntiSpoofing, Family: firewall.TableFamilyBridge, TableName: "govirta_bridge", ChainName: "forward", Handle: handle}
+func endpointRef(owner firewall.RuleOwner, handle firewall.RuleHandle, tap firewall.InterfaceName) firewall.RuleRef {
+	return firewall.RuleRef{Owner: owner, Purpose: firewall.RulePurposeEndpointAntiSpoofing, Family: firewall.TableFamilyBridge, TableName: "govirta_bridge", ChainName: "forward", Handle: handle, GroupKey: firewall.RuleGroupKey(tap)}
 }
 
 func refsFromInfos(infos []firewall.RuleInfo) []firewall.RuleRef {

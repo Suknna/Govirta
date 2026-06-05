@@ -46,7 +46,19 @@ func kindOf(nlLink netlink.Link) (link.Kind, error) {
 	}
 }
 
+// masterResolver maps a master link index to its name. It lets linkInfo serve
+// both the single-link Get path (resolve via a fresh LinkList) and the List
+// path (resolve from an index map built once from the already-fetched dump),
+// so List does not issue a fresh full LinkList per enslaved link (O(n²)).
+type masterResolver func(masterIndex int) (link.Name, error)
+
 func linkInfo(h handle, nlLink netlink.Link) (link.LinkInfo, error) {
+	return linkInfoWith(h, nlLink, func(masterIndex int) (link.Name, error) {
+		return masterName(h, masterIndex)
+	})
+}
+
+func linkInfoWith(h handle, nlLink netlink.Link, resolveMaster masterResolver) (link.LinkInfo, error) {
 	attrs := nlLink.Attrs()
 	kind, err := kindOf(nlLink)
 	if err != nil {
@@ -56,7 +68,7 @@ func linkInfo(h handle, nlLink netlink.Link) (link.LinkInfo, error) {
 	if err != nil {
 		return link.LinkInfo{}, err
 	}
-	masterName, err := masterName(h, attrs.MasterIndex)
+	masterName, err := resolveMaster(attrs.MasterIndex)
 	if err != nil {
 		return link.LinkInfo{}, err
 	}
@@ -97,6 +109,22 @@ func masterName(h handle, masterIndex int) (link.Name, error) {
 	links, err := h.LinkList()
 	if err != nil {
 		return "", translateError("list links for master lookup", err)
+	}
+
+	return masterNameFromLinks(links, masterIndex)
+}
+
+// masterResolverFromLinks builds an index->name resolver from an already-fetched
+// link slice so List resolves master names without re-dumping links per call.
+func masterResolverFromLinks(links []netlink.Link) masterResolver {
+	return func(masterIndex int) (link.Name, error) {
+		return masterNameFromLinks(links, masterIndex)
+	}
+}
+
+func masterNameFromLinks(links []netlink.Link, masterIndex int) (link.Name, error) {
+	if masterIndex == 0 {
+		return "", nil
 	}
 	for _, candidate := range links {
 		attrs := candidate.Attrs()

@@ -110,6 +110,16 @@ func TestValidationRejectsInvalidRouteSpecFields(t *testing.T) {
 			want: routeerr.ErrInvalidRequest,
 		},
 		{
+			name: "non-canonical cidr with host bits set",
+			edit: func(spec *route.RouteSpec) {
+				// 198.51.100.5/24 has host bits set; destinationIPNet masks it
+				// for the kernel but exactRouteMatch compares the raw prefix, so
+				// it would never match its own observed route.
+				spec.Destination = route.Destination{Mode: route.DestinationCIDR, CIDR: netip.PrefixFrom(netip.MustParseAddr("198.51.100.5"), 24)}
+			},
+			want: routeerr.ErrInvalidRequest,
+		},
+		{
 			name: "gateway any",
 			edit: func(spec *route.RouteSpec) { spec.Gateway = route.Gateway{Mode: route.GatewayAny} },
 			want: routeerr.ErrInvalidRequest,

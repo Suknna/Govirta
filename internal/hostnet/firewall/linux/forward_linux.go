@@ -5,7 +5,6 @@ package linux
 import (
 	"context"
 	"fmt"
-	"net/netip"
 
 	"github.com/google/nftables"
 	"github.com/suknna/govirta/internal/hostnet/firewall"
@@ -127,8 +126,9 @@ func ensureDesiredForwardGroup(ctx context.Context, h handle, operation string, 
 	return info, nil
 }
 
-// deleteObservedForwardGroup removes the forward-accept group whose lowest rule
-// handle equals ref.Handle, mirroring deleteObservedEndpointGroup.
+// deleteObservedForwardGroup removes the forward-accept group whose stable
+// GroupKey (the guest CIDR) equals ref.GroupKey, mirroring
+// deleteObservedEndpointGroup.
 func deleteObservedForwardGroup(h handle, ref firewall.RuleRef) error {
 	filter := firewall.RuleFilter{
 		Owner:   firewall.FilterOwner(ref.Owner),
@@ -141,22 +141,20 @@ func deleteObservedForwardGroup(h handle, ref firewall.RuleRef) error {
 	if err != nil {
 		return err
 	}
-	groups := map[netip.Prefix][]observedRuleDetail{}
+	groups := map[firewall.RuleGroupKey][]observedRuleDetail{}
 	for _, detail := range details {
 		if detail.info.Summary.ForwardAccept == nil {
 			continue
 		}
-		key := detail.info.Summary.ForwardAccept.GuestCIDR
+		key := firewall.RuleGroupKey(detail.info.Summary.ForwardAccept.GuestCIDR.String())
 		groups[key] = append(groups[key], detail)
 	}
 
-	var selected []observedRuleDetail
-	for _, group := range groups {
-		if endpointGroupLowestHandle(group) == ref.Handle {
-			selected = group
-			break
-		}
-	}
+	// Resolve the group by its stable logical key (the guest CIDR) rather than
+	// by lowest-handle equality: the kernel can renumber handles and an
+	// out-of-band rule change can shift which handle is lowest, but the guest
+	// CIDR identity is stable, so a group delete stays correct under either.
+	selected := groups[ref.GroupKey]
 	if len(selected) == 0 {
 		return nil
 	}
@@ -246,10 +244,11 @@ func validateDesiredForwardGroup(desired []desiredRule) error {
 }
 
 // logicalForwardInfo compacts the observed forward-accept guard rules into a
-// single logical RuleInfo whose Ref.Handle is the lowest guard handle (stable
-// identity for delete), mirroring logicalEndpointInfo. It enforces the group
-// invariants: no duplicate guards, consistent identity across every grouped
-// rule, and presence of both forward-accept guards before returning success.
+// single logical RuleInfo whose Ref.Handle is the lowest guard handle and whose
+// Ref.GroupKey (the guest CIDR) is the stable delete selector, mirroring
+// logicalEndpointInfo. It enforces the group invariants: no duplicate guards,
+// consistent identity across every grouped rule, and presence of both
+// forward-accept guards before returning success.
 func logicalForwardInfo(details []observedRuleDetail) (firewall.RuleInfo, error) {
 	if len(details) == 0 {
 		return firewall.RuleInfo{}, fmt.Errorf("%w: forward-accept group is empty", firewallerr.ErrInvalidObservedState)
@@ -260,7 +259,10 @@ func logicalForwardInfo(details []observedRuleDetail) (firewall.RuleInfo, error)
 		return firewall.RuleInfo{}, fmt.Errorf("%w: forward-accept rule has no summary", firewallerr.ErrInvalidObservedState)
 	}
 	ref := base.info.Ref
-	ref.Handle = base.info.Ref.Handle
+	// GroupKey is the stable logical identity of this forward-accept group (the
+	// guest CIDR), so a group delete resolves by identity rather than by a
+	// handle the kernel can renumber.
+	ref.GroupKey = firewall.RuleGroupKey(baseSummary.GuestCIDR.String())
 	merged := firewall.ForwardAcceptSummary{
 		GuestCIDR:           baseSummary.GuestCIDR,
 		EgressInterfaceName: baseSummary.EgressInterfaceName,

@@ -16,8 +16,18 @@ import (
 // types through this root package.
 type Manager interface {
 	// Start starts one explicit DHCP responder instance.
+	//
+	// The ctx scopes the start operation only (validation and the initial
+	// listener handshake); it is not a teardown trigger. Server lifecycle is
+	// owned solely by Start/Stop: the responder and its listener goroutines run
+	// until an explicit Stop call. Cancelling the ctx after a successful Start
+	// does NOT stop the server — callers must call Stop to release the listener.
 	Start(ctx context.Context, spec ServerSpec) (ServerInfo, error)
 	// Stop stops the responder identified by id.
+	//
+	// Stop requires a non-nil ctx but does not abort on a canceled ctx: once it
+	// takes cleanup ownership it runs the listener teardown to completion, so a
+	// canceled ctx cannot leak a running responder.
 	Stop(ctx context.Context, id ServerID) error
 
 	// ApplyBinding creates or confirms one explicit MAC-to-IP binding.

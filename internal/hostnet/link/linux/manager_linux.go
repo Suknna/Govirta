@@ -65,6 +65,12 @@ func (m Manager) EnsureBridge(ctx context.Context, spec link.BridgeSpec) (link.L
 		if err := checkContext(ctx); err != nil {
 			return err
 		}
+		if err := m.pruneStaleBridgeAddresses(nlLink, addr); err != nil {
+			return err
+		}
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
 		if err := m.handle.LinkSetUp(nlLink); err != nil {
 			return translateError("set bridge up", err)
 		}
@@ -203,6 +209,9 @@ func (m Manager) List(ctx context.Context, filter link.ListFilter) ([]link.LinkI
 	if err != nil {
 		return nil, translateError("list links", err)
 	}
+	// Resolve master names from the already-fetched dump instead of issuing a
+	// fresh full LinkList per enslaved link (the previous O(n²) behavior).
+	resolveMaster := masterResolverFromLinks(nlLinks)
 	infos := make([]link.LinkInfo, 0, len(nlLinks))
 	for _, nlLink := range nlLinks {
 		kind, err := kindOf(nlLink)
@@ -218,7 +227,7 @@ func (m Manager) List(ctx context.Context, filter link.ListFilter) ([]link.LinkI
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		info, err := linkInfo(m.handle, nlLink)
+		info, err := linkInfoWith(m.handle, nlLink, resolveMaster)
 		if err != nil {
 			return nil, err
 		}
@@ -330,6 +339,50 @@ func (m Manager) rollbackCreatedLink(nlLink netlink.Link) error {
 	}
 
 	return nil
+}
+
+// pruneStaleBridgeAddresses converges the bridge's observed IPv4 addresses onto
+// the desired gateway. AddrReplace only adds/updates the desired prefix; without
+// pruning, a changed GatewayCIDR would leave the previous gateway on the bridge,
+// so observed Addresses would diverge from spec (contradicting observed-state-as
+// -truth and "exactly match spec"). IPv4 link-local (169.254.0.0/16) is
+// preserved; every other observed IPv4 prefix that is not the desired gateway is
+// pruned. IPv6 is out of scope for the bridge gateway (only FAMILY_V4 is listed).
+// Delete failures are joined so no error is silently discarded.
+func (m Manager) pruneStaleBridgeAddresses(nlLink netlink.Link, desired *netlink.Addr) error {
+	current, err := m.handle.AddrList(nlLink, netlink.FAMILY_V4)
+	if err != nil {
+		return translateError("list bridge addresses for prune", err)
+	}
+
+	var pruneErrs []error
+	for i := range current {
+		existing := current[i]
+		if existing.IPNet == nil {
+			continue
+		}
+		if sameAddrPrefix(&existing, desired) {
+			continue
+		}
+		if existing.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		stale := existing
+		if err := m.handle.AddrDel(nlLink, &stale); err != nil {
+			pruneErrs = append(pruneErrs, translateError("delete stale bridge address", err))
+		}
+	}
+
+	return errors.Join(pruneErrs...)
+}
+
+// sameAddrPrefix reports whether two netlink addresses carry the same IP and
+// mask, i.e. represent the same on-link prefix.
+func sameAddrPrefix(left, right *netlink.Addr) bool {
+	if left.IPNet == nil || right.IPNet == nil {
+		return false
+	}
+	return left.IP.Equal(right.IP) && string(left.Mask) == string(right.Mask)
 }
 
 func (m Manager) currentLinkInfo(ctx context.Context, name string) (link.LinkInfo, error) {

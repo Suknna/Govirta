@@ -163,6 +163,7 @@ func TestDeleteEndpointAntiSpoofingRejectsInvalidRequestsBeforeHandleUse(t *test
 		{name: "invalid chain", mutate: func(ref *firewall.RuleRef) { ref.ChainName = "bad/name" }, wantErr: firewallerr.ErrInvalidRequest},
 		{name: "family mismatch", mutate: func(ref *firewall.RuleRef) { ref.Family = firewall.TableFamilyIPv4 }, wantErr: firewallerr.ErrInvalidRequest},
 		{name: "zero handle", mutate: func(ref *firewall.RuleRef) { ref.Handle = 0 }, wantErr: firewallerr.ErrInvalidRequest},
+		{name: "missing group key", mutate: func(ref *firewall.RuleRef) { ref.GroupKey = "" }, wantErr: firewallerr.ErrInvalidRequest},
 	}
 
 	for _, tt := range cases {
@@ -319,6 +320,7 @@ func validEndpointAntiSpoofingRef() firewall.RuleRef {
 		TableName: "govirta_bridge",
 		ChainName: "forward",
 		Handle:    1,
+		GroupKey:  "tap0",
 	}
 }
 

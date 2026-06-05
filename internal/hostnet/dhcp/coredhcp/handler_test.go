@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -366,6 +367,64 @@ func TestRuntimeRegistryRejectsDifferentManagerWithSameServerID(t *testing.T) {
 	}
 }
 
+// TestHandlerConcurrentWithBindingMutation drives the DHCPv4 handler under -race
+// while other goroutines mutate the same runtime's bindings. The handler reads
+// bindings (bindingForMAC / bindLease) under rt.mu while ApplyBinding /
+// RemoveBinding take rt.mu for writes; this is the highest-risk concurrency path
+// (guest packets racing control-plane binding updates) and was previously
+// unproven by any -race test. A data race here fails the test under -race.
+func TestHandlerConcurrentWithBindingMutation(t *testing.T) {
+	rt, spec := handlerRuntime(t)
+	h := newHandler4(rt)
+
+	const workers = 8
+	const iterations = 50
+	macFor := func(i int) net.HardwareAddr {
+		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x10, byte(i)}
+	}
+	ipFor := func(i int) netip.Addr {
+		return netip.AddrFrom4([4]byte{192, 168, 100, byte(20 + i)})
+	}
+
+	var wg sync.WaitGroup
+
+	// Mutators: repeatedly add and remove each worker's binding.
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			mac := macFor(i)
+			ip := ipFor(i)
+			for n := 0; n < iterations; n++ {
+				// Errors are expected and benign here (e.g. removing a
+				// not-yet-present binding); the test only asserts the absence
+				// of data races, so the outcomes are intentionally ignored.
+				_, _ = rt.applyBinding(dhcp.BindingRequest{ServerID: spec.ID, MAC: mac, IP: ip})
+				_ = rt.removeBinding(dhcp.BindingQuery{ServerID: spec.ID, MAC: mac})
+			}
+		}(i)
+	}
+
+	// Handlers: repeatedly drive DISCOVER and REQUEST for each worker's MAC.
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			mac := macFor(i)
+			ip := net.IP(ipFor(i).AsSlice())
+			for n := 0; n < iterations; n++ {
+				discoverReq, discoverResp := dhcpPacketPair(t, dhcpv4.MessageTypeDiscover, mac)
+				h(discoverReq, discoverResp)
+				requestReq, requestResp := dhcpPacketPair(t, dhcpv4.MessageTypeRequest, mac)
+				requestReq.UpdateOption(dhcpv4.OptRequestedIPAddress(ip))
+				h(requestReq, requestResp)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
 func handlerRuntime(t *testing.T) (*serverRuntime, dhcp.ServerSpec) {
 	t.Helper()
 	spec := validServerSpec()
@@ -378,7 +437,7 @@ func handlerRuntime(t *testing.T) (*serverRuntime, dhcp.ServerSpec) {
 
 func bindHandlerLease(t *testing.T, rt *serverRuntime, serverID dhcp.ServerID, mac net.HardwareAddr, ip string) {
 	t.Helper()
-	if _, err := rt.applyBinding(dhcp.BindingRequest{ServerID: serverID, MAC: mac, IP: netip.MustParseAddr(ip)}, time.Time{}); err != nil {
+	if _, err := rt.applyBinding(dhcp.BindingRequest{ServerID: serverID, MAC: mac, IP: netip.MustParseAddr(ip)}); err != nil {
 		t.Fatalf("applyBinding returned error: %v", err)
 	}
 }

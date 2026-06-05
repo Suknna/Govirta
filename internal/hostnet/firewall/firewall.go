@@ -28,9 +28,18 @@ type Manager interface {
 	//
 	// Implementations return observed firewall state after success rather than a
 	// blind echo of spec.
+	//
+	// Scope: the guard covers untagged IPv4 (EtherType 0x0800) and ARP
+	// (EtherType 0x0806) frames only. VLAN-tagged frames (0x8100) and IPv6
+	// frames are out of scope and are not matched by the guard, so under an
+	// accept default policy they bypass source-MAC/IPv4 enforcement. Callers
+	// that require non-IPv4 or tagged isolation must enforce it separately.
 	EnsureEndpointAntiSpoofing(ctx context.Context, spec EndpointAntiSpoofingSpec) (RuleInfo, error)
 
-	// DeleteEndpointAntiSpoofing removes the endpoint anti-spoofing rule selected by ref.
+	// DeleteEndpointAntiSpoofing removes the endpoint anti-spoofing rule group
+	// selected by ref. ref must carry the GroupKey from the observed RuleInfo
+	// returned by Ensure/List/Get; a missing GroupKey is rejected with an
+	// invalid-request error.
 	DeleteEndpointAntiSpoofing(ctx context.Context, ref RuleRef) error
 
 	// EnsureForwardAccept creates or reconciles the explicit filter-forward
@@ -42,6 +51,9 @@ type Manager interface {
 	EnsureForwardAccept(ctx context.Context, spec ForwardAcceptSpec) (RuleInfo, error)
 
 	// DeleteForwardAccept removes the forward-accept rule group selected by ref.
+	// ref must carry the GroupKey from the observed RuleInfo returned by
+	// Ensure/List/Get; a missing GroupKey is rejected with an invalid-request
+	// error.
 	DeleteForwardAccept(ctx context.Context, ref RuleRef) error
 
 	// GetRule returns the observed firewall rule selected by query.
@@ -98,6 +110,13 @@ type EndpointAntiSpoofingSpec struct {
 
 // RuleRef identifies an existing firewall rule selected by explicit owner,
 // purpose, family, table, chain, and platform rule handle.
+//
+// GroupKey is the stable logical discriminator for behaviors implemented by a
+// multi-rule group (endpoint anti-spoofing, forward-accept); implementations
+// populate it on observed RuleInfo and callers round-trip it back into the
+// matching Delete operation so the group is resolved by stable identity rather
+// than by a platform handle the kernel can renumber. It is empty for
+// single-rule behaviors such as masquerade.
 type RuleRef struct {
 	Owner     RuleOwner
 	Purpose   RulePurpose
@@ -105,6 +124,7 @@ type RuleRef struct {
 	TableName TableName
 	ChainName ChainName
 	Handle    RuleHandle
+	GroupKey  RuleGroupKey
 }
 
 // RuleQuery selects a single observed firewall rule.

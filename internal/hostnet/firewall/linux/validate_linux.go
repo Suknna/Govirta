@@ -18,6 +18,16 @@ func checkContext(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// Canonical Govirta firewall chain priorities, fixed per purpose. Each Govirta
+// behavior installs its rules in a chain at exactly one priority so the relative
+// ordering of NAT, bridge-filter, and forward-filter processing is deterministic
+// and not a caller-tunable knob. validatePriority enforces these exact values.
+const (
+	canonicalSrcNATPriority        = 100
+	canonicalBridgeFilterPriority  = -200
+	canonicalForwardFilterPriority = 0
+)
+
 func validateMasqueradeSpec(ctx context.Context, spec firewall.MasqueradeSpec) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -115,6 +125,21 @@ func validateRuleRef(ctx context.Context, ref firewall.RuleRef, purpose firewall
 	return nil
 }
 
+// validateGroupDeleteRef adds the group-delete precondition on top of the basic
+// rule ref validity check: a multi-rule group delete (endpoint anti-spoofing,
+// forward-accept) resolves the group by its stable logical GroupKey, so the ref
+// must carry one. GetRule is intentionally not subject to this check because it
+// selects a single observed rule by handle.
+func validateGroupDeleteRef(ctx context.Context, ref firewall.RuleRef, purpose firewall.RulePurpose) error {
+	if err := validateRuleRef(ctx, ref, purpose); err != nil {
+		return err
+	}
+	if ref.GroupKey == "" {
+		return invalidRequest("rule group key must be set for group rule deletes")
+	}
+	return nil
+}
+
 func validateRuleQuery(ctx context.Context, query firewall.RuleQuery) error {
 	switch query.Ref.Purpose {
 	case firewall.RulePurposeMasquerade, firewall.RulePurposeEndpointAntiSpoofing, firewall.RulePurposeForwardAccept:
@@ -179,16 +204,16 @@ func validatePriority(priority firewall.Priority, expected firewall.PriorityName
 	}
 	switch expected {
 	case firewall.PriorityNameSrcNAT:
-		if priority.Value != 100 {
-			return invalidRequest("srcnat priority must be 100")
+		if priority.Value != canonicalSrcNATPriority {
+			return invalidRequest("srcnat priority must be %d", canonicalSrcNATPriority)
 		}
 	case firewall.PriorityNameBridgeFilter:
-		if priority.Value != -200 {
-			return invalidRequest("bridge filter priority must be -200")
+		if priority.Value != canonicalBridgeFilterPriority {
+			return invalidRequest("bridge filter priority must be %d", canonicalBridgeFilterPriority)
 		}
 	case firewall.PriorityNameForwardFilter:
-		if priority.Value != 0 {
-			return invalidRequest("forward filter priority must be 0")
+		if priority.Value != canonicalForwardFilterPriority {
+			return invalidRequest("forward filter priority must be %d", canonicalForwardFilterPriority)
 		}
 	default:
 		return invalidRequest("unsupported priority name")
