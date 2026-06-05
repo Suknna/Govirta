@@ -28,6 +28,10 @@ type fakeController struct {
 	killCalls   int
 	removeCalls int
 
+	// spawnHook 在 SpawnDaemonized 成功返回前调用，供测试模拟「daemonize 后
+	// 进程变为存活」（spawn 成功后标记 pidfile 存活）。
+	spawnHook func()
+
 	// 可编程错误注入。
 	spawnErr            error
 	aliveErr            error
@@ -55,6 +59,9 @@ func (f *fakeController) SpawnDaemonized(ctx context.Context, argv []string, run
 	f.spawnedArgv = append(f.spawnedArgv, cp)
 	if f.spawnErr != nil {
 		return f.spawnErr
+	}
+	if f.spawnHook != nil {
+		f.spawnHook()
 	}
 	return nil
 }
