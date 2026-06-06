@@ -210,6 +210,53 @@ func RunStoreContract(t *testing.T, newStore func() Store) {
 			t.Fatalf("Watch: channel did not close after context cancel (timeout)")
 		}
 	})
+
+	t.Run("WatchResumeReplaysRealEventSequence", func(t *testing.T) {
+		t.Helper()
+		s := newStore()
+		defer s.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Produce a known sequence before any watch exists. The resume point is
+		// the revision returned by the modify; events strictly after it must be
+		// replayed in order, preserving their original type.
+		first, err := s.Put(ctx, "/govirta/pod/a", []byte(`{"v":1}`), "")
+		if err != nil {
+			t.Fatalf("Put add a: unexpected error: %v", err)
+		}
+		modified, err := s.Put(ctx, "/govirta/pod/a", []byte(`{"v":2}`), first.ResourceVersion)
+		if err != nil {
+			t.Fatalf("Put modify a: unexpected error: %v", err)
+		}
+		// resumeFrom marks the last change the consumer already saw.
+		resumeFrom := modified.ResourceVersion
+		if err := s.Delete(ctx, "/govirta/pod/a"); err != nil {
+			t.Fatalf("Delete a: unexpected error: %v", err)
+		}
+		if _, err := s.Put(ctx, "/govirta/pod/b", []byte(`{"v":1}`), ""); err != nil {
+			t.Fatalf("Put add b: unexpected error: %v", err)
+		}
+
+		// Resuming from resumeFrom must replay the real events after it
+		// (DELETED a, then ADDED b), with types preserved — not a current-state
+		// snapshot. This is the authoritative etcd resume behavior; the fake
+		// mirrors it, so both implementations are interchangeable on resume.
+		ch, err := s.Watch(ctx, "/govirta/pod/", resumeFrom)
+		if err != nil {
+			t.Fatalf("Watch resume: unexpected error: %v", err)
+		}
+
+		ev1 := recvEvent(t, ctx, ch)
+		if ev1.Type != EventDeleted || ev1.Object.Key != "/govirta/pod/a" {
+			t.Fatalf("resume event 1 = %+v, want DELETED for /govirta/pod/a", ev1)
+		}
+		ev2 := recvEvent(t, ctx, ch)
+		if ev2.Type != EventAdded || ev2.Object.Key != "/govirta/pod/b" {
+			t.Fatalf("resume event 2 = %+v, want ADDED for /govirta/pod/b", ev2)
+		}
+	})
 }
 
 // recvEvent receives one WatchEvent or fails if the context expires first.

@@ -41,6 +41,13 @@ type Store struct {
 	// done is closed by Close to unblock and terminate every watcher pump
 	// goroutine, which then closes its outbound channel.
 	done chan struct{}
+	// history is an append-only log of every watch event ever broadcast, in
+	// revision order. A non-empty startRevision Watch replays the real event
+	// sequence (ADDED/MODIFIED/DELETED, preserving type) at revisions greater
+	// than startRevision, mirroring etcd's WithRev(from+1) MVCC replay so the
+	// fake and the etcd store are interchangeable on the resume path too. It is
+	// intentionally unbounded: a test fake never compacts, unlike real etcd.
+	history []store.WatchEvent
 }
 
 // New returns an empty in-memory Store ready for concurrent use.
@@ -207,24 +214,27 @@ func (s *Store) Watch(ctx context.Context, prefix string, startRevision string) 
 		notify: make(chan struct{}, 1),
 	}
 
-	// Optional catch-up replay for a non-empty startRevision. Empty means "from
-	// now", so we skip replay to honor the Task 1 contract semantics exactly.
+	// Catch-up replay for a non-empty startRevision. Empty means "from now", so
+	// we skip replay to honor the Task 1 contract semantics exactly. For a
+	// non-empty startRevision we replay the real recorded event sequence whose
+	// revision is greater than startRevision, preserving each event's original
+	// type (ADDED/MODIFIED/DELETED). This matches the etcd store, which resumes
+	// from the MVCC history via WithRev(startRevision+1); a reconnecting consumer
+	// sees the same event stream from either implementation (single source of
+	// truth: the etcd behavior is authoritative and the fake mirrors it).
 	if startRevision != "" {
 		if from, err := strconv.ParseInt(startRevision, 10, 64); err == nil {
-			keys := make([]string, 0, len(s.data))
-			for k := range s.data {
-				if strings.HasPrefix(k, prefix) {
-					keys = append(keys, k)
+			for _, ev := range s.history {
+				if !strings.HasPrefix(ev.Object.Key, prefix) {
+					continue
 				}
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				obj := s.data[k]
-				if rv, perr := strconv.ParseInt(obj.ResourceVersion, 10, 64); perr == nil && rv > from {
-					replay := obj
-					replay.Value = append([]byte(nil), obj.Value...)
-					w.enqueue(store.WatchEvent{Type: store.EventAdded, Object: replay})
+				rv, perr := strconv.ParseInt(ev.Object.ResourceVersion, 10, 64)
+				if perr != nil || rv <= from {
+					continue
 				}
+				replay := ev
+				replay.Object.Value = append([]byte(nil), ev.Object.Value...)
+				w.enqueue(replay)
 			}
 		}
 	}
@@ -260,11 +270,12 @@ func (s *Store) WatcherCount() int {
 	return len(s.watchers)
 }
 
-// broadcastLocked enqueues ev to every watcher whose prefix matches the event's
-// key. It must be called with s.mu held so revision order is preserved across
-// watchers. Enqueue is non-blocking, so holding the store lock here cannot
-// stall on a slow consumer.
+// broadcastLocked records ev in the history log and enqueues it to every
+// watcher whose prefix matches the event's key. It must be called with s.mu held
+// so revision order is preserved across watchers and history. Enqueue is
+// non-blocking, so holding the store lock here cannot stall on a slow consumer.
 func (s *Store) broadcastLocked(ev store.WatchEvent) {
+	s.history = append(s.history, ev)
 	for w := range s.watchers {
 		if strings.HasPrefix(ev.Object.Key, w.prefix) {
 			w.enqueue(ev)
