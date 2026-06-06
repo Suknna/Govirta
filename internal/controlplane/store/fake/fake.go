@@ -251,6 +251,15 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// WatcherCount reports the number of live watcher subscriptions. It exists for
+// tests that assert the store sheds a watcher after its consumer's ctx is done,
+// proving the watch handler tears down rather than leaking a goroutine.
+func (s *Store) WatcherCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.watchers)
+}
+
 // broadcastLocked enqueues ev to every watcher whose prefix matches the event's
 // key. It must be called with s.mu held so revision order is preserved across
 // watchers. Enqueue is non-blocking, so holding the store lock here cannot

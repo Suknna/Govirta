@@ -26,7 +26,9 @@ const resourceVersionHeader = "X-Resource-Version"
 // the store with no caching, so a read always reflects the latest committed write.
 func (s *Server) getHandler(mux *http.ServeMux) {
 	mux.HandleFunc("GET /apis/{kind}/{name}", s.Get)
-	mux.HandleFunc("GET /apis/{kind}", s.List)
+	// GET /apis/{kind} is list-or-watch: a watch=true query opens a streaming
+	// watch, otherwise it lists the collection (ServeMux cannot route on a query).
+	mux.HandleFunc("GET /apis/{kind}", s.ListOrWatch)
 }
 
 // Get fetches a single object by kind/name and writes its raw stored JSON with
