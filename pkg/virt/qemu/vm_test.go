@@ -91,6 +91,102 @@ func TestVMArgvBuildsRequiredQEMUCommand(t *testing.T) {
 	}
 }
 
+func TestVMArgvRendersRuntimeFacilityFlags(t *testing.T) {
+	// 验证 vmm 依赖的运行时设施 flag：-serial file:、-vnc unix:、-daemonize，
+	// 以及它们与 -pidfile 的渲染顺序（pidfile → vnc → daemonize，聚集在尾部）。
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		CPU(cpu.ModelHost).
+		Memory(qemu.MiB(512)).
+		AddChardev(chardev.Socket{
+			ID: "vmm-qmp", Path: "/var/lib/govirtlet/vm-1/qmp.sock",
+			Server: qemu.On, Wait: qemu.Off,
+		}).
+		Monitor(monitor.Monitor{Chardev: chardev.Ref("vmm-qmp"), Mode: monitor.ModeControl}).
+		Serial(serial.File("/var/lib/govirtlet/vm-1/console.log")).
+		PidFile("/var/lib/govirtlet/vm-1/qemu.pid").
+		VNC(display.VNCUnixSocket("/var/lib/govirtlet/vm-1/vnc.sock")).
+		Daemonize().
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{
+		"qemu-system-x86_64",
+		"-cpu", "host",
+		"-m", "size=512",
+		"-chardev", "socket,id=vmm-qmp,path=/var/lib/govirtlet/vm-1/qmp.sock,server=on,wait=off",
+		"-mon", "chardev=vmm-qmp,mode=control",
+		"-serial", "file:/var/lib/govirtlet/vm-1/console.log",
+		"-pidfile", "/var/lib/govirtlet/vm-1/qemu.pid",
+		"-vnc", "unix:/var/lib/govirtlet/vm-1/vnc.sock",
+		"-daemonize",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() =\n%s\nwant\n%s", strings.Join(argv, " "), strings.Join(want, " "))
+	}
+}
+
+func TestVMArgvRendersDirectKernelBoot(t *testing.T) {
+	// 验证 direct-kernel boot flag：-kernel/-initrd/-append，渲染在 -m 之后、
+	// ordered 参数之前。用于 cirros aarch64 等无 EFI bootloader 的镜像。
+	vm, err := qemu.NewVM(qemu.ArchAArch64).
+		CPU(cpu.ModelHost).
+		Memory(qemu.MiB(256)).
+		Kernel("/images/cirros-kernel").
+		Initrd("/images/cirros-initramfs").
+		Append("console=ttyAMA0 ds=none").
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{
+		"qemu-system-aarch64",
+		"-cpu", "host",
+		"-m", "size=256",
+		"-kernel", "/images/cirros-kernel",
+		"-initrd", "/images/cirros-initramfs",
+		"-append", "console=ttyAMA0 ds=none",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() =\n%s\nwant\n%s", strings.Join(argv, " "), strings.Join(want, " "))
+	}
+}
+
+func TestBuildRejectsInitrdOrAppendWithoutKernel(t *testing.T) {
+	cases := []struct {
+		name string
+		make func() (qemu.VM, error)
+	}{
+		{
+			name: "initrd_without_kernel",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchAArch64).Initrd("/images/initramfs").Build()
+			},
+		},
+		{
+			name: "append_without_kernel",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchAArch64).Append("console=ttyAMA0").Build()
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.make()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+		})
+	}
+}
+
 func TestVMArgvRendersExplicitNoNIC(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchAArch64).
 		Machine(machine.ProfileAArch64VirtKVM).
@@ -370,6 +466,22 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 			make: func() (qemu.VM, error) {
 				return qemu.NewVM(qemu.ArchX86_64).
 					Name("vm", nil).
+					Build()
+			},
+		},
+		{
+			name: "vnc_socket_with_comma",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					VNC(display.VNCUnixSocket("/run/a,b.sock")).
+					Build()
+			},
+		},
+		{
+			name: "serial_file_empty",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					Serial(serial.File("")).
 					Build()
 			},
 		},
