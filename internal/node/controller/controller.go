@@ -24,9 +24,14 @@ const (
 // object's raw JSON (the framework never parses it); Key is the dedup identity
 // (the object's name within its kind).
 type Event struct {
-	Type   EventType
-	Key    string
-	Object []byte
+	Type EventType
+	Key  string
+	// ResourceVersion is the watched object's metadata.resourceVersion, filled by
+	// the watch EventSource when translating a wire event. The manager's feeder
+	// records it as the resume cursor (startRevision) so a reconnect can resume
+	// after the last version seen rather than replaying from the beginning.
+	ResourceVersion string
+	Object          []byte
 }
 
 // Controller reconciles one resource kind toward its spec. Kind names the apis
