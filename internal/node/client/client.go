@@ -48,7 +48,7 @@ func New(baseURL string, hc *http.Client) *Client {
 // dependency gating can treat a missing object distinctly; on any other non-2xx
 // it returns a wrapped error carrying the status. The returned bytes are the
 // object's raw JSON, left for the caller to decode.
-func (c *Client) Get(ctx context.Context, kind, name string) ([]byte, error) {
+func (c *Client) Get(ctx context.Context, kind, name string) (out []byte, err error) {
 	path := "/apis/" + url.PathEscape(kind) + "/" + url.PathEscape(name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
@@ -59,6 +59,9 @@ func (c *Client) Get(ctx context.Context, kind, name string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node/client: get %s/%s: %w", kind, name, err)
 	}
+	// Named returns + bare-style returns so a body-close failure joins into err on
+	// every path, including success (项目铁律: 不吞 close 错误). A plain
+	// `return body, nil` would discard the deferred close error.
 	defer closeBody(resp.Body, &err)
 
 	if resp.StatusCode == http.StatusNotFound {
@@ -68,17 +71,17 @@ func (c *Client) Get(ctx context.Context, kind, name string) ([]byte, error) {
 		return nil, statusError("get", kind, name, resp)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	out, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("node/client: read get %s/%s body: %w", kind, name, err)
 	}
-	return body, nil
+	return out, err
 }
 
 // List reads all objects of a kind. The returned bytes are the raw JSON array
 // the apiserver emits, left for the caller to decode. A non-2xx status yields a
 // wrapped error.
-func (c *Client) List(ctx context.Context, kind string) ([]byte, error) {
+func (c *Client) List(ctx context.Context, kind string) (out []byte, err error) {
 	path := "/apis/" + url.PathEscape(kind)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
@@ -89,24 +92,25 @@ func (c *Client) List(ctx context.Context, kind string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node/client: list %s: %w", kind, err)
 	}
+	// Named returns so a body-close failure joins into err on the success path too.
 	defer closeBody(resp.Body, &err)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, statusError("list", kind, "", resp)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	out, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("node/client: read list %s body: %w", kind, err)
 	}
-	return body, nil
+	return out, err
 }
 
 // PatchStatus reports an object's status up to the master by PATCHing the
 // /status sub-resource. status is the raw JSON patch body (the client never
 // constructs it). It returns the apiserver's response bytes on success and a
 // wrapped error — including the response body text for diagnosis — on any non-2xx.
-func (c *Client) PatchStatus(ctx context.Context, kind, name string, status []byte) ([]byte, error) {
+func (c *Client) PatchStatus(ctx context.Context, kind, name string, status []byte) (out []byte, err error) {
 	path := "/apis/" + url.PathEscape(kind) + "/" + url.PathEscape(name) + "/status"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+path, bytes.NewReader(status))
 	if err != nil {
@@ -118,16 +122,17 @@ func (c *Client) PatchStatus(ctx context.Context, kind, name string, status []by
 	if err != nil {
 		return nil, fmt.Errorf("node/client: patch status %s/%s: %w", kind, name, err)
 	}
+	// Named returns so a body-close failure joins into err on the success path too.
 	defer closeBody(resp.Body, &err)
 
-	body, err := io.ReadAll(resp.Body)
+	out, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("node/client: read patch-status %s/%s body: %w", kind, name, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("node/client: patch status %s/%s: unexpected status %d: %s", kind, name, resp.StatusCode, bytes.TrimSpace(body))
+		return nil, fmt.Errorf("node/client: patch status %s/%s: unexpected status %d: %s", kind, name, resp.StatusCode, bytes.TrimSpace(out))
 	}
-	return body, nil
+	return out, err
 }
 
 // statusError builds the wrapped error for a non-2xx response, including the
