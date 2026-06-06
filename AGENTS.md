@@ -1,12 +1,12 @@
 # PROJECT AGENTS KNOWLEDGE BASE
 
-**Generated:** 2026-06-05
-**Commit:** ec0c430
+**Generated:** 2026-06-06
+**Commit:** 3804ad0
 **Branch:** main
 
 <!--
 Verified-against:
-  base_commit: ec0c430
+  base_commit: 3804ad0
   files:
     - cmd/govirtad/main.go
     - cmd/govirtlet/main.go
@@ -417,7 +417,7 @@ Govirta/
 | `pool.Service` | struct | `internal/storage/pool/service.go:17` | pool registry, capacity accounting, in-memory indexes |
 | `local.Driver` | struct | `internal/storage/local/driver.go:41` | host-local qcow2 block driver using qemu-img |
 | `localfile.Driver` | struct | `internal/storage/localfile/driver.go:42` | host-local raw/qcow2 image byte store |
-| `qemu.NewVM` / `Builder.Build` / `VM.Argv` | funcs/methods | `pkg/virt/qemu/vm.go:185-394` | typed VM composition → deterministic QEMU argv |
+| `qemu.NewVM` / `Builder.Build` / `VM.Argv` | funcs/methods | `pkg/virt/qemu/vm.go:192-446` | typed VM composition → deterministic QEMU argv |
 | `qemuimg.NewClient` | func | `pkg/virt/qemuimg/client.go:81` | qemu-img client 聚合入口 |
 | `imgexec.Runner.Run` | interface | `pkg/virt/qemuimg/internal/exec/exec.go:18` | binary + `[]string` 外部命令执行边界 |
 | `version.String` | func | `internal/version/version.go:12` | 拼接 `"govirta 0.1.0-dev"` |
@@ -453,7 +453,7 @@ Govirta/
   7. (future) `pkg/virt/qmp/client.go:81 (SocketClient.Connect)` — 连接 QMP unix socket [详见 `pkg/virt/qmp/AGENTS.md#flow-qmp-ready`]
   8. (future) `internal/network/service.go:33 (NetworkService.EnsureNetwork)` — 未来用真实 netlink/nftables/CoreDHCP 原语替换 no-op，编排 guest egress 闭环 [详见 `internal/network/AGENTS.md#flow-network-ensure`]
   9. (future) `internal/storage/service.go:179 (VolumeService.PublishVolume)` — 获取 root disk file attachment [详见 `internal/storage/AGENTS.md#flow-storage-volume`]
- 10. (future) `pkg/virt/qemu/vm.go:354 (VM.Argv)` — 构建 QEMU argv 并 spawn 子进程 [详见 `pkg/virt/qemu/AGENTS.md#flow-argv-build`]
+ 10. (future) `pkg/virt/qemu/vm.go:389 (VM.Argv)` — 构建 QEMU argv 并 spawn 子进程 [详见 `pkg/virt/qemu/AGENTS.md#flow-argv-build`]
 - Data: `context.Context` + 注入的 `qmp.Client` / `NetworkService` / `NICService`；未来会接收 VM spec + storage attachment
 - Boundaries: 当前 in-proc no-op；未来跨进程 QMP unix socket、QEMU 子进程、内核 bridge/TAP
 - Sinks: 当前仅启动日志；未来 sinks 包括 QMP 命令、netlink 操作、QEMU 子进程生命周期
@@ -474,7 +474,7 @@ Govirta/
 - Cross-module chain:
   1. `cmd/qemucli/main.go:24 (main → buildDefaultArgv)` — 进入本地辅助函数
   2. `cmd/qemucli/main.go:35 (buildDefaultArgv)` — 构造 typed VM 链式调用 [详见 `pkg/virt/qemu/AGENTS.md#flow-argv-build`]
-  3. `pkg/virt/qemu/vm.go:185 (NewVM)` → `Builder.<setters>` → `Build()` → `VM.Argv()` 返回 `[]string`
+  3. `pkg/virt/qemu/vm.go:192 (NewVM)` → `Builder.<setters>` → `Build()` → `VM.Argv()` 返回 `[]string`
   4. `cmd/qemucli/main.go:29 (main)` — `fmt.Println(strings.Join(argv, " "))`
 - Data: `qemu.Arch` → `*Builder` → `VM` → `[]string` argv → 单行字符串
 - Boundaries: 同步、单进程；不调用 `os/exec`，不启动 QEMU

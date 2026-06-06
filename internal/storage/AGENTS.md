@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: ec0c430
+  base_commit: 3804ad0
   files:
     - internal/storage/service.go
     - internal/storage/image_service.go

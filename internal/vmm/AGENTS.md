@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: a240be0
+  base_commit: 3804ad0
   files:
     - internal/vmm/service.go
     - internal/vmm/lifecycle.go
@@ -64,7 +64,7 @@ Recovery is kubelet-shaped: `Discover` enumerates live actual VMs (CRI-list role
 | Task | Location | Notes |
 | --- | --- | --- |
 | Service struct + Create + Delete | `service.go` | `VMMService`; `NewVMMService(runtimeRoot, proc, qmpFactory)`; `QMPFactory` type |
-| Start / Stop / Kill | `lifecycle.go` | `Start` (spawn persisted argv), `Stop` (QMP `system_powerdown`), `Kill` (QMP `quit` → SIGKILL fallback) |
+| Start / Stop / Kill | `lifecycle.go` | `Start` (spawn persisted argv), `Stop` (best-effort QMP `system_powerdown`), `Kill` (QMP `quit` → SIGKILL fallback, guaranteed stop) |
 | Status / List / Discover / Reattach | `discover.go` | live probe (`probe`/`statusFrom`), `Discover` scan, `Reattach` adopt-live-only |
 | Phase derivation (pure) | `state.go` | `derivePhase`/`observedPhase`; live wins over intent |
 | vm.json encode/decode + persistence | `store.go` | `encodeState`/`decodeState`/`writeState`/`loadState` |
@@ -87,9 +87,9 @@ Recovery is kubelet-shaped: `Discover` enumerates live actual VMs (CRI-list role
 | `QMPFactory` | type | `service.go:15` | `func(socketPath) (qmp.Client, error)`; transient per-op client |
 | `VMMService.Create` | method | `service.go:47` | inject facility flags → Build → persist argv + `IntendedDefined`; duplicate UUID → `ErrAlreadyExists` |
 | `VMMService.Delete` | method | `service.go:87` | requires no live process else `ErrConflict`; removes whole runtime dir |
-| `VMMService.Start` | method | `lifecycle.go:11` | spawn persisted daemonized argv, wait QMP ready, `IntendedRunning`; idempotent when already alive |
-| `VMMService.Stop` | method | `lifecycle.go:49` | QMP `system_powerdown`, `IntendedStopped` |
-| `VMMService.Kill` | method | `lifecycle.go:75` | QMP `quit`; unreachable → `ForceKill` SIGKILL; both fail → `errors.Join` |
+| `VMMService.Start` | method | `lifecycle.go:13` | spawn persisted daemonized argv, wait QMP ready, `IntendedRunning`; idempotent when already alive |
+| `VMMService.Stop` | method | `lifecycle.go:50` | QMP `system_powerdown` (best-effort ACPI), `IntendedStopped`; phase stays `Stopping` until guest actually exits |
+| `VMMService.Kill` | method | `lifecycle.go:77` | QMP `quit`; unreachable → `ForceKill` SIGKILL; both fail → `errors.Join` |
 | `VMMService.Status` | method | `discover.go:55` | single-VM live probe → derived `Phase` |
 | `VMMService.Discover` | method | `discover.go:64` | scan runtimeRoot, load each vm.json, live-verify; skips undiscoverable dirs; sorted by UUID |
 | `VMMService.Reattach` | method | `discover.go:96` | adopt live process only; dead → `ErrNotReady`, never spawns |
@@ -149,11 +149,11 @@ Conflict arbitration: `intent=Running` + process gone → `Failed` (never report
   4. `internal/vmm/store.go:37 (Create → writeState)` — atomic persist of `persistedState` with `IntendedDefined`
 - Data: `CreateRequest{UUID, *qemu.Builder, SpecSummary}` → facility-injected `[]string` argv → `persistedState` (vm.json)
 - Side effects: one `vm.json` written atomically; no process spawned
-- Exit / next hop: `pkg/virt/qemu/vm.go:324 (Builder.Build)` → `vm.go:384 (VM.Argv)` [详见 `../../pkg/virt/qemu/AGENTS.md#flow-argv-build`]
+- Exit / next hop: `pkg/virt/qemu/vm.go:324 (Builder.Build)` → `vm.go:389 (VM.Argv)` [详见 `../../pkg/virt/qemu/AGENTS.md#flow-argv-build`]
 
 ### Flow: VM start {#flow-vmm-start}
 
-- Entry: `internal/vmm/lifecycle.go:11 (VMMService.Start)` (caller wants a defined VM running)
+- Entry: `internal/vmm/lifecycle.go:13 (VMMService.Start)` (caller wants a defined VM running)
 - Local chain:
   1. `internal/vmm/lifecycle.go:15 (Start → loadState)` — read vm.json (missing → `ErrNotFound`)
   2. `internal/vmm/lifecycle.go:19 (Start → proc.ProcessAlive)` — already alive → idempotent `statusFrom` return, no re-spawn
@@ -182,4 +182,5 @@ Conflict arbitration: `intent=Running` + process gone → `Failed` (never report
 - Builder extension for this layer (`pkg/virt/qemu`): added `Daemonize()`, `VNC(display.VNCUnix)`, `serial.File(path)`, and typed direct-kernel boot (`Kernel`/`Initrd`/`Append`). Direct-kernel boot was required because cirros aarch64 has no EFI bootloader and cannot boot standalone from disk; every acceptance test boots via `-kernel`/`-initrd`/`-append`.
 - Out of scope (deferred): reconcile loop (upper `internal/node`), fencing token / STONITH strong-consistency double-write prevention, VNC byte-stream proxy/websocket, cold snapshot/resize/config edit, control-plane etcd integration.
 - Verification: `go test -race -count=1 ./internal/vmm/...` (fake `ProcessController` + fake `qmp.Client`, full phase-derivation table, lifecycle, anti-split-brain guard, ctx cancellation); Lima-only `TestVMMLifecycleEndToEnd` + `TestVMMDiscoverNeverRestartsDeadVM` (`test/acceptance/vmm_lifecycle_test.go`) prove real daemonize/QMP/powerdown/kill/discover/reattach and the never-auto-restart guard on a real kernel.
+- Graceful Stop is best-effort, matching libvirt/Proxmox/kubevirt: QMP `system_powerdown` only injects an ACPI power-button event and returns immediately; whether the guest exits depends on guest ACPI cooperation. direct-kernel cirros aarch64 has no UEFI/ACPI, so the acceptance test asserts only that Stop is accepted, intent lands `Stopped`, and phase ∈ {`Stopping`, `Stopped`} — never that the guest truly exits. Guaranteed stop is `Kill` (QMP `quit`, no guest cooperation); upper layers own the Stop→Kill grace-period escalation.
 - Evidence: direct source reads + AFT outline for symbol/line confirmation at `base_commit a240be0`. `[已验证]` 源码与单测断言；Lima acceptance 为真实内核网关。`[降级: LSP call hierarchy]`.

@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: ec0c430
+  base_commit: 3804ad0
   files:
     - pkg/virt/qemu/vm.go
     - pkg/virt/qemuimg/client.go
