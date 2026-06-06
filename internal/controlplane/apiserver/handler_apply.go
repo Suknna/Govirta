@@ -71,6 +71,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /apis/{kind}/{name}", s.Apply)
 	mux.HandleFunc("PUT /apis/{kind}/{name}", s.Apply)
+	// Read routes (get/list) are registered alongside apply so a single
+	// Handler() serves the full /apis surface.
+	s.getHandler(mux)
 	return mux
 }
 

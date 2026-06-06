@@ -368,3 +368,117 @@ func TestApplyUnknownKindNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// doGet issues GET against path through the server's handler and returns the
+// recorded response.
+func doGet(t *testing.T, srv *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestGetHitReturnsStoredObject(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	obj := validStoragePool()
+	if rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool)+"/"+obj.Name)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The body is the raw stored JSON; it must decode back to the same object.
+	var got storagepoolv1.StoragePool
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Name != obj.Name {
+		t.Fatalf("response name = %q, want %q", got.Name, obj.Name)
+	}
+	if got.Spec.StorageRoot != obj.Spec.StorageRoot {
+		t.Fatalf("response storageRoot = %q, want %q", got.Spec.StorageRoot, obj.Spec.StorageRoot)
+	}
+
+	// ResourceVersion is store metadata, not part of the persisted object bytes
+	// (Apply assigns it only on its own response), so the get body — a verbatim
+	// pass-through of the stored JSON — carries none. The version is surfaced on
+	// the X-Resource-Version header instead, and must be the store-assigned value.
+	if hv := rec.Header().Get(resourceVersionHeader); hv == "" {
+		t.Fatalf("%s header is empty; expected store-assigned ResourceVersion", resourceVersionHeader)
+	}
+}
+
+func TestGetMissingReturns404(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool)+"/nonexistent")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+}
+
+func TestGetListEmptyReturnsEmptyArray(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Hard requirement: an empty collection is "[]", never "null".
+	if body := bytes.TrimSpace(rec.Body.Bytes()); !bytes.Equal(body, []byte("[]")) {
+		t.Fatalf("empty list body = %q, want %q", body, "[]")
+	}
+
+	var arr []storagepoolv1.StoragePool
+	if err := json.Unmarshal(rec.Body.Bytes(), &arr); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(arr) != 0 {
+		t.Fatalf("empty list len = %d, want 0", len(arr))
+	}
+}
+
+func TestGetListReturnsSortedByName(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	// Seed out of order; store.List sorts by key (/govirta/<kind>/<name>), so the
+	// response array must come back ordered by name regardless of insertion order.
+	names := []string{"pool-c", "pool-a", "pool-b"}
+	for _, n := range names {
+		obj := validStoragePool()
+		obj.Name = n
+		obj.UID = "uid-" + n
+		if rec := doApply(t, srv, metav1.KindStoragePool, n, obj); rec.Code != http.StatusCreated {
+			t.Fatalf("seed apply %q status = %d, want 201; body=%s", n, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var arr []storagepoolv1.StoragePool
+	if err := json.Unmarshal(rec.Body.Bytes(), &arr); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+
+	want := []string{"pool-a", "pool-b", "pool-c"}
+	if len(arr) != len(want) {
+		t.Fatalf("list len = %d, want %d", len(arr), len(want))
+	}
+	for i, w := range want {
+		if arr[i].Name != w {
+			t.Fatalf("list[%d].Name = %q, want %q", i, arr[i].Name, w)
+		}
+	}
+}
