@@ -74,6 +74,9 @@ func (s *Server) Handler() http.Handler {
 	// Read routes (get/list) are registered alongside apply so a single
 	// Handler() serves the full /apis surface.
 	s.getHandler(mux)
+	// Status sub-resource (up-reconcile) shares the same Handler() so node
+	// status reports land on the one /apis surface as apply and get.
+	s.statusHandler(mux)
 	return mux
 }
 
