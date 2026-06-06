@@ -175,7 +175,12 @@ type Builder struct {
 	pidFile    string
 	vnc        *display.VNCUnix
 	daemonize  bool
-	err        error
+	// 直接内核引导（direct-kernel boot）：cirros aarch64 等无 EFI bootloader
+	// 的镜像无法从磁盘独立启动，必须经 -kernel/-initrd/-append 引导。空串视为未设。
+	kernel        string
+	initrd        string
+	appendCmdline string
+	err           error
 }
 
 type VM struct{ builder Builder }
@@ -306,6 +311,16 @@ func (b *Builder) Daemonize() *Builder { b.daemonize = true; return b }
 // 网络端点（spec Q54-A 安全约束）。
 func (b *Builder) VNC(v display.VNCUnix) *Builder { b.vnc = &v; return b }
 
+// Kernel 渲染 -kernel <path>，指定 direct-kernel boot 的内核镜像。
+// 用于 cirros aarch64 等无 EFI bootloader、无法从磁盘独立启动的镜像。
+func (b *Builder) Kernel(path string) *Builder { b.kernel = path; return b }
+
+// Initrd 渲染 -initrd <path>，指定 direct-kernel boot 的 initramfs。
+func (b *Builder) Initrd(path string) *Builder { b.initrd = path; return b }
+
+// Append 渲染 -append <cmdline>，指定 direct-kernel boot 的内核命令行。
+func (b *Builder) Append(cmdline string) *Builder { b.appendCmdline = cmdline; return b }
+
 func (b *Builder) Build() (VM, error) {
 	if b.err != nil {
 		return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, b.err)
@@ -350,6 +365,11 @@ func (b *Builder) Build() (VM, error) {
 	if b.noNIC && b.network {
 		return VM{}, fmt.Errorf("%w: NoNIC cannot be combined with explicit network devices", ErrInvalidVM)
 	}
+	// 直接内核引导：-initrd / -append 依赖 -kernel，缺少 -kernel 时它们无意义，
+	// 拒绝以免渲染出无法引导的 argv。
+	if b.kernel == "" && (b.initrd != "" || b.appendCmdline != "") {
+		return VM{}, fmt.Errorf("%w: initrd/append require kernel", ErrInvalidVM)
+	}
 	for _, entry := range b.ordered {
 		if !validArgument(entry) {
 			if err := argumentError(entry); err != nil {
@@ -383,6 +403,15 @@ func (v VM) Argv() []string {
 	}
 	if b.memory != nil {
 		argv = append(argv, "-m", "size="+strconv.Itoa(b.memory.MiB))
+	}
+	if b.kernel != "" {
+		argv = append(argv, "-kernel", b.kernel)
+	}
+	if b.initrd != "" {
+		argv = append(argv, "-initrd", b.initrd)
+	}
+	if b.appendCmdline != "" {
+		argv = append(argv, "-append", b.appendCmdline)
 	}
 	for _, entry := range b.ordered {
 		argv = entry.appendArgv(argv)

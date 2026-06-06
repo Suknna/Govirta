@@ -128,6 +128,65 @@ func TestVMArgvRendersRuntimeFacilityFlags(t *testing.T) {
 	}
 }
 
+func TestVMArgvRendersDirectKernelBoot(t *testing.T) {
+	// 验证 direct-kernel boot flag：-kernel/-initrd/-append，渲染在 -m 之后、
+	// ordered 参数之前。用于 cirros aarch64 等无 EFI bootloader 的镜像。
+	vm, err := qemu.NewVM(qemu.ArchAArch64).
+		CPU(cpu.ModelHost).
+		Memory(qemu.MiB(256)).
+		Kernel("/images/cirros-kernel").
+		Initrd("/images/cirros-initramfs").
+		Append("console=ttyAMA0 ds=none").
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{
+		"qemu-system-aarch64",
+		"-cpu", "host",
+		"-m", "size=256",
+		"-kernel", "/images/cirros-kernel",
+		"-initrd", "/images/cirros-initramfs",
+		"-append", "console=ttyAMA0 ds=none",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() =\n%s\nwant\n%s", strings.Join(argv, " "), strings.Join(want, " "))
+	}
+}
+
+func TestBuildRejectsInitrdOrAppendWithoutKernel(t *testing.T) {
+	cases := []struct {
+		name string
+		make func() (qemu.VM, error)
+	}{
+		{
+			name: "initrd_without_kernel",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchAArch64).Initrd("/images/initramfs").Build()
+			},
+		},
+		{
+			name: "append_without_kernel",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchAArch64).Append("console=ttyAMA0").Build()
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.make()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+		})
+	}
+}
+
 func TestVMArgvRendersExplicitNoNIC(t *testing.T) {
 	vm, err := qemu.NewVM(qemu.ArchAArch64).
 		Machine(machine.ProfileAArch64VirtKVM).
