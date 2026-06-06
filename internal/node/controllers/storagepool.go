@@ -14,6 +14,8 @@ import (
 
 	"github.com/suknna/govirta/internal/node/client"
 	"github.com/suknna/govirta/internal/node/controller"
+	"github.com/suknna/govirta/internal/storage/local"
+	"github.com/suknna/govirta/internal/storage/localfile"
 	"github.com/suknna/govirta/internal/storage/pool"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
@@ -158,8 +160,12 @@ func (c *StoragePoolController) patchStatus(ctx context.Context, name string, st
 }
 
 // buildPool maps a StoragePool object into a pool.Pool, converting the backend
-// and type enums explicitly (no blind string conversion). The returned pool
-// carries only configuration; backend driver wiring is a later slice.
+// and type enums explicitly (no blind string conversion) and attaching the
+// matching host-local driver. pool.Service.RegisterPool requires a block pool to
+// carry a block.Driver and a file pool to carry an image.Driver, so the driver
+// is wired here rather than left nil. Backends with no host-local driver
+// implementation in this phase (nfs-block / rbd-block) are a permanent config
+// failure: the node cannot serve them yet.
 func buildPool(sp storagepoolv1.StoragePool) (*pool.Pool, error) {
 	backend, err := mapBackend(sp.Spec.Backend)
 	if err != nil {
@@ -169,7 +175,8 @@ func buildPool(sp storagepoolv1.StoragePool) (*pool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &pool.Pool{
+
+	p := &pool.Pool{
 		Config: pool.Config{
 			Name:          sp.Name,
 			Type:          poolType,
@@ -177,7 +184,36 @@ func buildPool(sp storagepoolv1.StoragePool) (*pool.Pool, error) {
 			StorageRoot:   sp.Spec.StorageRoot,
 			CapacityBytes: sp.Spec.CapacityBytes,
 		},
-	}, nil
+	}
+
+	// Attach the host-local driver the pool type requires. Only local backends
+	// have a driver implementation in this phase; nfs/rbd are rejected as
+	// permanent config errors rather than registered without a working driver.
+	switch backend {
+	case pool.BackendLocalBlock:
+		drv, derr := local.NewDriver(local.Config{
+			PoolName:    sp.Name,
+			StorageRoot: sp.Spec.StorageRoot,
+		})
+		if derr != nil {
+			return nil, fmt.Errorf("%w: build local block driver for %q: %v", errUnsupportedBackend, sp.Name, derr)
+		}
+		p.Driver = drv
+	case pool.BackendLocalFile:
+		drv, derr := localfile.NewDriver(localfile.Config{
+			PoolName:    sp.Name,
+			StorageRoot: sp.Spec.StorageRoot,
+		})
+		if derr != nil {
+			return nil, fmt.Errorf("%w: build local file driver for %q: %v", errUnsupportedBackend, sp.Name, derr)
+		}
+		p.ImageDriver = drv
+	default:
+		// nfs-block / rbd-block: no host-local driver implementation yet.
+		return nil, fmt.Errorf("%w: %q has no host-local driver implementation", errUnsupportedBackend, backend)
+	}
+
+	return p, nil
 }
 
 // mapBackend converts an apis backend type to the storage pool backend type.

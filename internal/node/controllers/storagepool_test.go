@@ -301,3 +301,91 @@ func TestStoragePoolReconcileContextCancelledPropagates(t *testing.T) {
 		t.Errorf("PatchStatus called %d times after ctx cancel, want 0", reporter.patchCalls)
 	}
 }
+
+// TestStoragePoolReconcileBlockPoolAttachesDriver proves the block backend wires
+// a non-nil block.Driver onto the registered pool, since pool.Service.RegisterPool
+// rejects a block pool without one. (Driver gap fix: buildPool now attaches the
+// host-local driver rather than leaving it nil.)
+func TestStoragePoolReconcileBlockPoolAttachesDriver(t *testing.T) {
+	pools := &fakePoolRegistrar{usage: pool.Usage{AllocatedBytes: 4096}}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	sp := validStoragePool("pool-block")
+	sp.Spec.Backend = storagepoolv1.BackendLocalBlock
+	sp.Spec.Type = storagepoolv1.PoolTypeBlock
+	ev := newStoragePoolEvent(t, controller.EventAdded, sp)
+
+	if _, err := c.Reconcile(context.Background(), ev); err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if len(pools.registered) != 1 {
+		t.Fatalf("RegisterPool called %d times, want 1", len(pools.registered))
+	}
+	got := pools.registered[0]
+	if got.Driver == nil {
+		t.Fatalf("block pool registered with nil Driver; RegisterPool would reject it")
+	}
+	if got.ImageDriver != nil {
+		t.Fatalf("block pool must not carry an ImageDriver")
+	}
+}
+
+// TestStoragePoolReconcileFilePoolAttachesImageDriver proves the file backend
+// wires a non-nil image.Driver, the symmetric requirement RegisterPool enforces
+// for file pools.
+func TestStoragePoolReconcileFilePoolAttachesImageDriver(t *testing.T) {
+	pools := &fakePoolRegistrar{usage: pool.Usage{AllocatedBytes: 0}}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	sp := validStoragePool("pool-file")
+	sp.Spec.Backend = storagepoolv1.BackendLocalFile
+	sp.Spec.Type = storagepoolv1.PoolTypeFile
+	ev := newStoragePoolEvent(t, controller.EventAdded, sp)
+
+	if _, err := c.Reconcile(context.Background(), ev); err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if len(pools.registered) != 1 {
+		t.Fatalf("RegisterPool called %d times, want 1", len(pools.registered))
+	}
+	got := pools.registered[0]
+	if got.ImageDriver == nil {
+		t.Fatalf("file pool registered with nil ImageDriver; RegisterPool would reject it")
+	}
+	if got.Driver != nil {
+		t.Fatalf("file pool must not carry a block Driver")
+	}
+}
+
+// TestStoragePoolReconcileNFSBackendIsPermanentFailure proves a backend with no
+// host-local driver implementation (nfs-block) is a permanent config failure: it
+// is reported failed, not requeued, and never registered.
+func TestStoragePoolReconcileNFSBackendIsPermanentFailure(t *testing.T) {
+	pools := &fakePoolRegistrar{}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	sp := validStoragePool("pool-nfs")
+	sp.Spec.Backend = storagepoolv1.BackendNFSBlock
+	sp.Spec.Type = storagepoolv1.PoolTypeBlock
+	ev := newStoragePoolEvent(t, controller.EventAdded, sp)
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (permanent failure reported via status)", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false for a backend with no driver")
+	}
+	if len(pools.registered) != 0 {
+		t.Fatalf("RegisterPool called %d times, want 0 for unsupported backend", len(pools.registered))
+	}
+	if len(reporter.patches) != 1 {
+		t.Fatalf("PatchStatus captured %d patches, want 1 (failed)", len(reporter.patches))
+	}
+	if phase := reporter.patches[0].status.Phase; phase != storagepoolv1.PoolPhaseFailed {
+		t.Fatalf("patched phase = %q, want %q", phase, storagepoolv1.PoolPhaseFailed)
+	}
+}
