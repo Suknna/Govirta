@@ -1,0 +1,228 @@
+package apiserver
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
+	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
+	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
+	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
+	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
+	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
+)
+
+func TestApplyValidObjectsPersist(t *testing.T) {
+	cases := []struct {
+		name string
+		kind metav1.Kind
+		obj  func() any
+	}{
+		{"StoragePool", metav1.KindStoragePool, func() any { return validStoragePool() }},
+		{"Image", metav1.KindImage, func() any { return validImage() }},
+		{"Volume", metav1.KindVolume, func() any { return validVolume() }},
+		{"Network", metav1.KindNetwork, func() any { return validNetwork() }},
+		{"VM", metav1.KindVM, func() any { return validVM() }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newTestServer(t)
+			obj := tc.obj()
+
+			// Object name is the metadata.Name on each fixture.
+			var objName string
+			switch v := obj.(type) {
+			case storagepoolv1.StoragePool:
+				objName = v.Name
+			case imagev1.Image:
+				objName = v.Name
+			case volumev1.Volume:
+				objName = v.Name
+			case networkv1.Network:
+				objName = v.Name
+			case vmv1.VM:
+				objName = v.Name
+			default:
+				t.Fatalf("unexpected fixture type %T", v)
+			}
+
+			rec := doApply(t, srv, tc.kind, objName, obj)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+			}
+
+			raw := storedRaw(t, st, tc.kind, objName)
+			if raw.ResourceVersion == "" {
+				t.Fatalf("stored object has empty ResourceVersion")
+			}
+
+			// Response body must carry the store-assigned ResourceVersion.
+			var meta struct {
+				Metadata metav1.ObjectMeta `json:"metadata"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if meta.Metadata.ResourceVersion != raw.ResourceVersion {
+				t.Fatalf("response RV %q != stored RV %q", meta.Metadata.ResourceVersion, raw.ResourceVersion)
+			}
+		})
+	}
+}
+
+func TestApplyInvalidSpecEmptyNameRejected(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	obj.Name = "" // violate ObjectMeta.Validate (and break path/name agreement)
+
+	// Path name is empty too; we route through the handler with a placeholder so
+	// the request reaches Apply, but the empty metadata.name must be rejected.
+	rec := doApply(t, srv, metav1.KindStoragePool, "ignored", obj)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+
+	if raws, err := st.List(context.Background(), "/govirta/"); err != nil {
+		t.Fatalf("list store: %v", err)
+	} else if len(raws) != 0 {
+		t.Fatalf("expected nothing stored on invalid apply, got %d objects", len(raws))
+	}
+}
+
+func TestApplyVolumeRootMissingImageRefRejected(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	obj := validVolume()
+	obj.Spec.ImageRef = "" // root volume must carry imageRef
+
+	rec := doApply(t, srv, metav1.KindVolume, obj.Name, obj)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+}
+
+func TestApplyNICEmptyMACGetsAllocated(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validNIC()
+	if obj.Spec.MAC != "" {
+		t.Fatalf("fixture precondition: NIC MAC must be empty")
+	}
+
+	rec := doApply(t, srv, metav1.KindNIC, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindNIC, obj.Name)
+	var stored nicv1.NIC
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored NIC: %v", err)
+	}
+	if stored.Spec.MAC == "" {
+		t.Fatalf("stored NIC MAC is empty; expected an allocated MAC")
+	}
+	if _, err := net.ParseMAC(stored.Spec.MAC); err != nil {
+		t.Fatalf("stored NIC MAC %q does not parse: %v", stored.Spec.MAC, err)
+	}
+
+	// The response body must reflect the allocated MAC too.
+	var resp nicv1.NIC
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response NIC: %v", err)
+	}
+	if resp.Spec.MAC != stored.Spec.MAC {
+		t.Fatalf("response MAC %q != stored MAC %q", resp.Spec.MAC, stored.Spec.MAC)
+	}
+}
+
+func TestApplyNICPreservesProvidedMAC(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	const providedMAC = "02:00:00:de:ad:be"
+	obj := validNIC()
+	obj.Spec.MAC = providedMAC
+
+	rec := doApply(t, srv, metav1.KindNIC, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindNIC, obj.Name)
+	var stored nicv1.NIC
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored NIC: %v", err)
+	}
+	if stored.Spec.MAC != providedMAC {
+		t.Fatalf("stored MAC %q != provided MAC %q (must be preserved as-is)", stored.Spec.MAC, providedMAC)
+	}
+}
+
+func TestApplyNetworkAdmissionRejections(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*networkv1.Network)
+	}{
+		{
+			name:   "negative lease",
+			mutate: func(n *networkv1.Network) { n.Spec.LeaseSeconds = -1 },
+		},
+		{
+			name: "inverted DHCP range",
+			mutate: func(n *networkv1.Network) {
+				n.Spec.DHCPRangeStart = "192.168.100.200"
+				n.Spec.DHCPRangeEnd = "192.168.100.10"
+			},
+		},
+		{
+			name:   "gateway outside subnet",
+			mutate: func(n *networkv1.Network) { n.Spec.GatewayCIDR = "10.0.0.1/24" },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newTestServer(t)
+			obj := validNetwork()
+			tc.mutate(&obj)
+
+			rec := doApply(t, srv, metav1.KindNetwork, obj.Name, obj)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if msg := decodeError(t, rec); msg == "" {
+				t.Fatalf("expected non-empty error body")
+			}
+
+			if _, err := st.Get(context.Background(), storeKey(metav1.KindNetwork, obj.Name)); err == nil {
+				t.Fatalf("rejected Network must not be stored")
+			}
+		})
+	}
+}
+
+func TestApplyUnknownKindNotFound(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/apis/Widget/w-a", bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
