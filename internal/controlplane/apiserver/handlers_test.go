@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suknna/govirta/internal/controlplane/mac"
+	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	"github.com/suknna/govirta/internal/controlplane/store/fake"
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
@@ -38,7 +39,10 @@ func newTestServer(t *testing.T) (*Server, *fake.Store) {
 		t.Fatalf("new pool: %v", err)
 	}
 	alloc := mac.NewAllocator(pool, st)
-	return NewServer(st, alloc), st
+	// The handler tests drive routing through Handler() directly and never call
+	// Run, so the listen address is irrelevant here; a noop scheduler over a
+	// single static node makes VM apply deterministic.
+	return NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, ""), st
 }
 
 // doApply submits obj to PUT /apis/{kind}/{name} through the server's handler and
@@ -836,7 +840,7 @@ func TestStatusPatchRetriesThenSucceedsOnConflict(t *testing.T) {
 	// One forced conflict: under statusRetryLimit (3), so the loop re-reads and
 	// the second attempt commits.
 	wrapped := &stalePatchStore{Store: st, failsRemaining: 1}
-	srv := NewServer(wrapped, alloc)
+	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
 
 	vm := validVM()
 	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {
@@ -882,7 +886,7 @@ func TestStatusPatchExhaustedRetriesReturns409(t *testing.T) {
 	// Force more conflicts than statusRetryLimit so every attempt fails and the
 	// handler surfaces 409 rather than looping forever.
 	wrapped := &stalePatchStore{Store: st, failsRemaining: statusRetryLimit + 1}
-	srv := NewServer(wrapped, alloc)
+	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
 
 	vm := validVM()
 	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/suknna/govirta/internal/controlplane/mac"
+	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
@@ -47,38 +48,10 @@ var ErrNameMismatch = errors.New("apiserver: path name does not match metadata.n
 // admission responsibility and is deliberately not pushed down into apis/node.
 var ErrNetworkAdmission = errors.New("apiserver: network admission failed")
 
-// Server is the control-plane apply handler. It owns the persistence store and
-// the MAC allocator (constructor-injected so unit tests can substitute the
-// in-memory fake store and a deterministic pool). All methods thread ctx from
-// the inbound request end to end.
-type Server struct {
-	store store.Store
-	alloc mac.MACAllocator
-}
-
-// NewServer constructs a Server over the given store and MAC allocator. Both are
-// required collaborators; passing nil yields a Server that panics on first use,
-// which surfaces wiring mistakes immediately rather than silently dropping writes.
-func NewServer(st store.Store, alloc mac.MACAllocator) *Server {
-	return &Server{store: st, alloc: alloc}
-}
-
-// Handler returns the HTTP routes this server serves. Apply is bound to both
-// POST and PUT on /apis/{kind}/{name}: the create/update distinction is not
-// meaningful at this layer (the store performs an unconditional create-or-
-// overwrite), so both verbs share one handler.
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /apis/{kind}/{name}", s.Apply)
-	mux.HandleFunc("PUT /apis/{kind}/{name}", s.Apply)
-	// Read routes (get/list) are registered alongside apply so a single
-	// Handler() serves the full /apis surface.
-	s.getHandler(mux)
-	// Status sub-resource (up-reconcile) shares the same Handler() so node
-	// status reports land on the one /apis surface as apply and get.
-	s.statusHandler(mux)
-	return mux
-}
+// The Server struct, NewServer constructor, and Handler() router live in
+// server.go alongside the Run(ctx) lifecycle; this file holds the apply pipeline
+// that Server.Apply dispatches into. All methods thread ctx from the inbound
+// request end to end.
 
 // Apply decodes a submitted resource object, validates it, applies kind-specific
 // admission (NIC MAC allocation, Network range checks), persists it, and writes
@@ -220,6 +193,14 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := requireName(name, obj.Name); err != nil {
 			return nil, badRequest(err)
 		}
+		// Admission-time placement: a VM with no explicit node binding is scheduled
+		// onto one of the configured candidate nodes, and the chosen node is written
+		// back before the object is persisted. The binding lives in ObjectMeta.NodeName
+		// (not VMSpec — confirmed by the apis layer), which the node watch filters on.
+		// A VM that already names a node is left as-is so a caller can pin placement.
+		if err := s.bindVM(ctx, &obj); err != nil {
+			return nil, err
+		}
 		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
 		if aerr != nil {
 			return nil, aerr
@@ -262,6 +243,28 @@ func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC) (stor
 		return store.RawObject{}, internalErr(err)
 	}
 	return raw, nil
+}
+
+// bindVM places a VM onto a node when it carries no explicit binding, writing the
+// scheduler's choice into ObjectMeta.NodeName so the persisted object is routed to
+// that node by the watch filter. A VM that already names a node is left untouched
+// (caller-pinned placement). An empty candidate set surfaces as ErrNoNodes, which
+// is a transient capacity condition the caller should retry against, so it maps to
+// 503 rather than a 4xx; any other scheduler failure (including ctx cancellation)
+// maps to 5xx. ctx is threaded into Schedule end to end.
+func (s *Server) bindVM(ctx context.Context, vm *vmv1.VM) *apiError {
+	if vm.NodeName != "" {
+		return nil
+	}
+	node, err := s.sched.Schedule(ctx, *vm, s.nodeNames)
+	if err != nil {
+		if errors.Is(err, scheduler.ErrNoNodes) {
+			return unavailable(fmt.Errorf("apiserver: schedule VM %q: %w", vm.Name, err))
+		}
+		return internalErr(fmt.Errorf("apiserver: schedule VM %q: %w", vm.Name, err))
+	}
+	vm.NodeName = node
+	return nil
 }
 
 // put marshals obj and writes it unconditionally (empty expectedVersion), mapping
@@ -398,4 +401,11 @@ func notFound(err error) *apiError    { return &apiError{code: http.StatusNotFou
 func conflictErr(err error) *apiError { return &apiError{code: http.StatusConflict, err: err} }
 func internalErr(err error) *apiError {
 	return &apiError{code: http.StatusInternalServerError, err: err}
+}
+
+// unavailable maps a transient capacity condition (no schedulable node yet) to
+// 503: the request was well-formed, so it is not a 4xx, and the caller should
+// retry once a node registers rather than treat it as a permanent server fault.
+func unavailable(err error) *apiError {
+	return &apiError{code: http.StatusServiceUnavailable, err: err}
 }
