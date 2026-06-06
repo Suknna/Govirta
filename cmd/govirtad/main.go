@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,15 +90,9 @@ func parseConfig(args []string) (controlplane.Config, error) {
 		return controlplane.Config{}, fmt.Errorf("govirtad: --mac-prefix is required")
 	}
 
-	hw, err := net.ParseMAC(*macPrefix)
+	hw, err := parseOUI(*macPrefix)
 	if err != nil {
 		return controlplane.Config{}, fmt.Errorf("govirtad: parse --mac-prefix %q: %w", *macPrefix, err)
-	}
-	// net.ParseMAC accepts 6- or 8-byte forms too; the pool needs exactly a
-	// 3-byte OUI, so reject other lengths here with a clear message rather than
-	// letting mac.NewPool's length error surface without the flag name.
-	if len(hw) != 3 {
-		return controlplane.Config{}, fmt.Errorf("govirtad: --mac-prefix %q must be a 3-byte OUI, got %d bytes", *macPrefix, len(hw))
 	}
 
 	return controlplane.Config{
@@ -109,4 +104,29 @@ func parseConfig(args []string) (controlplane.Config, error) {
 		MACSuffixEnd:    uint32(*macEnd),
 		NodeNames:       []string(nodeNames),
 	}, nil
+}
+
+// parseOUI parses a 3-byte locally-administered OUI prefix such as "02:00:00"
+// into a net.HardwareAddr. The standard library net.ParseMAC rejects 3-byte
+// input (it only accepts 6- or 8-byte EUI forms), so the MAC pool prefix needs
+// a dedicated parser. This validates only the textual shape (three colon-
+// separated hex octets); the locally-administered/unicast bit checks belong to
+// mac.NewPool so that error surfaces with the pool package's context.
+func parseOUI(s string) (net.HardwareAddr, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("must be a 3-byte OUI as xx:xx:xx, got %d octet(s)", len(parts))
+	}
+	hw := make(net.HardwareAddr, 3)
+	for i, p := range parts {
+		if len(p) != 2 {
+			return nil, fmt.Errorf("octet %q must be two hex digits", p)
+		}
+		v, err := strconv.ParseUint(p, 16, 8)
+		if err != nil {
+			return nil, fmt.Errorf("octet %q: %w", p, err)
+		}
+		hw[i] = byte(v)
+	}
+	return hw, nil
 }
