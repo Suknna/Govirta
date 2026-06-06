@@ -55,12 +55,12 @@ type ObjectMeta struct {
 | --- | --- | --- | --- |
 | StoragePool | backend kind + 容量参数 | Phase + 实际容量 | — |
 | Image | poolRef(file pool) + 外部源(本地文件路径 / HTTP URL，显式) + 显式 format + caller-provided ID | Phase(pending/ready/deleting) + 本地字节大小 | → StoragePool(file) |
-| Volume | poolRef(block pool) + imageRef + 显式 format + 磁盘规格(role/diskIndex) | Phase + 卷路径 | → StoragePool, Image |
+| Volume | poolRef(block pool) + imageRef + imageFilePoolRef（root 卷）+ 磁盘规格(role/diskIndex) | Phase + 卷路径 | → StoragePool, Image |
 | Network | bridge/subnet/forwarding 声明 | Phase + 观测网络态 | — |
 | NIC | networkRef + tap 规格（MAC 由平台分配，见下） | Phase + 观测 NIC 态 | → Network |
 | VM | volumeRefs + nicRefs + CPU/内存/argv 基础参数 | Phase（live 派生）+ 运行信息 | → Volume + NIC |
 
-除 MAC 外，所有 behavior-affecting 字段（pool / format / 磁盘号 / owner 引用 / UID / 名称）由 `govirtctl` 显式提供，apiserver 不补默认。`Phase` 等状态/生命周期值用专属 Go 类型 + 命名常量（不用裸 string）。
+除 MAC 外，所有 behavior-affecting 字段（pool / 磁盘号 / owner 引用 / UID / 名称）由 `govirtctl` 显式提供，apiserver 不补默认。镜像源字节格式（format）的权威是 `Image.Spec.Format`，Volume 不另带源 format 字段。`Phase` 等状态/生命周期值用专属 Go 类型 + 命名常量（不用裸 string）。
 
 **MAC 分配（平台职责，非用户注入）**：私有云平台的 NIC MAC 由平台内部计算，不由用户提供。NIC 对象创建时 `Spec.MAC` 留空，由 **apiserver 准入期**从配置的平台 MAC 池（locally-administered 单播范围）同步分配一个唯一 MAC，写入 `Spec.MAC` 后再落 etcd——与 k8s apiserver 准入期分配 Service ClusterIP 同构（强一致单点 + 即时不变式，依赖 etcd 事务防冲突）。分配器做成可替换的 `MACAllocator` 接口（积木式），占用状态存 etcd。
 
