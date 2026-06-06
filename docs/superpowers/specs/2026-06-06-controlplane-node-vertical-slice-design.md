@@ -1,0 +1,153 @@
+# 控制面 / 节点垂直切片设计（VM create-only walking skeleton）
+
+**日期**: 2026-06-06
+**状态**: 设计已确认，待写实现计划
+**前置**: `internal/storage`、`internal/network`、`internal/vmm`、`pkg/hostnet/*` 执行面均已真实落地并有 Lima 验收覆盖；分布式骨架（apiserver/scheduler/controlplane/node agent）当前全为 no-op 占位。
+
+## 1. 目标与范围
+
+打通一条**最薄但结构正确**的端到端链路（walking skeleton），点亮 Govirta 的 master/node 分布式脊柱，并复用已做扎实的节点本地执行面。
+
+第一刀终点：`govirtctl` 显式提交 StoragePool / Volume / Network / NIC / VM 五个资源对象 → master 存 etcd → 节点上的多控制器循环按依赖链各自 reconcile（真跑执行面）→ VM 控制器启动真实 daemonized QEMU → 持续上报 live `Phase` → master 向 etcd reconcile → `govirtctl get vm` 查到 `Running`。
+
+**结构形态（本切片确立的方向）**：
+- 两层传输：master↔etcd 走 etcd gRPC Watch；master↔node 走 k8s 式 HTTP watch（node 主动拨号、下行推期望状态）+ 独立上行 HTTP（`PATCH .../status`）。
+- 资源模型：五个一等公民对象共享 k8s 式信封 `TypeMeta + ObjectMeta + Spec + Status`，`ResourceVersion = etcd revision`。
+- node = controller-manager：自建轻量框架托管五个独立控制器，每个 `watch → workqueue → reconcile → status`，按 operator 形态依赖链推进。
+- 全显式提交：每个对象身份与 spec 由控制面/用户显式给出，无级联派生、无自动生成身份。
+
+## 2. 已锁定的核心决策
+
+| # | 决策点 | 选择 | 理由 |
+| --- | --- | --- | --- |
+| 1 | 推进风格 | A 垂直切片（walking skeleton） | 最早暴露脊柱设计真实问题，立即复用执行面 |
+| 2 | 传输层 | 两层：master↔etcd gRPC Watch；master↔node k8s 式 HTTP watch（下行）+ 独立上行 PATCH status | 贴合真 k8s 架构，上下一致铁律天然落地 |
+| 3 | 资源模型 | k8s 信封 `TypeMeta+ObjectMeta+Spec+Status`，`ResourceVersion=etcd revision` | spec/status 分离承载期望/现实双轴；两层 watch 共用版本游标 |
+| 4 | 第一刀范围 | create-only；固定 node 身份；NoopScheduler 选 node[0] | 薄但结构正确 |
+| 5 | master watch 数据流 | A 直通 etcd（无内部缓存） | 单一事实源在代码里是结构性保证，非约定 |
+| 6 | node 内部形态 | controller-manager + 五个一等公民控制器（operator 形态） | 与一等公民判据严丝合缝 |
+| 7 | 共享循环框架 | B 自建轻量框架 | 贴合自定义 HTTP watch 契约，最小化外部依赖，积木式可换 |
+| 8 | 资源创建模型 | A 全显式提交 | 与全项目「显式优于隐式、身份由调用方提供」铁律一致 |
+
+## 3. 资源契约（五个一等公民，共享信封）
+
+包路径 `pkg/apis/<resource>/v1alpha1/`（放 `pkg/` 以便未来 client 包 import）。
+
+全部共享信封：
+
+```go
+type TypeMeta struct {
+    APIVersion string // govirta.io/v1alpha1
+    Kind       string // StoragePool / Volume / Network / NIC / VM
+}
+
+type ObjectMeta struct {
+    Name            string
+    UID             string // 调用方提供（一等公民判据 + 显式铁律），绝不自动生成
+    ResourceVersion string // = etcd revision，watch 增量 + 乐观并发游标
+    NodeName        string // 本地资源由 govirtctl 显式提交；VM 由 scheduler 绑定；node watch 按此过滤
+    Labels          map[string]string
+}
+```
+
+| 对象 | Spec（期望，显式） | Status（现实，node 写） | 依赖引用 |
+| --- | --- | --- | --- |
+| StoragePool | backend kind + 容量参数 | Phase + 实际容量 | — |
+| Volume | poolRef + image 引用 + 显式 format + 磁盘规格(role/diskIndex) | Phase + 卷路径 | → StoragePool |
+| Network | bridge/subnet/forwarding 声明 | Phase + 观测网络态 | — |
+| NIC | networkRef + 显式 MAC + tap 规格 | Phase + 观测 NIC 态 | → Network |
+| VM | volumeRefs + nicRefs + CPU/内存/argv 基础参数 | Phase（live 派生）+ 运行信息 | → Volume + NIC |
+
+所有 behavior-affecting 字段（pool / format / MAC / 磁盘号 / owner 引用）由 `govirtctl` 显式提供，apiserver 不补默认。`Phase` 等状态/生命周期值用专属 Go 类型 + 命名常量（不用裸 string）。
+
+## 4. 包布局
+
+```
+pkg/apis/{storagepool,volume,network,nic,vm}/v1alpha1/types.go   # 共享信封 + 各资源类型 + Phase 常量
+
+internal/controlplane/
+  apiserver/
+    store/                       # Store 接口（积木式边界）
+      etcd/                      # etcd 实现
+      fake/                      # 单测用内存实现
+    handler_apply.go             # govirtctl 写入任意资源 → Store.Put(etcd)
+    handler_watch.go             # node 下行 watch：etcd Watch(过滤 nodeName+kind) → HTTP chunked JSON 事件流
+    handler_status.go            # node 上行 PATCH .../status → reconcile 写回 etcd
+  scheduler/                     # 现 NoopScheduler：VM 绑 NodeName=node[0]
+  reconcile.go                   # master 侧：status 上报 → Store.Put(etcd status)
+
+internal/node/
+  controller/                    # 自建轻量框架
+    manager.go                   # controller-manager：托管 N 个控制器，统一启动/停止
+    queue.go                     # 去重 workqueue
+    loop.go                      # 通用循环：watch 事件 → 入队 → reconcile → 失败重入队
+  controllers/
+    storagepool_controller.go    # 复用 internal/storage pool.Service
+    volume_controller.go         # 复用 VolumeService（镜像派生独立 root 卷）
+    network_controller.go        # 复用 NetworkService
+    nic_controller.go            # 复用 NICService（显式 MAC 贯穿）
+    vm_controller.go             # 复用 VMMService（真 daemonized QEMU + live Phase 上报）
+  watchclient.go                 # node 主动拨号 master 的 HTTP watch client
+```
+
+## 5. 端到端数据流（第一刀）
+
+```
+govirtctl apply pool/volume/network/nic/vm  → apiserver handler_apply → Store.Put(etcd)   [期望状态]
+  · pool/volume/network/nic 由 govirtctl 显式带 NodeName 提交（节点本地资源，显式铁律）
+  · VM 提交时不带 NodeName，由 scheduler 放置
+scheduler 给 VM 绑 NodeName=node[0]（NoopScheduler）
+
+node controller-manager 启动 → watchclient 拨号 master
+  → 每个控制器 GET ../watch?nodeName=N&kind=<K> (HTTP 长连接, chunked JSON 事件流)
+  → master handler_watch: etcd Watch(过滤 nodeName+kind) → 翻译 HTTP 事件下推    [第2层 watch，直通 etcd]
+
+各控制器收到自己 kind 的 ADDED 事件，按依赖链 gate 推进:
+  StoragePool 控制器          → pool.Service 注册                → PATCH status Ready
+  Volume 控制器(等 poolRef Ready) → 镜像 → 独立 qcow2 root 卷       → PATCH status Ready
+  Network 控制器              → EnsureNetwork                    → PATCH status Ready
+  NIC 控制器(等 networkRef Ready) → EnsureNIC(显式 MAC)           → PATCH status Ready
+  VM 控制器(等 volumeRefs+nicRefs Ready) → builder→Create→Start 真 QEMU
+    → 读 live Phase → PATCH vm/status {Phase: Running}   [持续上报，如 kubelet]
+
+每次 PATCH status → master reconcile → Store.Put(etcd status)  [上下一致: 向 node 现实对齐]
+govirtctl get vm → 读 etcd → Running
+```
+
+依赖未 Ready 时控制器重入队等待（最薄重试，无退避优化）。
+
+## 6. 铁律落地
+
+- **单一事实源 / 上下一致**：master 直通 etcd 无内部缓存；etcd 中对象 = 期望轴权威，node 上报 live status = 运行现实权威，master 只做 reconcile 写回，绝不反向。
+- **积木式可替换**：`Store` 接口让 etcd↔fake 可换（单测不需要真 etcd）；controller 框架自建、各层是自有可替换边界；五个控制器全部复用现有执行面 service，零重写。
+- **显式优于隐式**：全显式提交，无级联派生、无自动生成身份，apiserver 不补默认。
+- **ctx 端到端**：HTTP 请求 ctx → controller loop → storage/network/vmm service 全链路透传，无 orphan `context.Background()`。
+- **持续上报**：VM 控制器周期 reconcile 回传 live `Phase`（「存活虚拟机循环」）。
+- **etcd-only**（#652）：master 持久化只用 etcd，不引入任何其他元数据库。
+- **错误传播**：所有错误向上传播；清理/回滚多错误用 `errors.Join`。
+- **强类型状态**：`Phase` / backend kind / role 等用专属类型 + 命名常量。
+
+## 7. 验证策略
+
+- **单测**：`Store` 用 fake 内存实现；apiserver handler、controller 框架（fake watch 源 + fake 执行面）、各控制器依赖 gate 逻辑，均不碰真 etcd / QEMU。覆盖 ctx 取消行为。
+- **acceptance（Lima）**：真 etcd（容器或进程）+ 真 QEMU，跑完整五对象 `apply → 各 Ready → VM Running` 闭环，作为脊柱真实内核网关。
+- etcd 客户端依赖版本：进入 plan/实现阶段用子代理联网 + ctx7 核实最新稳定版再锁定（第十一/十七章），本设计不锁版本。
+
+## 8. 明确不做（留给后续切片，已存 memory 819）
+
+- VM stop / delete 生命周期（期望状态下发 + status 回传）
+- 控制器退避 / 限速优化
+- Node 注册对象 + Lease 心跳（第一刀用固定 node 身份）
+- 断线重连恢复 / reconcile 全量补偿
+- master informer / watch cache（规模化优化）
+- scheduler 真实放置策略（第一刀 NoopScheduler 选 node[0]）
+- client-go 式客户端包
+- master↔etcd 之外的任何持久化
+
+## 9. 后续切片预告（顺序非承诺）
+
+1. 本切片：create-only 全链路打通
+2. VM stop/delete 生命周期 + 控制器退避
+3. Node 注册对象 + Lease 心跳 + scheduler 真实策略
+4. 断线重连恢复 + reconcile 补偿
+5. client-go 式客户端包 + master watch cache（规模化）
