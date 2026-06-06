@@ -23,17 +23,12 @@ type watchEventWire struct {
 // nodeNameSelector is the minimal projection the watch handler decodes from a
 // stored object to learn which node it belongs to. nodeName lives in
 // metadata.nodeName for every first-class kind (set by govirtctl for node-local
-// resources and by the scheduler for VM); spec.nodeName is parsed too and
-// preferred when present so a future kind that routes via its spec keeps working
-// without changing this handler. The store stays kind-agnostic: this is the only
-// place nodeName routing is interpreted.
+// resources and by the scheduler for VM). The store stays kind-agnostic: this is
+// the only place nodeName routing is interpreted.
 type nodeNameSelector struct {
 	Metadata struct {
 		NodeName string `json:"nodeName"`
 	} `json:"metadata"`
-	Spec struct {
-		NodeName string `json:"nodeName"`
-	} `json:"spec"`
 }
 
 // ListOrWatch dispatches GET /apis/{kind}: a request carrying watch=true opens a
@@ -146,8 +141,8 @@ func (s *Server) Watch(w http.ResponseWriter, r *http.Request) {
 
 // nodeNameMatches reports whether the stored object's nodeName equals want. A
 // DELETED event carries an empty Value (the object is gone), which cannot match
-// any node and is filtered out. spec.nodeName is preferred over metadata.nodeName
-// when both are present.
+// any node and is filtered out. nodeName is read from metadata.nodeName, where
+// every first-class kind carries it.
 func nodeNameMatches(value []byte, want string) (bool, error) {
 	if len(value) == 0 {
 		return false, nil
@@ -156,11 +151,7 @@ func nodeNameMatches(value []byte, want string) (bool, error) {
 	if err := json.Unmarshal(value, &sel); err != nil {
 		return false, fmt.Errorf("apiserver: decode watched object nodeName: %w", err)
 	}
-	got := sel.Spec.NodeName
-	if got == "" {
-		got = sel.Metadata.NodeName
-	}
-	return got == want, nil
+	return sel.Metadata.NodeName == want, nil
 }
 
 // writeWatchEvent encodes one event as a single newline-terminated JSON line. The
