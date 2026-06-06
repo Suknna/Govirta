@@ -55,10 +55,16 @@ type ObjectMeta struct {
 | StoragePool | backend kind + 容量参数 | Phase + 实际容量 | — |
 | Volume | poolRef + image 引用 + 显式 format + 磁盘规格(role/diskIndex) | Phase + 卷路径 | → StoragePool |
 | Network | bridge/subnet/forwarding 声明 | Phase + 观测网络态 | — |
-| NIC | networkRef + 显式 MAC + tap 规格 | Phase + 观测 NIC 态 | → Network |
+| NIC | networkRef + tap 规格（MAC 由平台分配，见下） | Phase + 观测 NIC 态 | → Network |
 | VM | volumeRefs + nicRefs + CPU/内存/argv 基础参数 | Phase（live 派生）+ 运行信息 | → Volume + NIC |
 
-所有 behavior-affecting 字段（pool / format / MAC / 磁盘号 / owner 引用）由 `govirtctl` 显式提供，apiserver 不补默认。`Phase` 等状态/生命周期值用专属 Go 类型 + 命名常量（不用裸 string）。
+除 MAC 外，所有 behavior-affecting 字段（pool / format / 磁盘号 / owner 引用 / UID / 名称）由 `govirtctl` 显式提供，apiserver 不补默认。`Phase` 等状态/生命周期值用专属 Go 类型 + 命名常量（不用裸 string）。
+
+**MAC 分配（平台职责，非用户注入）**：私有云平台的 NIC MAC 由平台内部计算，不由用户提供。NIC 对象创建时 `Spec.MAC` 留空，由 **apiserver 准入期**从配置的平台 MAC 池（locally-administered 单播范围）同步分配一个唯一 MAC，写入 `Spec.MAC` 后再落 etcd——与 k8s apiserver 准入期分配 Service ClusterIP 同构（强一致单点 + 即时不变式，依赖 etcd 事务防冲突）。分配器做成可替换的 `MACAllocator` 接口（积木式），占用状态存 etcd。
+
+- 此举不违反 #698：#698 要求 MAC 由**控制面**提供、编排/hostnet 层绝不自行生成；apiserver 正是控制面组件，分配后 MAC 成为 `NIC.Spec.MAC` 的显式值，原样穿到 TAP + DHCP binding + 反欺骗，编排层「显式 MAC 贯穿、自己绝不生成」的铁律继续成立。
+- **阶段性约束（已存 memory 820 / note #25）**：本切片 apiserver 是单点，可作为 MAC 分配唯一源；后期 apiserver 演进为多副本时，MAC 分配必须归入控制平面的专属控制器组件（kubevirt `kubemacpool` 形态），不再留在 apiserver 准入期。`MACAllocator` 接口边界为这次迁移预留。
+- IP 分配是同构问题，本切片不展开（NIC 仍走现有 hostnet 静态 DHCP binding，IP 由 Network spec 的池显式约束）；未来与 MAC 一并归入控制平面分配器组件。
 
 ## 4. 包布局
 
@@ -106,7 +112,7 @@ node controller-manager 启动 → watchclient 拨号 master
   StoragePool 控制器          → pool.Service 注册                → PATCH status Ready
   Volume 控制器(等 poolRef Ready) → 镜像 → 独立 qcow2 root 卷       → PATCH status Ready
   Network 控制器              → EnsureNetwork                    → PATCH status Ready
-  NIC 控制器(等 networkRef Ready) → EnsureNIC(显式 MAC)           → PATCH status Ready
+  NIC 控制器(等 networkRef Ready) → EnsureNIC(平台已分配 MAC 原样贯穿) → PATCH status Ready
   VM 控制器(等 volumeRefs+nicRefs Ready) → builder→Create→Start 真 QEMU
     → 读 live Phase → PATCH vm/status {Phase: Running}   [持续上报，如 kubelet]
 
@@ -120,7 +126,7 @@ govirtctl get vm → 读 etcd → Running
 
 - **单一事实源 / 上下一致**：master 直通 etcd 无内部缓存；etcd 中对象 = 期望轴权威，node 上报 live status = 运行现实权威，master 只做 reconcile 写回，绝不反向。
 - **积木式可替换**：`Store` 接口让 etcd↔fake 可换（单测不需要真 etcd）；controller 框架自建、各层是自有可替换边界；五个控制器全部复用现有执行面 service，零重写。
-- **显式优于隐式**：全显式提交，无级联派生、无自动生成身份，apiserver 不补默认。
+- **显式优于隐式**：全显式提交，无级联派生；身份（UID/名称/引用）由调用方显式提供，apiserver 不补默认。唯一例外是 NIC 的 MAC——私有云平台的 MAC 必须平台内部分配（非用户注入），由 apiserver 准入期通过可替换 `MACAllocator` 从配置的 locally-administered MAC 池同步分配（与 k8s apiserver 准入期分配 Service ClusterIP 同构），分配后即 NIC.Spec.MAC 的显式值，原样穿到 TAP+DHCP+反欺骗（#698 编排层仍不生成 MAC）。
 - **ctx 端到端**：HTTP 请求 ctx → controller loop → storage/network/vmm service 全链路透传，无 orphan `context.Background()`。
 - **持续上报**：VM 控制器周期 reconcile 回传 live `Phase`（「存活虚拟机循环」）。
 - **etcd-only**（#652）：master 持久化只用 etcd，不引入任何其他元数据库。
@@ -130,7 +136,12 @@ govirtctl get vm → 读 etcd → Running
 ## 7. 验证策略
 
 - **单测**：`Store` 用 fake 内存实现；apiserver handler、controller 框架（fake watch 源 + fake 执行面）、各控制器依赖 gate 逻辑，均不碰真 etcd / QEMU。覆盖 ctx 取消行为。
-- **acceptance（Lima）**：真 etcd（容器或进程）+ 真 QEMU，跑完整五对象 `apply → 各 Ready → VM Running` 闭环，作为脊柱真实内核网关。
+- **acceptance（三节点真分布式拓扑）**：
+  - **etcd** → OrbStack Docker 容器启动，master 经 localhost gRPC 连接。
+  - **控制面 govirtad** → macOS 本地直接运行，连本机 etcd，监听 node 拨入的 HTTP watch/status。
+  - **计算节点 govirtlet** → Lima VM（带 KVM）内运行，真起 QEMU。
+  - 跨边界连通性：传输模型为 node 主动拨号 master（node-initiated），只需 Lima guest → macOS host 单向可达（经 host gateway），无需 master 反向入站 Lima，也无需 node 直连 etcd（仅 master 碰 etcd）。
+  - 跑完整五对象 `apply → 各 Ready → VM Running` 闭环，作为脊柱真实内核网关。
 - etcd 客户端依赖版本：进入 plan/实现阶段用子代理联网 + ctx7 核实最新稳定版再锁定（第十一/十七章），本设计不锁版本。
 
 ## 8. 明确不做（留给后续切片，已存 memory 819）
