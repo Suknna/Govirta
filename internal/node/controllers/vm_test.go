@@ -291,6 +291,30 @@ func TestVMReconcileAlreadyRunningReReportsWithoutCreate(t *testing.T) {
 	}
 }
 
+func TestVMReconcileAlreadyStartingRequeuesToTrackTerminalPhase(t *testing.T) {
+	// An existing guest in a transient phase (Starting) must be requeued so the
+	// controller self-drives tracking it to a terminal phase, instead of freezing
+	// the master at Starting until an unrelated watch event arrives (M-1). It
+	// still must not create/start again (存活循环 + 进程解耦).
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStarting}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+	if !requeue {
+		t.Fatalf("requeue = false, want true for a guest in a transient (Starting) phase")
+	}
+	if runner.createCalls != 0 || runner.startCalls != 0 {
+		t.Fatalf("create=%d start=%d, want 0/0 for an existing guest", runner.createCalls, runner.startCalls)
+	}
+	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseStarting {
+		t.Fatalf("re-reported phase = %q, want starting", phase)
+	}
+}
+
 func TestVMReconcileCreateFailureRequeues(t *testing.T) {
 	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound, createErr: errors.New("spawn failed")}
 	dep := &fakeVMDepReader{

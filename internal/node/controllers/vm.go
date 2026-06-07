@@ -109,15 +109,28 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 	// Idempotency / liveness loop: if the guest already exists, never re-create.
 	// Re-report its live phase so the master tracks the running guest (存活循环).
 	if existing, err := c.vmm.Status(ctx, obj.UID); err == nil {
-		if err := c.patchStatus(ctx, obj.Name, vmv1.VMStatus{Phase: mapVMPhase(existing.Phase)}); err != nil {
+		phase, known := mapVMPhase(existing.Phase)
+		if !known {
+			logger.Warn().
+				Str("key", ev.Key).
+				Str("uuid", obj.UID).
+				Str("vmm_phase", string(existing.Phase)).
+				Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
+		}
+		if err := c.patchStatus(ctx, obj.Name, vmv1.VMStatus{Phase: phase}); err != nil {
 			return true, err
 		}
+		// Transient phases (Starting/Stopping) settle on their own; requeue so
+		// the master tracks the guest to a terminal phase instead of freezing at
+		// the in-flight value until an unrelated watch event arrives (M-1).
+		requeue := isTransientPhase(existing.Phase)
 		logger.Info().
 			Str("key", ev.Key).
 			Str("uuid", obj.UID).
 			Str("phase", string(existing.Phase)).
+			Bool("requeue", requeue).
 			Msg("vm already exists; re-reported live phase")
-		return false, nil
+		return requeue, nil
 	} else if !errors.Is(err, vmm.ErrNotFound) {
 		// A real status error (not "not yet created") is transient.
 		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
@@ -173,16 +186,29 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 		return true, fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
 	}
 
-	if err := c.patchStatus(ctx, obj.Name, vmv1.VMStatus{Phase: mapVMPhase(started.Phase)}); err != nil {
+	startedPhase, known := mapVMPhase(started.Phase)
+	if !known {
+		logger.Warn().
+			Str("key", ev.Key).
+			Str("uuid", obj.UID).
+			Str("vmm_phase", string(started.Phase)).
+			Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
+	}
+	if err := c.patchStatus(ctx, obj.Name, vmv1.VMStatus{Phase: startedPhase}); err != nil {
 		return true, err
 	}
 
+	// A freshly started guest is typically Starting/Running; if it is still in a
+	// transient phase, requeue to track it to terminal (same liveness rule as the
+	// already-exists path above, M-1).
+	requeue := isTransientPhase(started.Phase)
 	logger.Info().
 		Str("key", ev.Key).
 		Str("uuid", obj.UID).
 		Str("phase", string(started.Phase)).
+		Bool("requeue", requeue).
 		Msg("vm reconciled")
-	return false, nil
+	return requeue, nil
 }
 
 // gatherDependencies reads every referenced Volume and NIC object's live status.
@@ -293,24 +319,41 @@ func mapArch(arch string) (qemu.Arch, machine.Profile, error) {
 
 // mapVMPhase maps the live vmm.Phase to the apis VMPhase. Both enums mirror each
 // other by value but are defined independently (契约层不依赖 internal); the
-// mapping is an explicit switch (项目铁律: 禁止裸 string 转换).
-func mapVMPhase(p vmm.Phase) vmv1.VMPhase {
+// mapping is an explicit switch (项目铁律: 禁止裸 string 转换). The second return
+// is false when p is outside the known enum: callers log it as enum drift rather
+// than silently reporting a bogus Failed (M-3). A false still maps to Failed so a
+// drifted node never reports a guest as healthy by accident.
+func mapVMPhase(p vmm.Phase) (vmv1.VMPhase, bool) {
 	switch p {
 	case vmm.PhaseDefined:
-		return vmv1.VMPhaseDefined
+		return vmv1.VMPhaseDefined, true
 	case vmm.PhaseStarting:
-		return vmv1.VMPhaseStarting
+		return vmv1.VMPhaseStarting, true
 	case vmm.PhaseRunning:
-		return vmv1.VMPhaseRunning
+		return vmv1.VMPhaseRunning, true
 	case vmm.PhaseStopping:
-		return vmv1.VMPhaseStopping
+		return vmv1.VMPhaseStopping, true
 	case vmm.PhaseStopped:
-		return vmv1.VMPhaseStopped
+		return vmv1.VMPhaseStopped, true
 	case vmm.PhaseFailed:
-		return vmv1.VMPhaseFailed
+		return vmv1.VMPhaseFailed, true
 	default:
-		return vmv1.VMPhaseFailed
+		return vmv1.VMPhaseFailed, false
 	}
+}
+
+// isTransientPhase reports whether p is an in-flight phase that will settle on
+// its own (Starting → Running, Stopping → Stopped). The liveness path requeues
+// these so the master tracks the guest to a terminal phase instead of freezing
+// at the in-flight value until an unrelated watch event arrives (M-1).
+//
+// Caveat: the framework's queue has no backoff (最薄实现), so a requeue here is a
+// tight poll of vmm.Status until the phase settles — bounded by the transient
+// phase's own duration (typically sub-second to a few seconds), not infinite. A
+// rate-limited requeue belongs to a later framework iteration; until then a
+// bounded tight poll is preferred over a guest frozen at Starting in the master.
+func isTransientPhase(p vmm.Phase) bool {
+	return p == vmm.PhaseStarting || p == vmm.PhaseStopping
 }
 
 // reportFailure patches a failed status carrying cause's message.
