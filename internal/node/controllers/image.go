@@ -110,6 +110,16 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 		return false, fmt.Errorf("image controller: decode object %q: %w", ev.Key, err)
 	}
 
+	// Level-triggered idempotence: a ready image is already at its desired state.
+	// Re-reconciling (e.g. on the MODIFIED event our own ready-patch produced)
+	// must not re-fetch — PutImage would return ErrImageExists, which fails
+	// before reaching the no-op-guarded status patch, so the controller would
+	// spin forever (the exact e2e blind-spot loop). The early return is the only
+	// thing that breaks it, because the failure happens in fetch, not in patch.
+	if img.Status.Phase == imagev1.ImagePhaseReady {
+		return false, nil
+	}
+
 	copied, err := c.fetch(ctx, img)
 	if err != nil {
 		permanent := isPermanent(err)

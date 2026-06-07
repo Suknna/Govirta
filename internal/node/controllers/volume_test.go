@@ -181,6 +181,37 @@ func storagePoolWithPhase(name string, phase storagepoolv1.PoolPhase) storagepoo
 	return sp
 }
 
+// TestVolumeReconcileReadyVolumeIsNoOp guards the level-triggered idempotence
+// fix: a volume already Ready must not be re-created. Re-reconciling (e.g. on the
+// MODIFIED event the ready-patch itself produced) would otherwise call
+// CreateRootVolumeFromReader again, hit ErrVolumeAlreadyExists before reaching
+// the no-op-guarded status patch, and spin the controller forever — the same
+// blind-spot loop the image controller had. A ready volume reconcile must touch
+// neither the creator nor the image getter.
+func TestVolumeReconcileReadyVolumeIsNoOp(t *testing.T) {
+	vol := rootVolumeObject("vol-a")
+	vol.Status.Phase = volumev1.VolumePhaseReady
+
+	creator := &fakeRootVolumeCreator{}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
+	c := NewVolumeController(creator, getter, dep)
+
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false on a ready no-op")
+	}
+	if creator.createCalls != 0 {
+		t.Errorf("CreateRootVolumeFromReader called %d times on ready volume, want 0", creator.createCalls)
+	}
+	if getter.getCalls != 0 {
+		t.Errorf("GetImage called %d times on ready volume, want 0", getter.getCalls)
+	}
+}
+
 func imageReadyObject(name string, format imagev1.ImageFormat) imagev1.Image {
 	return imagev1.Image{
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindImage},

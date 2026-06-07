@@ -201,6 +201,36 @@ func TestImageReconcileFileSourceReady(t *testing.T) {
 	}
 }
 
+// TestImageReconcileReadyIsNoOp guards the level-triggered idempotence fix: a
+// ready image re-reconciled (e.g. on the MODIFIED event the ready-patch itself
+// produced) must NOT re-fetch. Without the early return PutImage returns
+// ErrImageExists before the no-op-guarded patch, so the controller spins forever
+// — the exact e2e blind-spot loop that fired 13592 times. The reconcile must be
+// a clean no-op: no PutImage, no patch.
+func TestImageReconcileReadyIsNoOp(t *testing.T) {
+	putter := &fakeImagePutter{writer: &bufferImageWriter{}}
+	reporter := &fakeImageStatusReporter{}
+	c := NewImageController(putter, reporter, http.DefaultClient, t.TempDir())
+
+	img := fileSourceImage("img-a", "pool-a", "file:///x")
+	img.Status.Phase = imagev1.ImagePhaseReady
+	ev := newImageEvent(t, controller.EventAdded, img)
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false for a ready image")
+	}
+	if putter.putCalls != 0 {
+		t.Errorf("PutImage called %d times on a ready image, want 0", putter.putCalls)
+	}
+	if len(reporter.patches) != 0 {
+		t.Errorf("PatchStatus called %d times on a ready image, want 0", len(reporter.patches))
+	}
+}
+
 func TestImageReconcilePlainFilePathReady(t *testing.T) {
 	// Location 不带 file:// 前缀的绝对路径也应被接受。
 	content := []byte("raw-bytes")

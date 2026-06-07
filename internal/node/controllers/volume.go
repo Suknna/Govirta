@@ -109,6 +109,17 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		return false, fmt.Errorf("volume controller: decode object %q: %w", ev.Key, err)
 	}
 
+	// Level-triggered idempotence: a ready volume is already at its desired
+	// state. Re-reconciling (e.g. on the MODIFIED event our own ready-patch
+	// produced) must not re-create — CreateRootVolume would return
+	// ErrVolumeAlreadyExists, which fails before reaching the no-op-guarded
+	// status patch, so the controller would spin forever (the same blind-spot
+	// loop the image controller had). The early return breaks it because the
+	// failure happens in create, not in patch.
+	if vol.Status.Phase == volumev1.VolumePhaseReady {
+		return false, nil
+	}
+
 	img, ready, err := c.gate(ctx, vol)
 	if err != nil {
 		// A dependency read failed transiently: requeue without patching failed
