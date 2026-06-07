@@ -64,7 +64,12 @@ scripts/verify.sh
 
 case "$acceptance_mode" in
 	full)
+		# Pushing main is the authority gate: run both the hostnet/egress Lima
+		# acceptance suite and the distributed-spine e2e closure. They use
+		# distinct Lima instances and LIMA_HOME paths (govirta-acceptance vs
+		# govirta-e2e), so running both in one push does not collide.
 		scripts/acceptance.sh full
+		scripts/e2e.sh full
 		;;
 	linux)
 		scripts/acceptance.sh linux
