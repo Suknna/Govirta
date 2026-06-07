@@ -257,6 +257,55 @@ func RunStoreContract(t *testing.T, newStore func() Store) {
 			t.Fatalf("resume event 2 = %+v, want ADDED for /govirta/pod/b", ev2)
 		}
 	})
+
+	t.Run("WatchEmptyStartRevisionListsThenWatches", func(t *testing.T) {
+		t.Helper()
+		s := newStore()
+		defer s.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Two objects exist BEFORE any watch opens. An empty-startRevision watch
+		// must still observe them as ADDED (list-then-watch / resourceVersion=0),
+		// then deliver subsequent changes live. Without the initial list, an
+		// object created before the watch opened is lost forever — the real
+		// first-connect race that froze the node controllers in e2e.
+		if _, err := s.Put(ctx, "/govirta/pod/a", []byte(`{"v":1}`), ""); err != nil {
+			t.Fatalf("Put pre-existing a: unexpected error: %v", err)
+		}
+		if _, err := s.Put(ctx, "/govirta/pod/b", []byte(`{"v":1}`), ""); err != nil {
+			t.Fatalf("Put pre-existing b: unexpected error: %v", err)
+		}
+
+		ch, err := s.Watch(ctx, "/govirta/pod/", "")
+		if err != nil {
+			t.Fatalf("Watch: unexpected error: %v", err)
+		}
+
+		// Both pre-existing objects must arrive as ADDED before any live event.
+		got := map[string]bool{}
+		for i := 0; i < 2; i++ {
+			ev := recvEvent(t, ctx, ch)
+			if ev.Type != EventAdded {
+				t.Fatalf("snapshot event %d = %+v, want ADDED", i, ev)
+			}
+			got[ev.Object.Key] = true
+		}
+		if !got["/govirta/pod/a"] || !got["/govirta/pod/b"] {
+			t.Fatalf("snapshot keys = %v, want both /govirta/pod/a and /govirta/pod/b", got)
+		}
+
+		// A change after the snapshot must still be delivered live on the same
+		// watch (the cutover from list to watch loses nothing).
+		if _, err := s.Put(ctx, "/govirta/pod/c", []byte(`{"v":1}`), ""); err != nil {
+			t.Fatalf("Put live c: unexpected error: %v", err)
+		}
+		ev := recvEvent(t, ctx, ch)
+		if ev.Type != EventAdded || ev.Object.Key != "/govirta/pod/c" {
+			t.Fatalf("live event = %+v, want ADDED for /govirta/pod/c", ev)
+		}
+	})
 }
 
 // recvEvent receives one WatchEvent or fails if the context expires first.

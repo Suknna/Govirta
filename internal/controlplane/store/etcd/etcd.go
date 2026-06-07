@@ -126,55 +126,95 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Watch streams events for keys under prefix. With startRevision == "" delivery
-// begins from the current revision (changes after this call). With a non-empty
-// startRevision, watching resumes from startRevision+1 so the caller does not
-// re-receive the change it already observed at startRevision. The returned
-// channel is closed when ctx is done (its goroutine then exits), making the
-// caller's ctx the sole owner of the watch's lifetime.
+// Watch streams events for keys under prefix. With startRevision == "" it is a
+// list-then-watch: the store first snapshots every current matching object as an
+// ADDED event, then watches from the snapshot's revision so no change between the
+// list and the watch is missed or duplicated (k8s resourceVersion=0 semantics).
+// This is what lets a consumer that connects after objects already exist still
+// observe them — without it, objects created before the watch opened are lost.
+// With a non-empty startRevision, watching resumes from startRevision+1 so the
+// caller does not re-receive the change it already observed at startRevision. The
+// returned channel is closed when ctx is done (its goroutine then exits), making
+// the caller's ctx the sole owner of the watch's lifetime.
 func (s *Store) Watch(ctx context.Context, prefix string, startRevision string) (<-chan store.WatchEvent, error) {
-	opts := []clientv3.OpOption{clientv3.WithPrefix()}
-	if startRevision != "" {
-		from, err := strconv.ParseInt(startRevision, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("etcd: parse startRevision %q: %w", startRevision, err)
-		}
-		opts = append(opts, clientv3.WithRev(from+1))
-	}
-
-	watchCh := s.cli.Watch(ctx, prefix, opts...)
 	out := make(chan store.WatchEvent)
 
-	go func() {
-		// Closing out on exit lets consumers range over the channel and stop
-		// cleanly once ctx is cancelled or the watch ends.
-		defer close(out)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case wresp, ok := <-watchCh:
-				if !ok {
-					// The clientv3 watch channel closed (ctx cancelled or client
-					// closed); terminate the goroutine.
+	if startRevision == "" {
+		// list-then-watch: read the current snapshot and the revision it was
+		// served at, then watch from snapshot.Revision+1. etcd guarantees the
+		// watch replays every event from that revision onward, so an event that
+		// lands between the Get and the Watch is delivered by the watch rather
+		// than lost — and never duplicated, because the snapshot's own objects
+		// are at revisions <= the watch start.
+		resp, err := s.cli.Get(ctx, prefix, clientv3.WithPrefix())
+		if err != nil {
+			return nil, fmt.Errorf("etcd: list-then-watch snapshot %q: %w", prefix, err)
+		}
+		snapshot := resp.Kvs
+		watchCh := s.cli.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision+1))
+		go func() {
+			defer close(out)
+			for _, kv := range snapshot {
+				ev := store.WatchEvent{
+					Type: store.EventAdded,
+					Object: store.RawObject{
+						Key:             string(kv.Key),
+						Value:           append([]byte(nil), kv.Value...),
+						ResourceVersion: strconv.FormatInt(kv.ModRevision, 10),
+					},
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
 					return
 				}
-				for _, ev := range wresp.Events {
-					out2, ok := translate(ev)
-					if !ok {
-						continue
-					}
-					select {
-					case out <- out2:
-					case <-ctx.Done():
-						return
-					}
-				}
 			}
-		}
+			s.drainWatch(ctx, watchCh, out)
+		}()
+		return out, nil
+	}
+
+	from, err := strconv.ParseInt(startRevision, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("etcd: parse startRevision %q: %w", startRevision, err)
+	}
+	watchCh := s.cli.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithRev(from+1))
+	go func() {
+		defer close(out)
+		s.drainWatch(ctx, watchCh, out)
 	}()
 
 	return out, nil
+}
+
+// drainWatch forwards translated events from an etcd watch channel to out until
+// ctx is cancelled or the watch channel closes. Closing out is the caller's
+// responsibility (via defer), so this helper is shared by both the list-then-
+// watch and resume paths without either duplicating the drain loop.
+func (s *Store) drainWatch(ctx context.Context, watchCh clientv3.WatchChan, out chan<- store.WatchEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case wresp, ok := <-watchCh:
+			if !ok {
+				// The clientv3 watch channel closed (ctx cancelled or client
+				// closed); terminate the goroutine.
+				return
+			}
+			for _, ev := range wresp.Events {
+				out2, ok := translate(ev)
+				if !ok {
+					continue
+				}
+				select {
+				case out <- out2:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
 }
 
 // Close releases the underlying etcd client.

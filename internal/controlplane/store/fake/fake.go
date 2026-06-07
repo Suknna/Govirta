@@ -189,12 +189,17 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Watch streams events for keys under prefix. With startRevision == "" delivery
-// begins with changes that happen after this call (current-and-after). With a
-// non-empty startRevision the current matching objects whose revision is newer
-// than startRevision are replayed as ADDED first, so a reconnecting consumer
-// does not miss objects created while it was disconnected. The returned channel
-// is closed when ctx is done or the store is closed.
+// Watch streams events for keys under prefix. With startRevision == "" it is a
+// list-then-watch: the current matching objects are enqueued as ADDED first,
+// then the watcher is registered so it observes every subsequent change. Holding
+// s.mu across snapshot + registration makes the cutover atomic, so no change is
+// missed or duplicated — the fake mirrors the etcd store's resourceVersion=0
+// list-then-watch (single source of truth: etcd behavior is authoritative). This
+// is what lets a consumer that connects after objects already exist still observe
+// them. With a non-empty startRevision the recorded event sequence whose revision
+// is newer than startRevision is replayed instead, preserving each event's
+// original type (ADDED/MODIFIED/DELETED), mirroring etcd's WithRev(from+1) resume.
+// The returned channel is closed when ctx is done or the store is closed.
 func (s *Store) Watch(ctx context.Context, prefix string, startRevision string) (<-chan store.WatchEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -214,28 +219,44 @@ func (s *Store) Watch(ctx context.Context, prefix string, startRevision string) 
 		notify: make(chan struct{}, 1),
 	}
 
-	// Catch-up replay for a non-empty startRevision. Empty means "from now", so
-	// we skip replay to honor the Task 1 contract semantics exactly. For a
-	// non-empty startRevision we replay the real recorded event sequence whose
-	// revision is greater than startRevision, preserving each event's original
-	// type (ADDED/MODIFIED/DELETED). This matches the etcd store, which resumes
-	// from the MVCC history via WithRev(startRevision+1); a reconnecting consumer
-	// sees the same event stream from either implementation (single source of
-	// truth: the etcd behavior is authoritative and the fake mirrors it).
-	if startRevision != "" {
-		if from, err := strconv.ParseInt(startRevision, 10, 64); err == nil {
-			for _, ev := range s.history {
-				if !strings.HasPrefix(ev.Object.Key, prefix) {
-					continue
-				}
-				rv, perr := strconv.ParseInt(ev.Object.ResourceVersion, 10, 64)
-				if perr != nil || rv <= from {
-					continue
-				}
-				replay := ev
-				replay.Object.Value = append([]byte(nil), ev.Object.Value...)
-				w.enqueue(replay)
+	if startRevision == "" {
+		// list-then-watch: snapshot the current matching objects as ADDED in key
+		// order (deterministic, like etcd's sorted prefix scan), then register
+		// below under the same lock so subsequent changes are not missed.
+		keys := make([]string, 0, len(s.data))
+		for key := range s.data {
+			if strings.HasPrefix(key, prefix) {
+				keys = append(keys, key)
 			}
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			obj := s.data[key]
+			snapshot := store.WatchEvent{
+				Type: store.EventAdded,
+				Object: store.RawObject{
+					Key:             obj.Key,
+					Value:           append([]byte(nil), obj.Value...),
+					ResourceVersion: obj.ResourceVersion,
+				},
+			}
+			w.enqueue(snapshot)
+		}
+	} else if from, err := strconv.ParseInt(startRevision, 10, 64); err == nil {
+		// Resume replay: the real recorded event sequence after startRevision,
+		// preserving each event's original type. This matches the etcd store,
+		// which resumes from the MVCC history via WithRev(startRevision+1).
+		for _, ev := range s.history {
+			if !strings.HasPrefix(ev.Object.Key, prefix) {
+				continue
+			}
+			rv, perr := strconv.ParseInt(ev.Object.ResourceVersion, 10, 64)
+			if perr != nil || rv <= from {
+				continue
+			}
+			replay := ev
+			replay.Object.Value = append([]byte(nil), ev.Object.Value...)
+			w.enqueue(replay)
 		}
 	}
 
