@@ -55,7 +55,7 @@ func TestCreateCreatesEmptyQCOW2AtSafePath(t *testing.T) {
 	}
 
 	wantPath := filepath.Join(driver.storageRoot, "pool", "pool-a", "vm-a", "vm-a-disk-0.qcow2")
-	if got := created.Context[pathKey]; got != wantPath {
+	if got := created.Context[PathKey]; got != wantPath {
 		t.Fatalf("created path = %q, want %q", got, wantPath)
 	}
 	if got := created.Context[formatKey]; got != string(volume.DiskFormatQCOW2) {
@@ -680,7 +680,7 @@ func TestCreateCommittedTmpCleanupFailureReturnsCommittedVolumeAndError(t *testi
 	if !errors.Is(err, cleanupErr) {
 		t.Fatalf("Create() error = %v, want wrapped %v", err, cleanupErr)
 	}
-	if created.ID != volume.ID("vol-a") || created.Context[pathKey] != target {
+	if created.ID != volume.ID("vol-a") || created.Context[PathKey] != target {
 		t.Fatalf("Create() volume = %+v, want committed volume metadata", created)
 	}
 	if calls := runner.args(); len(calls) != 1 {
@@ -764,7 +764,7 @@ func TestCreateFromReaderCopiesQCOW2BytesWithoutConvert(t *testing.T) {
 	}
 
 	wantPath := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
-	if created.Context[pathKey] != wantPath || created.Context[formatKey] != string(volume.DiskFormatQCOW2) {
+	if created.Context[PathKey] != wantPath || created.Context[formatKey] != string(volume.DiskFormatQCOW2) {
 		t.Fatalf("created context = %#v, want qcow2 path %q", created.Context, wantPath)
 	}
 	if created.Role != volume.RoleRoot {
@@ -1079,7 +1079,7 @@ func TestCreateFromReaderCommittedTmpCleanupFailureReturnsCommittedVolumeAndErro
 	if !errors.Is(err, cleanupErr) {
 		t.Fatalf("CreateFromReader() error = %v, want wrapped %v", err, cleanupErr)
 	}
-	if created.ID != volume.ID("vol-a") || created.Context[pathKey] != target {
+	if created.ID != volume.ID("vol-a") || created.Context[PathKey] != target {
 		t.Fatalf("CreateFromReader() volume = %+v, want committed volume metadata", created)
 	}
 	if calls := runner.args(); len(calls) != 0 {
@@ -1192,7 +1192,7 @@ func newVolumeWithPath(path string) volume.Volume {
 		VMName:    "vm-a",
 		PoolName:  "pool-a",
 		DiskIndex: 0,
-		Context:   map[string]string{pathKey: path, formatKey: string(volume.DiskFormatQCOW2)},
+		Context:   map[string]string{PathKey: path, formatKey: string(volume.DiskFormatQCOW2)},
 	}
 }
 

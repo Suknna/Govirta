@@ -13,20 +13,13 @@ import (
 	"github.com/suknna/govirta/internal/node/controller"
 	"github.com/suknna/govirta/internal/storage"
 	"github.com/suknna/govirta/internal/storage/diskformat"
+	"github.com/suknna/govirta/internal/storage/local"
 	"github.com/suknna/govirta/internal/storage/volume"
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
-
-// volumePathContextKey is the key under which the local block driver records a
-// created volume's host path in volume.Volume.Context (see
-// internal/storage/local/driver.go pathKey). The apis volume.Volume model
-// carries no first-class Path field, so the controller reads the host path from
-// this context entry — matching how the storage layer itself stores and reads
-// it. (Plan偏离: plan 写 vol.Path，但该字段不存在；见报告。)
-const volumePathContextKey = "path"
 
 // RootVolumeCreator is the narrow slice of the volume service the controller
 // needs: derive an independent root qcow2 volume from an image byte reader.
@@ -148,7 +141,7 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		return true, fmt.Errorf("volume controller: create root volume %q: %w", vol.Name, err)
 	}
 
-	path := created.Context[volumePathContextKey]
+	path := created.Context[local.PathKey]
 	if path == "" {
 		// A created volume without a host path is an internal inconsistency:
 		// treat it as transient (report failed and requeue).

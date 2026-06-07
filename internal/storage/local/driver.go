@@ -21,7 +21,13 @@ import (
 const (
 	driverName = "local-qcow2"
 	formatKey  = "format"
-	pathKey    = "path"
+	// PathKey is the volume.Context map key under which this driver records the
+	// host filesystem path of a created volume. It is exported because the node
+	// VM/volume controller reads the published volume's host path from
+	// Context[PathKey]; sharing one constant removes a silent cross-layer string
+	// duplication (a drifted key would otherwise degrade the controller to a
+	// permanent not-ready without a compile error).
+	PathKey = "path"
 )
 
 var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -135,7 +141,7 @@ func (d *Driver) Create(ctx context.Context, req block.CreateRequest) (volume.Vo
 		CapacityBytes: req.CapacityBytes,
 		State:         volume.StateAvailable,
 		Context: map[string]string{
-			pathKey:   path,
+			PathKey:   path,
 			formatKey: string(volume.DiskFormatQCOW2),
 		},
 	}
@@ -503,7 +509,7 @@ func (d *Driver) pathFromVolume(vol volume.Volume) (string, string, error) {
 	}
 	volumeDir := filepath.Join(d.poolRoot, vol.VMID)
 	expectedPath := filepath.Join(volumeDir, fmt.Sprintf("%s-disk-%d.qcow2", vol.VMName, vol.DiskIndex))
-	path := vol.Context[pathKey]
+	path := vol.Context[PathKey]
 	if path == "" {
 		return "", "", volume.ErrInvalidRequest
 	}
@@ -630,7 +636,7 @@ func (d *Driver) newVolume(req block.CreateFromReaderRequest, path string) volum
 		CapacityBytes: req.CapacityBytes,
 		State:         volume.StateAvailable,
 		Context: map[string]string{
-			pathKey:   path,
+			PathKey:   path,
 			formatKey: string(volume.DiskFormatQCOW2),
 		},
 	}
