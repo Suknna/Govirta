@@ -49,11 +49,13 @@ func (m *Manager) runController(ctx context.Context, c Controller) error {
 // resume (项目 minimal scope); a real retry/backoff policy is out of this task.
 //
 // startRevision (lastRV) is the resume cursor handed to each Watch call. The
-// framework is kind-agnostic and Event carries no ResourceVersion field, so this
-// minimal implementation never advances lastRV: every (re)connect starts from
-// the source's current state (lastRV stays ""). Extracting an RV from the object
-// bytes to resume precisely belongs to the watchclient layer (Task 5), which can
-// parse the concrete kind without leaking that knowledge into this framework.
+// watchclient layer fills each Event.ResourceVersion from the wire event's
+// metadata.resourceVersion (it can parse the concrete kind without leaking that
+// knowledge into this kind-agnostic framework); feed records the last non-empty
+// one and hands it to the next Watch so a reconnect resumes after the last
+// version seen rather than replaying the source's full current state. This is
+// the master↔node half of the resume contract proven against real etcd in the
+// Store layer (resourceVersion → startRevision).
 func (m *Manager) feed(ctx context.Context, kind string, q *Queue) error {
 	lastRV := ""
 	for {
@@ -69,22 +71,32 @@ func (m *Manager) feed(ctx context.Context, kind string, q *Queue) error {
 			return fmt.Errorf("watch kind %q: %w", kind, err)
 		}
 
-		// Drain the stream until the source closes it or ctx is cancelled.
-		consume(ctx, ch, q)
+		// Drain the stream until the source closes it or ctx is cancelled,
+		// advancing the resume cursor past the last version this connection saw.
+		lastRV = consume(ctx, ch, q, lastRV)
 	}
 }
 
 // consume forwards Events from ch into q until ch is closed by the source or ctx
 // is cancelled. Selecting on ctx.Done() means the feeder exits promptly even if
 // a misbehaving source forgets to close its channel on cancellation.
-func consume(ctx context.Context, ch <-chan Event, q *Queue) {
+//
+// It threads the resume cursor: starting from startRV, it returns the last
+// non-empty Event.ResourceVersion it forwarded (or startRV unchanged if the
+// connection delivered no versioned event), so the caller can resume the next
+// watch after it.
+func consume(ctx context.Context, ch <-chan Event, q *Queue, startRV string) string {
+	lastRV := startRV
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return lastRV
 		case ev, ok := <-ch:
 			if !ok {
-				return
+				return lastRV
+			}
+			if ev.ResourceVersion != "" {
+				lastRV = ev.ResourceVersion
 			}
 			q.Add(ev)
 		}
