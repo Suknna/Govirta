@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 3804ad0
+  base_commit: 8778cb4
   files:
     - internal/vmm/service.go
     - internal/vmm/lifecycle.go
@@ -183,4 +183,5 @@ Conflict arbitration: `intent=Running` + process gone → `Failed` (never report
 - Out of scope (deferred): reconcile loop (upper `internal/node`), fencing token / STONITH strong-consistency double-write prevention, VNC byte-stream proxy/websocket, cold snapshot/resize/config edit, control-plane etcd integration.
 - Verification: `go test -race -count=1 ./internal/vmm/...` (fake `ProcessController` + fake `qmp.Client`, full phase-derivation table, lifecycle, anti-split-brain guard, ctx cancellation); Lima-only `TestVMMLifecycleEndToEnd` + `TestVMMDiscoverNeverRestartsDeadVM` (`test/acceptance/vmm_lifecycle_test.go`) prove real daemonize/QMP/powerdown/kill/discover/reattach and the never-auto-restart guard on a real kernel.
 - Graceful Stop is best-effort, matching libvirt/Proxmox/kubevirt: QMP `system_powerdown` only injects an ACPI power-button event and returns immediately; whether the guest exits depends on guest ACPI cooperation. direct-kernel cirros aarch64 has no UEFI/ACPI, so the acceptance test asserts only that Stop is accepted, intent lands `Stopped`, and phase ∈ {`Stopping`, `Stopped`} — never that the guest truly exits. Guaranteed stop is `Kill` (QMP `quit`, no guest cooperation); upper layers own the Stop→Kill grace-period escalation.
+- `SpawnDaemonized` captures QEMU's stderr during the synchronous fork-before-daemonize phase. Pre-daemonize initialization errors (argv parse, disk open, QMP bind failure) are written to stderr with a non-zero exit code; the captured text is joined into the returned error so callers see the actual QEMU diagnostic instead of a bare "exit status 1". This does not violate the decoupling constraint: only the pre-fork parent's synchronous output is captured; after daemonize the parent exits and the guest is setsid-detached with its own `-D`/`-serial` log.
 - Evidence: direct source reads + AFT outline for symbol/line confirmation at `base_commit a240be0`. `[已验证]` 源码与单测断言；Lima acceptance 为真实内核网关。`[降级: LSP call hierarchy]`.

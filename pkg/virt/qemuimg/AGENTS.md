@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 3804ad0
+  base_commit: 8778cb4
   files:
     - pkg/virt/qemuimg/client.go
     - pkg/virt/qemuimg/client_test.go

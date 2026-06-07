@@ -4,7 +4,7 @@
 
 <!--
 Verified-against:
-  base_commit: 3804ad0
+  base_commit: 8778cb4
   files:
     - pkg/virt/qmp/client.go
     - pkg/virt/qmp/types.go

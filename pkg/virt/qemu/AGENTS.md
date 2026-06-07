@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 3804ad0
+  base_commit: 8778cb4
   files:
     - cmd/qemucli/main.go
     - pkg/virt/qemu/vm.go
@@ -50,7 +50,7 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 | Direct-kernel boot | `vm.go:314` | `Kernel()`/`Initrd()`/`Append()` render `-kernel`/`-initrd`/`-append` after `-m`; `TestVMArgvRendersDirectKernelBoot` (`vm_test.go:131`); for EFI-less images like cirros aarch64 |
 | Machine profile whitelist | `machine/machine.go:8` | `ProfileX86_64Q35KVM`, `ProfileAArch64VirtKVM` |
 | qcow2 backing | `blockdev/blockdev.go:22` | `Qcow2{NodeName, File, Cache, AIO}` + `Arg()` (`:46`) renders nested `file.driver=file` + `file.filename` |
-| virtio-blk / virtio-net | `device/device.go:13` | `VirtioBlkPCI`, `VirtioNetPCI` with optional fields |
+| virtio-blk / virtio-net | `device/device.go:13` | `VirtioBlkPCI`, `VirtioNetPCI` with optional fields; `VirtioNetPCI.RomFile` (`qflag.OptionalString`) disables PXE ROM when set |
 | Firmware BIOS | `firmware/firmware.go:8` | `BIOS{Path}` renders the value for typed `Builder.BIOS` |
 | TAP netdev | `netdev/netdev.go:10` | `Tap{ID, IfName, Script, DownScript, Vhost}` |
 | QMP/serial chardev | `chardev/chardev.go:7` | `Socket{ID, Path, Server, Wait}` |
@@ -64,6 +64,7 @@ Typed QEMU argv builder. Composes a `Builder` from machine profiles and typed de
 - Typed entries validate and render during `Build()` through `qopt`; required fields, supported enum values, and QEMU option delimiters must be rejected before `VM.Argv()` is exposed.
 - Optional `OnOff` fields default to empty string (unset → omitted); never compare to `"on"`/`"off"` directly, use `qflag.On`/`qflag.Off`.
 - Optional integers (e.g. `VirtioBlkPCI.BootIndex`) use `qflag.OptionalInt` so 0 is distinguishable from unset.
+- Optional strings (e.g. `VirtioNetPCI.RomFile`) use `qflag.OptionalString` so empty string is distinguishable from unset. Some QEMU options carry a meaningful empty value (e.g. `romfile=` disables a device's option ROM); `qopt.PresentEmptyOK` renders these as bare `key=`.
 - Subpackages depend only on `qflag`; never cross-import sibling subpackages outside `device` (which legitimately references `blockdev` + `netdev` ref types).
 - Machine network defaults are not implicit: a VM either declares network devices (`AddNetdev`/virtio-net `AddDevice`) or calls `NoNIC()` to render an explicit `-nic none`. `Build()` rejects combining the two (`vm.go:365`).
 - Adding a new device: implement `Arg() (string, error)` matching the `Device` interface (`vm.go:153`), validate with `qopt`, and pass it via `Builder.AddDevice`. No core switch changes required (`vm_test.go:587` covers this contract).
