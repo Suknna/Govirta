@@ -253,3 +253,59 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestObjectMetaDeletionRoundTrip proves the刀1 finalizer 两阶段删除 envelope
+// fields survive a JSON marshal→unmarshal round-trip without loss: a fully
+// populated StoragePool carrying DeletionTimestamp + a typed Finalizer must
+// come back byte-for-byte equal in those fields. This guards Task 2 of the
+// delete-lifecycle plan, on which the apiserver inject / DELETE handler /
+// node teardown controller all depend.
+func TestObjectMetaDeletionRoundTrip(t *testing.T) {
+	in := storagepoolv1.StoragePool{
+		TypeMeta: metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindStoragePool},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "pool-deleting",
+			UID:               "u-pool-deleting",
+			ResourceVersion:   "99",
+			NodeName:          "node0",
+			DeletionTimestamp: "2026-06-07T10:00:00Z",
+			Finalizers:        []metav1.Finalizer{metav1.FinalizerNodeTeardown},
+		},
+		Spec: storagepoolv1.StoragePoolSpec{
+			Backend:       storagepoolv1.BackendLocalBlock,
+			Type:          storagepoolv1.PoolTypeBlock,
+			StorageRoot:   "/var/lib/govirtlet/pools/p1",
+			CapacityBytes: 1 << 30,
+		},
+		Status: storagepoolv1.StoragePoolStatus{Phase: storagepoolv1.PoolPhaseReady},
+	}
+
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// The new fields must surface inside the inline metadata envelope.
+	var raw struct {
+		Metadata map[string]json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("raw unmarshal: %v", err)
+	}
+	for _, k := range []string{"deletionTimestamp", "finalizers"} {
+		if _, ok := raw.Metadata[k]; !ok {
+			t.Fatalf("missing metadata key %q in %s", k, b)
+		}
+	}
+
+	var out storagepoolv1.StoragePool
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.DeletionTimestamp != in.DeletionTimestamp {
+		t.Fatalf("deletionTimestamp mismatch: got %q want %q", out.DeletionTimestamp, in.DeletionTimestamp)
+	}
+	if len(out.Finalizers) != 1 || out.Finalizers[0] != metav1.FinalizerNodeTeardown {
+		t.Fatalf("finalizers mismatch: got %+v want [%q]", out.Finalizers, metav1.FinalizerNodeTeardown)
+	}
+}

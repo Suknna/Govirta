@@ -30,6 +30,16 @@ const (
 	KindVM Kind = "VM"
 )
 
+// Finalizer 是阻止对象在 live 资源拆净前被真正删除的守卫标识。
+// 状态机式标识符，专用类型 + 命名常量（项目铁律：no bare string）。
+type Finalizer string
+
+const (
+	// FinalizerNodeTeardown 表示该对象有 node 侧 live 资源待拆除；
+	// node 拆净后通过 finalizers 端点摘除它，apiserver 见 finalizers 清空才真删。
+	FinalizerNodeTeardown Finalizer = "govirta.io/node-teardown"
+)
+
 // ErrInvalidObjectMeta is returned when required identity fields are missing.
 var ErrInvalidObjectMeta = errors.New("apis: invalid object metadata")
 
@@ -51,6 +61,10 @@ type ObjectMeta struct {
 	ResourceVersion string            `json:"resourceVersion,omitempty"`
 	NodeName        string            `json:"nodeName,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
+	// DeletionTimestamp 非空表示对象处于删除中（RFC3339）；空=未删。
+	DeletionTimestamp string `json:"deletionTimestamp,omitempty"`
+	// Finalizers 是拆净前阻止真删的守卫列表；空且 DeletionTimestamp 非空时 apiserver 真删。
+	Finalizers []Finalizer `json:"finalizers,omitempty"`
 }
 
 // Validate reports whether the caller-provided identity fields are present.
