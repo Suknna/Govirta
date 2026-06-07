@@ -10,7 +10,14 @@ saw_non_delete=0
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-linux_relevant_pattern='^(internal/network/bridge/|internal/virt/qemu/|internal/virt/qmp/|internal/virt/qemuimg/|internal/storage/local/|internal/storage/localfile/|test/acceptance/|lima/|scripts/acceptance\.sh$|\.githooks/pre-push$)'
+# Path prefixes whose changes need Linux acceptance (acceptance.sh linux) on a
+# feature-branch push. Uses package roots (pkg/hostnet/, pkg/virt/) so new
+# subpackages are covered automatically. Kept in sync with the real tree after
+# the internal/virt + internal/network/bridge -> pkg/virt + pkg/hostnet refactor;
+# internal/vmm/proc holds the real daemonized-QEMU spawn (_linux.go). The e2e
+# closure (scripts/e2e.sh) is intentionally absent: it runs in the full tier on
+# main pushes, not this per-path linux tier.
+linux_relevant_pattern='^(pkg/hostnet/|pkg/virt/|internal/vmm/proc/|internal/storage/local/|internal/storage/localfile/|test/acceptance/|lima/|scripts/acceptance\.sh$|\.githooks/pre-push$)'
 
 remote_main_exists() {
 	git rev-parse --verify --quiet "$remote_name/main" >/dev/null
