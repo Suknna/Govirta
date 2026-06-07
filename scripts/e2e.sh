@@ -356,10 +356,17 @@ verify_no_orphans() {
 		fail=0
 		report() { printf "ORPHAN: %s\n" "$1" >&2; fail=1; }
 
-		# VM: no QEMU process keyed by uid, and no runtime dir.
-		if pgrep -f "$vm_uid" >/dev/null 2>&1; then
+		# VM: no QEMU process keyed by uid, and no runtime dir. Match the
+		# uid-keyed runtime path QEMU embeds in its argv (-pidfile/-chardev under
+		# ${runtime_root}/${vm_uid}) rather than the bare uid: this verification
+		# shell s own argv carries the literal "vm-e2e-001" (in the vm_uid=...
+		# assignment) and the literal tokens "${runtime_root}/${vm_uid}", but
+		# never the *expanded* concatenation "<runtime_root>/<vm_uid>", so
+		# pgrep -f cannot self-match. Exclude this shell s own pid for belt-and-
+		# braces.
+		if pgrep -f "${runtime_root}/${vm_uid}" 2>/dev/null | grep -vx "$$" | grep -q .; then
 			report "QEMU process still running for VM uid $vm_uid"
-			pgrep -af "$vm_uid" >&2 || true
+			pgrep -af "${runtime_root}/${vm_uid}" >&2 || true
 		fi
 		if [ -e "$vm_dir" ]; then
 			report "VM runtime dir still present: $vm_dir"
@@ -371,7 +378,14 @@ verify_no_orphans() {
 			report "TAP link still present: $tap"
 			ip link show "$tap" >&2 || true
 		fi
-		ruleset=$(sudo nft list ruleset 2>/dev/null || true)
+		# A check must not swallow its own failure: if the ruleset cannot be read
+		# (sudo/transient), every chain grep would silently pass and a leaked
+		# chain go undetected. Treat an unreadable ruleset as a hard orphan-check
+		# failure, not a pass.
+		if ! ruleset=$(sudo nft list ruleset 2>/dev/null); then
+			report "cannot read nftables ruleset (nft list ruleset failed)"
+			ruleset=""
+		fi
 		if printf "%s" "$ruleset" | grep -q "$anti_spoof_chain"; then
 			report "anti-spoofing chain still present: $anti_spoof_chain"
 		fi

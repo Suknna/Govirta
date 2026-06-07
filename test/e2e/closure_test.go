@@ -67,7 +67,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// The forward apply + wait-Running can take minutes; the reverse teardown
 	// adds a VM stop+delete plus six more delete→404 polls. Give the whole
 	// lifecycle ample headroom so a slow-but-correct teardown is not failed.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 
 	// Forward segment: apply the spine and wait for the VM to reach Running.
@@ -180,8 +180,10 @@ func deleteVMAndWaitGone(ctx context.Context, t *testing.T, ctl, server string) 
 			t.Fatalf("VM %s lingering after delete must carry deletionTimestamp (finalizer two-phase), got:\n%s", vmName, body)
 		}
 		t.Logf("VM %s is in the deleting state (deletionTimestamp stamped, finalizer pending)", vmName)
-	} else {
+	} else if strings.Contains(body, "not found") {
 		t.Logf("VM %s already fully removed before the mid-state read (fast teardown)", vmName)
+	} else {
+		t.Fatalf("VM %s get after delete failed but was not a 404 (%q) — a transient error must not be mistaken for fast teardown: %v\noutput:\n%s", vmName, "not found", gerr, body)
 	}
 
 	// The VM controller stops a Running VM before deleting it
