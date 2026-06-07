@@ -27,8 +27,34 @@ func TestIdentityNetworkDeterministic(t *testing.T) {
 	if want := firewall.ChainName("gv-fwd-" + name); first.ForwardChain != want {
 		t.Errorf("ForwardChain = %q, want %q", first.ForwardChain, want)
 	}
-	if want := firewall.RuleOwner("govirta/" + name); first.RuleOwner != want {
+	if want := firewall.RuleOwner("govirta-" + name); first.RuleOwner != want {
 		t.Errorf("RuleOwner = %q, want %q", first.RuleOwner, want)
+	}
+}
+
+// TestIdentityRuleOwnerUsesFirewallSafeBytesOnly guards the exact regression
+// that froze the network controller in e2e: the host firewall's validateSafeName
+// rejects any byte outside [a-zA-Z0-9_.-], so a RuleOwner containing "/" made
+// every masquerade ensure fail and the controller spin forever. The unit tests
+// derived the owner but never ran it through firewall validation, so the "/" in
+// the old "govirta/" prefix went unnoticed. This test asserts the derived owner
+// is firewall-safe for several network names, mirroring validateSafeName's rule.
+func TestIdentityRuleOwnerUsesFirewallSafeBytesOnly(t *testing.T) {
+	safe := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '_' || b == '.' || b == '-'
+	}
+	for _, name := range []string{"net", "tenant-a-net", "n0", "a.b-c_d"} {
+		owner := string(DeriveNetworkIdentity(name).RuleOwner)
+		if owner == "" || owner == "." || owner == ".." {
+			t.Errorf("RuleOwner for %q = %q, want non-empty and not dot-relative", name, owner)
+		}
+		for i := 0; i < len(owner); i++ {
+			if !safe(owner[i]) {
+				t.Errorf("RuleOwner for %q = %q contains firewall-unsafe byte %q at %d", name, owner, owner[i], i)
+				break
+			}
+		}
 	}
 }
 

@@ -36,8 +36,12 @@ const (
 	// antiSpoofChainPrefix prefixes the per-NIC anti-spoofing chain.
 	antiSpoofChainPrefix = "gv-as-"
 
-	// ruleOwnerPrefix prefixes the per-network rule owner identity.
-	ruleOwnerPrefix = "govirta/"
+	// ruleOwnerPrefix prefixes the per-network rule owner identity. It must use
+	// only firewall-safe bytes ([a-zA-Z0-9_.-]): the host firewall's
+	// validateSafeName rejects "/", so a "govirta/" prefix made every masquerade
+	// ensure fail and the network controller spin re-reconciling forever. The
+	// "-" separator matches the chain-name prefixes above and stays safe.
+	ruleOwnerPrefix = "govirta-"
 
 	// tapNamePrefix prefixes every derived TAP interface name.
 	tapNamePrefix = "gv"
