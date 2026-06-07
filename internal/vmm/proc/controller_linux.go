@@ -6,6 +6,7 @@
 package proc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,11 +42,20 @@ func (c *LinuxController) SpawnDaemonized(ctx context.Context, argv []string, ru
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = runtimeDir
 	// daemonize 后父进程立即退出，guest 日志走 -D / -serial file:；父进程的
-	// stdio 不被 guest 依赖，丢弃即可。
+	// stdin/stdout 不被 guest 依赖，丢弃即可。stderr 例外：QEMU 在 fork 出
+	// daemonized guest *之前* 的初始化错误（argv 解析、打开磁盘、bind QMP
+	// socket 失败）写到 stderr 后带非零退出码退出。捕获它并入错误，否则
+	// 调用方只看到无信息的 "exit status 1"（曾是诊断盲点）。这不违反解耦铁律：
+	// 捕获的只是 fork 前父进程的同步输出，daemonize 后父进程已退出、guest 已
+	// setsid 脱离并走自己的 -D/-serial 日志，buffer 不被运行中的 guest 依赖。
 	cmd.Stdin = nil
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if trimmed := strings.TrimSpace(stderr.String()); trimmed != "" {
+			return fmt.Errorf("proc: spawn daemonized qemu: %w: %s", err, trimmed)
+		}
 		return fmt.Errorf("proc: spawn daemonized qemu: %w", err)
 	}
 	return nil
