@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Explicitly invoke/load superpowers:goal-driven-development before implementation tasks. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Light up the full Govirta distributed spine end-to-end: `govirtctl` submits six resource manifests to the master, the node's controller-manager reconciles each onto the real Linux execution plane, a real daemonized QEMU guest boots, and `govirtctl get vm` observes `Running` — proven on the spec's three-node topology (etcd container + host `govirtad` + Lima-guest `govirtlet`).
+**Goal:** Light up the full Govirta distributed spine end-to-end: `govirtctl` submits seven resource manifests (the six first-class kinds, with StoragePool instantiated twice — a block pool and a file pool) to the master, the node's controller-manager reconciles each onto the real Linux execution plane, a real daemonized QEMU guest boots, and `govirtctl get vm` observes `Running` — proven on the spec's three-node topology (etcd container + host `govirtad` + Lima-guest `govirtlet`).
 
 **Architecture:** This is the fourth and final slice of the create-only walking skeleton. Plans 1–3 built the API contract layer, the master side (etcd Store + apiserver + scheduler + MAC allocator), and the node side (controller-manager framework + six first-class controllers + master watch client). Plan 4 adds the missing human entrypoint — `govirtctl` as a kind-agnostic manifest CLI — and proves the whole chain on real hardware. It is the first time the six controllers drive the **real** Linux netlink/nftables/CoreDHCP/QEMU execution plane via watch from a **real** master (Plan 3's smoke used darwin no-op host managers), so integration defects surface here one kind at a time.
 
@@ -43,8 +43,8 @@ These were read from the merged Plan 1–3 code at plan-writing time. Use them v
 
 **e2e acceptance** (new build-tagged suite + orchestration):
 - Create `test/e2e/doc.go` — `//go:build e2e` package doc.
-- Create `test/e2e/closure_test.go` — the host-driven six-object closure test.
-- Create `test/e2e/manifests/*.json` — six dependency-ordered resource manifests.
+- Create `test/e2e/closure_test.go` — the host-driven closure test (applies all seven manifests).
+- Create `test/e2e/manifests/*.json` — seven dependency-ordered resource manifests.
 - Create `scripts/e2e.sh` — three-node orchestration (etcd container + host govirtad + Lima-guest govirtlet + drive govirtctl).
 
 ---
@@ -755,7 +755,7 @@ Expected: `OK` for every file.
 
 ```bash
 git add test/e2e/manifests/
-git commit -m "test(e2e): add six-object dependency-ordered manifests"
+git commit -m "test(e2e): add seven dependency-ordered resource manifests"
 ```
 
 ---
@@ -827,7 +827,8 @@ Acceptance evidence:
 // Package e2e holds Govirta's end-to-end distributed-spine acceptance test. It
 // is host-driven: scripts/e2e.sh starts etcd (container), govirtad (host), and
 // govirtlet (Lima guest dialing back to the host), then runs this test, which
-// drives the govirtctl binary to apply the six first-class resources and waits
+// drives the govirtctl binary to apply the seven manifests (six first-class
+// kinds) and waits
 // for the VM to reach Running. It exercises the real Linux execution plane
 // (netlink/nftables/CoreDHCP/QEMU) reconciled from a real master over watch —
 // the proof the unit and per-package acceptance tests cannot give.
