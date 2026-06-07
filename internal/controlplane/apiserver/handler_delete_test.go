@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/suknna/govirta/internal/controlplane/mac"
+	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store/fake"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -135,6 +138,17 @@ func TestDeleteUnreferencedStampsTimestampPreservesSpec(t *testing.T) {
 	if storedVol.Spec != vol.Spec {
 		t.Fatalf("spec changed: got %+v, want %+v", storedVol.Spec, vol.Spec)
 	}
+
+	// metadata round-trip: the delete path decodes metadata into the typed
+	// ObjectMeta and re-marshals it, so identity fields outside deletionTimestamp/
+	// finalizers must survive the stamp untouched (guards against silent drop if
+	// the ObjectMeta model ever drifts from the stored metadata shape).
+	if storedVol.UID != vol.UID {
+		t.Fatalf("metadata.uid changed: got %q, want %q", storedVol.UID, vol.UID)
+	}
+	if storedVol.Name != vol.Name {
+		t.Fatalf("metadata.name changed: got %q, want %q", storedVol.Name, vol.Name)
+	}
 }
 
 // TestDeleteRepeatedIsIdempotent covers state3: a second DELETE of an
@@ -202,5 +216,51 @@ func TestDeleteStampedThenReferencedReturns409(t *testing.T) {
 	}
 	if want := refIdentity(metav1.KindVM, vm.Name); !strings.Contains(decodeError(t, rec), want) {
 		t.Fatalf("error does not name the referencing object %q; body=%s", want, rec.Body.String())
+	}
+}
+
+// TestDeleteConcurrentWriteReturns409 covers the state2 CAS branch: stamping
+// deletionTimestamp is a conditional Put against the ResourceVersion read in
+// the same request. If a concurrent apply/status write bumps the revision
+// between Get and Put, store.ErrRevisionConflict must surface as 409 so the
+// caller retries rather than clobbering the newer revision. We reuse
+// stalePatchStore (from handler_status_test.go, same package) to force the
+// conditional Put to fail deterministically.
+func TestDeleteConcurrentWriteReturns409(t *testing.T) {
+	st := fake.New()
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	})
+	pool, err := mac.NewPool(net.HardwareAddr{0x02, 0x00, 0x00}, 0x000001, 0x0000ff)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	alloc := mac.NewAllocator(pool, st)
+
+	// Wrap so the first conditional (expectedVersion != "") Put fails with
+	// ErrRevisionConflict — exactly the delete-stamp CAS. Unconditional seeds
+	// (apply) pass through, so the Volume is created normally.
+	wrapped := &stalePatchStore{Store: st, failsRemaining: 1}
+	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+
+	// Seed an unreferenced Volume so the reference guard passes and the handler
+	// reaches the stamping CAS Put.
+	vol := validVolume()
+	if rec := doApply(t, srv, metav1.KindVolume, vol.Name, vol); rec.Code != http.StatusCreated {
+		t.Fatalf("seed volume apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doDelete(t, srv, metav1.KindVolume, vol.Name)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (CAS conflict on stamp must surface as 409); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+	if wrapped.failsRemaining != 0 {
+		t.Fatalf("forced CAS conflict not consumed; failsRemaining = %d", wrapped.failsRemaining)
 	}
 }

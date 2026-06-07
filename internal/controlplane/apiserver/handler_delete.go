@@ -23,9 +23,9 @@ import (
 // endpoint (Task 6), deliberately not here.
 //
 // 两个核心正确性点：
-//   - 反向引用扫描在"首次打戳"和"重复删除"两条路径都跑。finalizer 删除是异步的，
-//     从打戳到真删之间存在时间窗，期间可能有新对象引用本对象；状态3 不重扫就会
-//     放过这种竞态，留下悬挂引用。
+//   - 反向引用扫描在"首次打戳"和"重复删除"两条路径都跑。状态3 的重扫提供额外一层防护，
+//     但它只在客户端主动发起二次 DELETE 时才触发，可能永不发生——真删前的权威引用校验
+//     在 finalizers 端点（Task 6），那里才是关闭"打戳到真删之间被新引用"竞态窗口的权威防线。
 //   - 打戳走 CAS（store.Put 带读到的 ResourceVersion），防止与并发 apply/status
 //     写互相覆盖：若期间对象被改写，CAS 失败，让客户端重试而非盲目覆盖。
 
@@ -83,8 +83,9 @@ func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 		return internalErr(fmt.Errorf("apiserver: decode %s/%s for delete: %w", kind, name, err))
 	}
 
-	// 状态3：已带 deletionTimestamp（重复删除 / 删除进行中）。不重复打戳，但仍要
-	// 重扫反向引用，因为打戳到真删之间可能有新对象引用进来——漏扫会让真删留下悬挂引用。
+	// 状态3：已带 deletionTimestamp（重复删除 / 删除进行中）。不重复打戳，但仍重扫
+	// 反向引用作为额外一层防护——注意这条路径只在客户端主动二次 DELETE 时才走到，
+	// 真删前的权威引用校验在 finalizers 端点（Task 6）。
 	if obj.Metadata.DeletionTimestamp != "" {
 		if apiErr := s.guardNotReferenced(ctx, kind, name); apiErr != nil {
 			return apiErr
