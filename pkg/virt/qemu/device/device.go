@@ -49,6 +49,13 @@ type VirtioNetPCI struct {
 	ID     string
 	Netdev netdev.Ref
 	Mac    MAC
+	// RomFile controls the device's option ROM. When set to the empty string it
+	// renders as "romfile=", which disables loading a PXE/network-boot ROM. This
+	// project does not support PXE boot, so the VM controller disables it: a
+	// cold-boot guest boots from its disk and never needs the network-boot ROM,
+	// and requiring the host QEMU install to ship efi-virtio.rom would otherwise
+	// make spawn fail wherever that file is absent. Unset leaves QEMU's default.
+	RomFile qflag.OptionalString
 }
 
 func (d VirtioNetPCI) Validate() error {
@@ -72,9 +79,13 @@ func (d VirtioNetPCI) Arg() (string, error) {
 	if err := d.Validate(); err != nil {
 		return "", fmt.Errorf("virtio-net-pci device: %w", err)
 	}
-	return qopt.Render("virtio-net-pci",
+	pairs := []qopt.Pair{
 		qopt.Required("netdev", string(d.Netdev)),
 		qopt.Optional("mac", string(d.Mac)),
 		qopt.Optional("id", d.ID),
-	)
+	}
+	if d.RomFile.IsSet() {
+		pairs = append(pairs, qopt.PresentEmptyOK("romfile", d.RomFile.Value()))
+	}
+	return qopt.Render("virtio-net-pci", pairs...)
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/suknna/govirta/pkg/virt/qemu/device"
 	"github.com/suknna/govirta/pkg/virt/qemu/machine"
 	"github.com/suknna/govirta/pkg/virt/qemu/netdev"
+	"github.com/suknna/govirta/pkg/virt/qemu/qflag"
 )
 
 // errUnsupportedArch marks a VM spec whose arch cannot be mapped to a supported
@@ -297,6 +298,13 @@ func (c *VMController) buildVM(obj vmv1.VM, diskPaths, tapNames []string) (*qemu
 		}).AddDevice(device.VirtioNetPCI{
 			ID:     fmt.Sprintf("nic%d", i),
 			Netdev: netdev.Ref(netID),
+			// Explicitly disable the PXE/network-boot option ROM (romfile=).
+			// This project does not support PXE boot: a cold-boot guest boots
+			// from its disk, and leaving the default would require the host
+			// QEMU install to ship efi-virtio.rom, making spawn fail wherever
+			// that file is absent. The decision is made here in the controller
+			// rather than defaulted in the builder (显式优于隐式).
+			RomFile: qflag.String(""),
 		})
 	}
 
