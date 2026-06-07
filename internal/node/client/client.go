@@ -10,6 +10,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -133,6 +134,45 @@ func (c *Client) PatchStatus(ctx context.Context, kind, name string, status []by
 		return nil, fmt.Errorf("node/client: patch status %s/%s: unexpected status %d: %s", kind, name, resp.StatusCode, bytes.TrimSpace(out))
 	}
 	return out, err
+}
+
+// RemoveFinalizer drops one finalizer from an object by PATCHing the
+// /finalizers sub-resource with body {"remove":"<finalizer>"}. The node calls
+// this after tearing down its live resources so the master can let the object's
+// deletion proceed. It returns nil on a 2xx and a wrapped error — including the
+// response body text for diagnosis — on any non-2xx. The response body carries
+// nothing the node needs, but it is still drained so the underlying connection
+// can be reused, and a read failure is propagated.
+func (c *Client) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) (err error) {
+	body, err := json.Marshal(map[string]string{"remove": finalizer})
+	if err != nil {
+		return fmt.Errorf("node/client: marshal remove-finalizer body for %s/%s: %w", kind, name, err)
+	}
+
+	path := "/apis/" + url.PathEscape(kind) + "/" + url.PathEscape(name) + "/finalizers"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("node/client: build remove-finalizer request for %s/%s: %w", kind, name, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("node/client: remove finalizer %s/%s: %w", kind, name, err)
+	}
+	// Named returns so a body-close failure joins into err on the success path too.
+	defer closeBody(resp.Body, &err)
+
+	// Drain the body even though the node ignores it: an undrained body defeats
+	// connection reuse. A read failure must still propagate.
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("node/client: read remove-finalizer %s/%s body: %w", kind, name, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("node/client: remove finalizer %s/%s: unexpected status %d: %s", kind, name, resp.StatusCode, bytes.TrimSpace(out))
+	}
+	return err
 }
 
 // statusError builds the wrapped error for a non-2xx response, including the

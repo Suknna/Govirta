@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -182,5 +183,74 @@ func TestClientNilHTTPClientUsesDefault(t *testing.T) {
 	}
 	if want := `{"kind":"VM","name":"vm-a"}`; string(got) != want {
 		t.Fatalf("Get body = %q, want %q", got, want)
+	}
+}
+
+func TestClientRemoveFinalizer(t *testing.T) {
+	// Capture the exact method, path, and body the server received, asserting the
+	// client sent PATCH to /apis/<kind>/<name>/finalizers with the expected
+	// {"remove":"<finalizer>"} body.
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusInternalServerError)
+			return
+		}
+		gotBody = b
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, srv.Client())
+
+	const finalizer = "govirta.io/node-teardown"
+	if err := c.RemoveFinalizer(context.Background(), "VM", "vm-a", finalizer); err != nil {
+		t.Fatalf("RemoveFinalizer returned error: %v", err)
+	}
+	if gotMethod != http.MethodPatch {
+		t.Errorf("RemoveFinalizer method = %q, want PATCH", gotMethod)
+	}
+	if want := "/apis/VM/vm-a/finalizers"; gotPath != want {
+		t.Errorf("RemoveFinalizer path = %q, want %q", gotPath, want)
+	}
+	// Decode rather than string-compare so the assertion is robust to key
+	// ordering / whitespace and proves the body is well-formed JSON.
+	var decoded map[string]string
+	if err := json.Unmarshal(gotBody, &decoded); err != nil {
+		t.Fatalf("RemoveFinalizer body %q is not valid JSON: %v", gotBody, err)
+	}
+	if got, want := decoded["remove"], finalizer; got != want {
+		t.Errorf("RemoveFinalizer body remove = %q, want %q", got, want)
+	}
+	if len(decoded) != 1 {
+		t.Errorf("RemoveFinalizer body has %d keys, want exactly 1 (%v)", len(decoded), decoded)
+	}
+}
+
+func TestClientRemoveFinalizerNon2xx(t *testing.T) {
+	// A non-2xx PATCH must return an error carrying the status code (and the
+	// server's body text) so the failure is diagnosable.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such finalizer", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, srv.Client())
+
+	err := c.RemoveFinalizer(context.Background(), "VM", "vm-a", "govirta.io/node-teardown")
+	if err == nil {
+		t.Fatal("RemoveFinalizer against 404 returned nil error")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("404")) {
+		t.Fatalf("RemoveFinalizer error %q does not include the status code", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("no such finalizer")) {
+		t.Fatalf("RemoveFinalizer error %q does not include server body text", err)
 	}
 }
