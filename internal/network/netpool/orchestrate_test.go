@@ -273,3 +273,90 @@ func TestGetNICStatusPopulatesAntiSpoofing(t *testing.T) {
 		t.Fatalf("AntiSpoofing summary MAC = %s, want %s", summary.MAC, sampleNIC().MAC)
 	}
 }
+
+func TestDeleteNetworkPropagatesResolveErrorWithoutShortCircuit(t *testing.T) {
+	svc, fl, _, ff, _, rec := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+
+	// A non-ErrNotFound ListRules failure means the rule ref cannot be resolved.
+	// Unlike an absent rule (idempotent skip), this must propagate. Both the
+	// forward-accept and masquerade resolves hit the same failure, and neither is
+	// allowed to short-circuit the remaining teardown steps (project error-
+	// propagation invariant: each step appends to errs, errors.Join at the end).
+	boom := errors.New("listrules boom")
+	ff.errs["ListRules"] = boom
+
+	err := svc.DeleteNetwork(context.Background(), "net0")
+	if err == nil {
+		t.Fatalf("DeleteNetwork error = nil, want non-nil on resolve failure")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("DeleteNetwork error = %v, want it to wrap %v", err, boom)
+	}
+
+	// Non-short-circuit, part 1: both resolves were attempted. Two ListRules
+	// reads prove the forward-accept resolve error did not stop the masquerade
+	// resolve, so errors.Join carries both resolve failures forward.
+	if got := rec.count("firewall.ListRules"); got != 2 {
+		t.Fatalf("firewall.ListRules called %d times, want 2 (both resolves attempted); sequence=%v", got, rec.sequence())
+	}
+	// Non-short-circuit, part 2: the dhcp stop (before the failing resolves) and
+	// the bridge delete (after them) still ran.
+	if got := rec.count("dhcp.Stop"); got != 1 {
+		t.Fatalf("dhcp.Stop called %d times, want 1; sequence=%v", got, rec.sequence())
+	}
+	if got := rec.count("link.Delete"); got != 1 {
+		t.Fatalf("link.Delete (bridge) called %d times, want 1 despite resolve errors; sequence=%v", got, rec.sequence())
+	}
+	if len(fl.deleted) != 1 {
+		t.Fatalf("bridge deletes recorded = %v, want exactly the bridge despite resolve errors", fl.deleted)
+	}
+	// Resolve failed, so no firewall rule delete may be attempted on a ref we
+	// never resolved.
+	if len(ff.deletedRefs) != 0 {
+		t.Fatalf("firewall deletes recorded = %v, want none when resolve failed", ff.deletedRefs)
+	}
+}
+
+func TestDeleteNICPropagatesResolveErrorWithoutShortCircuit(t *testing.T) {
+	svc, fl, _, ff, _, rec := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+
+	// A non-ErrNotFound ListRules failure blocks resolving the anti-spoofing ref.
+	// This must propagate (unlike an absent rule, which is an idempotent skip)
+	// yet not short-circuit the binding removal and tap delete that follow.
+	boom := errors.New("listrules boom")
+	ff.errs["ListRules"] = boom
+
+	err := svc.DeleteNIC(context.Background(), "net0", "vm1")
+	if err == nil {
+		t.Fatalf("DeleteNIC error = nil, want non-nil on resolve failure")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("DeleteNIC error = %v, want it to wrap %v", err, boom)
+	}
+
+	// Non-short-circuit: the binding removal and tap delete still ran after the
+	// resolve error was recorded.
+	if got := rec.count("dhcp.RemoveBinding"); got != 1 {
+		t.Fatalf("dhcp.RemoveBinding called %d times, want 1 despite resolve error; sequence=%v", got, rec.sequence())
+	}
+	if got := rec.count("link.Delete"); got != 1 {
+		t.Fatalf("link.Delete (tap) called %d times, want 1 despite resolve error; sequence=%v", got, rec.sequence())
+	}
+	if len(fl.deleted) != 1 {
+		t.Fatalf("tap deletes recorded = %v, want exactly the tap despite resolve error", fl.deleted)
+	}
+	// Resolve failed, so no anti-spoofing delete may be attempted on a ref we
+	// never resolved.
+	if len(ff.deletedRefs) != 0 {
+		t.Fatalf("firewall deletes recorded = %v, want none when resolve failed", ff.deletedRefs)
+	}
+}
