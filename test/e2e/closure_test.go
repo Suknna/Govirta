@@ -45,7 +45,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 
 	for _, name := range applyOrder {
 		path := filepath.Join(manifests, name)
-		out, err := runCtl(ctx, ctl, "--server", server, "apply", "-f", path)
+		out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
 		if err != nil {
 			t.Fatalf("apply %s failed: %v\noutput:\n%s", name, err, out)
 		}
@@ -61,7 +61,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 		if err := ctx.Err(); err != nil {
 			t.Fatalf("context ended before VM reached Running: %v\nlast get:\n%s", err, last)
 		}
-		out, err := runCtl(ctx, ctl, "--server", server, "get", "VM", vmName)
+		out, err := runCtl(ctx, ctl, "get", "--server", server, "VM", vmName)
 		last = out
 		if err == nil && strings.Contains(out, "phase: running") {
 			t.Logf("VM %s reached Running:\n%s", vmName, out)

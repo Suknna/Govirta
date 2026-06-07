@@ -127,10 +127,18 @@ download_file() {
 	mv "$tmp" "$target"
 }
 
+# ensure_md5sums downloads the upstream checksum manifest. It is a separate step
+# (not folded into verify_md5) because download_file assigns the global `target`
+# variable in POSIX sh; calling it from inside verify_md5 would clobber that
+# function's own `target`, making md5_of check the wrong file. Keeping the
+# download out of verify_md5 keeps each function's `target` intact.
+ensure_md5sums() {
+	download_file "$cirros_md5_url" "$cirros_md5_file"
+}
+
 verify_md5() {
 	target="$1"
 	upstream_name="$2"
-	download_file "$cirros_md5_url" "$cirros_md5_file"
 	expected=$(awk -v name="$upstream_name" '$2 == name {print $1; found = 1} END {if (!found) exit 1}' "$cirros_md5_file") || {
 		printf 'missing MD5 checksum for %s in %s\n' "$upstream_name" "$cirros_md5_file" >&2
 		exit 1
@@ -157,6 +165,7 @@ prepare_cache() {
 		-e "s#{{.Dir}}/\.\./\.lima/cache#$cache_dir#g" \
 		"$repo_root/lima/govirta.yaml" >"$generated_config"
 
+	ensure_md5sums
 	download_file "$cirros_url" "$cirros_image"
 	verify_md5 "$cirros_image" "cirros-0.6.2-aarch64-disk.img"
 }
@@ -264,7 +273,7 @@ start_lima_govirtlet() {
 
 		# 后台启动 govirtlet（root：netlink/nftables/TAP）。pidfile + 日志写 cache。
 		sudo -b sh -c "
-			'$govirtlet_bin' \
+			$govirtlet_bin \
 				--master-url http://host.lima.internal:$api_port \
 				--node-name $node_name \
 				--runtime-root $runtime_root \

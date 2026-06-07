@@ -45,8 +45,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 const usage = `usage:
-  govirtctl --server <url> apply -f <manifest.json>
-  govirtctl --server <url> get <kind> <name>
+  govirtctl apply --server <url> -f <manifest.json>
+  govirtctl get --server <url> <kind> <name>
   govirtctl version`
 
 // runApply reads a manifest file, locates its kind/name, and applies it.
