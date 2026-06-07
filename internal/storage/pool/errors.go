@@ -11,4 +11,6 @@ var (
 	ErrPoolAlreadyExists = errors.New("pool already exists")
 	// ErrPoolCapacityExceeded marks volume allocation requests beyond pool overcommit capacity.
 	ErrPoolCapacityExceeded = errors.New("pool capacity exceeded")
+	// ErrPoolNotEmpty marks unregister requests for a pool that still holds volumes or images.
+	ErrPoolNotEmpty = errors.New("pool not empty")
 )

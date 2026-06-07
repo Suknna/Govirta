@@ -63,6 +63,37 @@ func (s *Service) RegisterPool(p *Pool) error {
 	return nil
 }
 
+// UnregisterPool removes a pool's in-memory registration once it holds no volumes or images.
+//
+// 为什么拒绝注销非空池：上下一致铁律要求池注销前先清空其卷/镜像，
+// 这里与 apiserver 的反向引用拒绝形成执行层兜底，避免遗留对象失去管理入口。
+//
+// 锁顺序：先 s.mu 再 p.mu，与 RegisterPool/CreateVolume 等既有方法保持一致，
+// 没有方法在持 p.mu 时反向获取 s.mu，因此不会死锁。
+func (s *Service) UnregisterPool(name string) error {
+	if name == "" {
+		return ErrPoolRequired
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, exists := s.pools[name]
+	if !exists {
+		return ErrPoolNotFound
+	}
+
+	p.mu.RLock()
+	notEmpty := len(p.volumes) > 0 || len(p.images) > 0
+	p.mu.RUnlock()
+	if notEmpty {
+		return ErrPoolNotEmpty
+	}
+
+	delete(s.pools, name)
+	return nil
+}
+
 // GetPool returns the registered pool with the requested explicit name.
 func (s *Service) GetPool(name string) (*Pool, error) {
 	p, err := s.getPool(name)

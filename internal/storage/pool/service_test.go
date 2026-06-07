@@ -1505,6 +1505,81 @@ func TestDeleteVolumeNotFoundAndInUse(t *testing.T) {
 	}
 }
 
+func TestUnregisterPoolRemovesEmptyPool(t *testing.T) {
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, fakeDriver{})); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+
+	if err := service.UnregisterPool("pool-a"); err != nil {
+		t.Fatalf("UnregisterPool() error = %v, want nil", err)
+	}
+
+	// 注销成功后，再次查找该池应当返回 ErrPoolNotFound，证明内存注册态已移除。
+	if _, err := service.GetPool("pool-a"); !errors.Is(err, ErrPoolNotFound) {
+		t.Fatalf("GetPool() after unregister error = %v, want %v", err, ErrPoolNotFound)
+	}
+	if _, err := service.GetPoolUsage(context.Background(), "pool-a"); !errors.Is(err, ErrPoolNotFound) {
+		t.Fatalf("GetPoolUsage() after unregister error = %v, want %v", err, ErrPoolNotFound)
+	}
+}
+
+func TestUnregisterPoolMissingReturnsNotFound(t *testing.T) {
+	service := NewService()
+
+	if err := service.UnregisterPool("missing"); !errors.Is(err, ErrPoolNotFound) {
+		t.Fatalf("UnregisterPool() missing error = %v, want %v", err, ErrPoolNotFound)
+	}
+}
+
+func TestUnregisterPoolWithVolumeReturnsNotEmpty(t *testing.T) {
+	service := NewService()
+	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, &lifecycleDriver{})); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	if _, err := service.CreateVolume(context.Background(), "pool-a", newCreateRequest("vol-a", "vol-a", 50)); err != nil {
+		t.Fatalf("CreateVolume() error = %v, want nil", err)
+	}
+
+	if err := service.UnregisterPool("pool-a"); !errors.Is(err, ErrPoolNotEmpty) {
+		t.Fatalf("UnregisterPool() with volume error = %v, want %v", err, ErrPoolNotEmpty)
+	}
+
+	// 拒绝注销时不得移除注册态，池仍应可查。
+	if _, err := service.GetPool("pool-a"); err != nil {
+		t.Fatalf("GetPool() after rejected unregister error = %v, want nil", err)
+	}
+}
+
+func TestUnregisterPoolWithImageReturnsNotEmpty(t *testing.T) {
+	service := NewService()
+	if err := service.RegisterPool(newTestFilePool("file-pool", 100, &fakeImageDriver{})); err != nil {
+		t.Fatalf("RegisterPool() error = %v, want nil", err)
+	}
+	writer, err := service.PutImage(context.Background(), "file-pool", newPutRequest("image-a", 40))
+	if err != nil {
+		t.Fatalf("PutImage() error = %v, want nil", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+
+	if err := service.UnregisterPool("file-pool"); !errors.Is(err, ErrPoolNotEmpty) {
+		t.Fatalf("UnregisterPool() with image error = %v, want %v", err, ErrPoolNotEmpty)
+	}
+
+	// 拒绝注销时不得移除注册态，池仍应可查。
+	if _, err := service.GetPool("file-pool"); err != nil {
+		t.Fatalf("GetPool() after rejected unregister error = %v, want nil", err)
+	}
+}
+
+func TestErrPoolNotEmptySupportsWrapping(t *testing.T) {
+	if !errors.Is(fmt.Errorf("wrap: %w", ErrPoolNotEmpty), ErrPoolNotEmpty) {
+		t.Fatalf("wrapped ErrPoolNotEmpty does not match sentinel")
+	}
+}
+
 func TestPublishAndUnpublishRejectMismatchedRequestID(t *testing.T) {
 	driver := &lifecycleDriver{}
 	service := NewService()
