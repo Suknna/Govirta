@@ -99,6 +99,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := requireName(name, obj.Name); err != nil {
 			return nil, badRequest(err)
 		}
+		injectFinalizer(&obj.ObjectMeta)
 		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
 		if aerr != nil {
 			return nil, aerr
@@ -117,6 +118,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := requireName(name, obj.Name); err != nil {
 			return nil, badRequest(err)
 		}
+		injectFinalizer(&obj.ObjectMeta)
 		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
 		if aerr != nil {
 			return nil, aerr
@@ -135,6 +137,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := requireName(name, obj.Name); err != nil {
 			return nil, badRequest(err)
 		}
+		injectFinalizer(&obj.ObjectMeta)
 		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
 		if aerr != nil {
 			return nil, aerr
@@ -157,6 +160,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := validateNetworkAdmission(obj.Spec); err != nil {
 			return nil, badRequest(err)
 		}
+		injectFinalizer(&obj.ObjectMeta)
 		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
 		if aerr != nil {
 			return nil, aerr
@@ -175,6 +179,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := requireName(name, obj.Name); err != nil {
 			return nil, badRequest(err)
 		}
+		injectFinalizer(&obj.ObjectMeta)
 		raw, aerr := s.applyNIC(ctx, storeKey(kind, obj.Name), &obj)
 		if aerr != nil {
 			return nil, aerr
@@ -198,6 +203,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		// back before the object is persisted. The binding lives in ObjectMeta.NodeName
 		// (not VMSpec — confirmed by the apis layer), which the node watch filters on.
 		// A VM that already names a node is left as-is so a caller can pin placement.
+		injectFinalizer(&obj.ObjectMeta)
 		if err := s.bindVM(ctx, &obj); err != nil {
 			return nil, err
 		}
@@ -210,6 +216,15 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 
 	default:
 		return nil, notFound(fmt.Errorf("%w: %q", ErrUnknownKind, kind))
+	}
+}
+
+// injectFinalizer 在对象持久化前注入默认 node-teardown finalizer（仅当 Finalizers 为空），
+// 与 MAC/调度的 admission 注入同模式：落 etcd 的对象一定带 finalizer，消除"未加 finalizer 就被删"
+// 的泄漏竞态。有条件注入（为空才注入）为未来多 finalizer 留口。
+func injectFinalizer(meta *metav1.ObjectMeta) {
+	if len(meta.Finalizers) == 0 {
+		meta.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
 	}
 }
 

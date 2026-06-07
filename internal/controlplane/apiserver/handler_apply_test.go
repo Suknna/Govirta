@@ -226,3 +226,57 @@ func TestApplyUnknownKindNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestApplyInjectsNodeTeardownFinalizer 验证：apply 一个 Finalizers 为空的对象时，
+// apiserver 在落 etcd 前注入默认 node-teardown finalizer，使对象一持久化就带 finalizer，
+// 消除"finalizer 还没加就被 DELETE 真删 → 节点已建部分资源 → 泄漏"的竞态窗口。
+func TestApplyInjectsNodeTeardownFinalizer(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	if len(obj.Finalizers) != 0 {
+		t.Fatalf("fixture precondition: StoragePool Finalizers must be empty")
+	}
+
+	rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
+	var stored storagepoolv1.StoragePool
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored StoragePool: %v", err)
+	}
+
+	want := []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	if len(stored.Finalizers) != len(want) || stored.Finalizers[0] != want[0] {
+		t.Fatalf("stored finalizers = %v, want %v", stored.Finalizers, want)
+	}
+}
+
+// TestApplyPreservesExistingFinalizers 验证：apply 一个已带 finalizer 的对象时，
+// apiserver 不覆盖原值（有条件注入只在 Finalizers 为空时生效）。
+// 这与 MAC/调度的有条件注入一致，为未来多 finalizer 场景留口。
+func TestApplyPreservesExistingFinalizers(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	const existing = metav1.Finalizer("govirta.io/custom")
+	obj := validStoragePool()
+	obj.Finalizers = []metav1.Finalizer{existing}
+
+	rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
+	var stored storagepoolv1.StoragePool
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored StoragePool: %v", err)
+	}
+
+	if len(stored.Finalizers) != 1 || stored.Finalizers[0] != existing {
+		t.Fatalf("stored finalizers = %v, want %v (existing must be preserved as-is)", stored.Finalizers, []metav1.Finalizer{existing})
+	}
+}
