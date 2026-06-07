@@ -157,3 +157,79 @@ func (p *prefixStore) deleteNamespace(ctx context.Context) error {
 	}
 	return nil
 }
+
+// TestEtcdWatchEmptySnapshotThenRapidLiveEvents reproduces the exact e2e timing
+// the node controllers hit: a watch opens on an EMPTY prefix (the snapshot is
+// empty because govirtlet starts before any manifest is applied), then several
+// objects are Put in quick succession on that same stream. Every one must be
+// delivered as a live ADDED event. This is the combination the contract suite
+// did not cover (its list-then-watch case has a non-empty snapshot and only one
+// live event), and it is the precise shape of the third e2e defect where the
+// first live event on a freshly-opened empty-snapshot watch went missing.
+//
+// Gated on GOVIRTA_ETCD_ENDPOINTS like the contract test.
+func TestEtcdWatchEmptySnapshotThenRapidLiveEvents(t *testing.T) {
+	endpointsEnv := os.Getenv("GOVIRTA_ETCD_ENDPOINTS")
+	if endpointsEnv == "" {
+		t.Skip("set GOVIRTA_ETCD_ENDPOINTS to run")
+	}
+	endpoints := strings.Split(endpointsEnv, ",")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	s, err := etcdstore.New(ctx, clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("etcd New: %v", err)
+	}
+	defer s.Close()
+
+	ns := fmt.Sprintf("/govirta-rapid/%d/", time.Now().UnixNano())
+	ps := &prefixStore{inner: s, ns: ns}
+	if err := ps.deleteNamespace(ctx); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+
+	// Open the watch on the empty prefix (empty snapshot, live path follows).
+	ch, err := ps.Watch(ctx, "/govirta/pod/", "")
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	// Apply several objects in quick succession on the same stream.
+	const n = 5
+	names := make([]string, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("/govirta/pod/p%d", i)
+		names[i] = name
+		if _, err := ps.Put(ctx, name, []byte(fmt.Sprintf(`{"v":%d}`, i)), ""); err != nil {
+			t.Fatalf("Put %s: %v", name, err)
+		}
+	}
+
+	// Every applied object must arrive as ADDED. Collect by key (etcd may batch
+	// or reorder within a revision window, so assert set-equality, not index).
+	got := map[string]bool{}
+	for i := 0; i < n; i++ {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("watch channel closed after %d/%d events; got=%v", i, n, got)
+			}
+			if ev.Type != store.EventAdded {
+				t.Fatalf("event %d type = %q, want ADDED (key=%s)", i, ev.Type, ev.Object.Key)
+			}
+			got[ev.Object.Key] = true
+		case <-ctx.Done():
+			t.Fatalf("timed out after %d/%d events; got=%v", i, n, got)
+		}
+	}
+	for _, name := range names {
+		if !got[name] {
+			t.Fatalf("object %s never delivered; got=%v", name, got)
+		}
+	}
+}

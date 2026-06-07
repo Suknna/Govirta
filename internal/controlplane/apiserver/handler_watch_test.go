@@ -175,6 +175,64 @@ func TestWatchFiltersOutNonMatchingNodeName(t *testing.T) {
 	}
 }
 
+func TestWatchDeliversEveryRapidLiveEventInOrder(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	const nodeName = "node-1"
+
+	resp, cancel := startWatch(t, srv, "/apis/"+string(metav1.KindVM)+"?watch=true&nodeName="+nodeName)
+	defer cancel()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close watch body: %v", err)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Reproduce the e2e first-connect timing: the watch opens on an empty store,
+	// then several objects of the same kind/node are created in rapid succession.
+	// Every one must be delivered as ADDED in apply order. The e2e failure was
+	// that the FIRST live event after watch-open was silently lost (pool-block,
+	// the first StoragePool, and net-e2e, the only Network, never reconciled),
+	// while later events on the same stream arrived.
+	names := []string{"vm-a", "vm-b", "vm-c"}
+	for _, name := range names {
+		vm := validVM()
+		vm.Name = name
+		vm.UID = "uid-" + name
+		vm.NodeName = nodeName
+		data, err := json.Marshal(vm)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if _, err := st.Put(context.Background(), storeKey(metav1.KindVM, name), data, ""); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	got := make([]string, 0, len(names))
+	for range names {
+		ev := readWatchLine(t, dec)
+		if ev.Type != store.EventAdded {
+			t.Fatalf("event type = %q, want %q", ev.Type, store.EventAdded)
+		}
+		var vm vmv1.VM
+		if err := json.Unmarshal(ev.Object, &vm); err != nil {
+			t.Fatalf("decode event object: %v", err)
+		}
+		got = append(got, vm.Name)
+	}
+
+	for i, name := range names {
+		if got[i] != name {
+			t.Fatalf("delivered[%d] = %q, want %q (full sequence %v, want %v)", i, got[i], name, got, names)
+		}
+	}
+}
+
 func TestWatchClientDisconnectStopsHandler(t *testing.T) {
 	srv, st := newTestServer(t)
 
