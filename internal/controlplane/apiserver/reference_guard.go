@@ -40,6 +40,19 @@ type volumeRefProjection struct {
 	} `json:"spec"`
 }
 
+// imageRefProjection is the minimal projection decoded from a stored Image to
+// detect a reference to a StoragePool. FilePoolRef (json: filePoolRef) names the
+// file StoragePool an image's bytes live in, so a Pool delete must also check
+// Image, not just Volume.
+type imageRefProjection struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec struct {
+		FilePoolRef string `json:"filePoolRef"`
+	} `json:"spec"`
+}
+
 // nicRefProjection is the minimal projection decoded from a stored NIC to detect
 // a reference to a Network (spec.networkRef names a Network object).
 type nicRefProjection struct {
@@ -74,19 +87,36 @@ type vmRefProjection struct {
 func (s *Server) referenceGuard(ctx context.Context, kind metav1.Kind, name string) (string, bool, error) {
 	switch kind {
 	case metav1.KindStoragePool:
-		// A StoragePool is referenced by a Volume via either its block PoolRef or
-		// its root-volume ImageFilePoolRef; either match counts.
-		raws, err := s.store.List(ctx, listPrefix(metav1.KindVolume))
+		// A StoragePool is referenced by three downstream edges, all by object
+		// name: Volume.poolRef (block pool) 和 Volume.imageFilePoolRef (root 卷的
+		// 镜像文件池) 两条来自 Volume，Image.filePoolRef（镜像字节所在的 file 池）一条
+		// 来自 Image。任一命中即视为被引用，返回首个命中。先扫 Volume 再扫 Image。
+		volRaws, err := s.store.List(ctx, listPrefix(metav1.KindVolume))
 		if err != nil {
 			return "", false, fmt.Errorf("apiserver: list Volume for StoragePool reference guard: %w", err)
 		}
-		for _, raw := range raws {
+		for _, raw := range volRaws {
 			var proj volumeRefProjection
 			if err := json.Unmarshal(raw.Value, &proj); err != nil {
 				return "", false, fmt.Errorf("apiserver: decode Volume %q reference projection: %w", raw.Key, err)
 			}
 			if proj.Spec.PoolRef == name || proj.Spec.ImageFilePoolRef == name {
 				return refIdentity(metav1.KindVolume, proj.Metadata.Name), true, nil
+			}
+		}
+		// 再扫 Image：一个只装了 Image、没有任何 Volume 引用的 file 池仍可能被
+		// Image.filePoolRef 引用，漏扫会留下悬挂引用 → 孤儿镜像。
+		imgRaws, err := s.store.List(ctx, listPrefix(metav1.KindImage))
+		if err != nil {
+			return "", false, fmt.Errorf("apiserver: list Image for StoragePool reference guard: %w", err)
+		}
+		for _, raw := range imgRaws {
+			var proj imageRefProjection
+			if err := json.Unmarshal(raw.Value, &proj); err != nil {
+				return "", false, fmt.Errorf("apiserver: decode Image %q reference projection: %w", raw.Key, err)
+			}
+			if proj.Spec.FilePoolRef == name {
+				return refIdentity(metav1.KindImage, proj.Metadata.Name), true, nil
 			}
 		}
 		return "", false, nil

@@ -76,6 +76,31 @@ func TestReferenceGuardStoragePoolReferencedByImageFilePoolRef(t *testing.T) {
 	}
 }
 
+// TestReferenceGuardStoragePoolReferencedByImageFilePoolRefImage proves the
+// third StoragePool-bearing edge is scanned: an Image whose filePoolRef names
+// pool-target holds it referenced even when NO Volume references the pool at all
+// (无任何 Volume 引用，只有 Image.filePoolRef 指向该 file 池). Naming is kept
+// distinct from the Volume.imageFilePoolRef case above to avoid confusion.
+func TestReferenceGuardStoragePoolReferencedByImageFilePoolRefImage(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	img := validImage()
+	img.Name = "img-filepool-ref"
+	img.Spec.FilePoolRef = "pool-target"
+	seedRaw(t, st, metav1.KindImage, img, img.Name)
+
+	refBy, referenced, err := srv.referenceGuard(context.Background(), metav1.KindStoragePool, "pool-target")
+	if err != nil {
+		t.Fatalf("referenceGuard error: %v", err)
+	}
+	if !referenced {
+		t.Fatalf("expected pool-target referenced via Image.filePoolRef, got referenced=false")
+	}
+	if want := "Image/img-filepool-ref"; refBy != want {
+		t.Fatalf("referencedBy = %q, want %q", refBy, want)
+	}
+}
+
 // TestReferenceGuardNetworkReferencedByNIC proves a Network is held referenced
 // when a NIC's networkRef names it.
 func TestReferenceGuardNetworkReferencedByNIC(t *testing.T) {
@@ -226,6 +251,12 @@ func TestReferenceGuardUnreferenced(t *testing.T) {
 				vol.Spec.PoolRef = "some-other-pool"
 				vol.Spec.ImageFilePoolRef = "yet-another-pool"
 				seedRaw(t, st, metav1.KindVolume, vol, vol.Name)
+				// 同时放一个 filePoolRef 指向别处的 Image，确认新增的 Image 扫描
+				// 不会对不相关的 file 池误命中。
+				img := validImage()
+				img.Name = "img-elsewhere"
+				img.Spec.FilePoolRef = "some-other-pool"
+				seedRaw(t, st, metav1.KindImage, img, img.Name)
 			},
 		},
 		{
