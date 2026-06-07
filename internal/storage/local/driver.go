@@ -259,6 +259,15 @@ func (d *Driver) GetActualUsedBytes(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	if err := d.ensureExistingOwnedDir(d.poolRoot); err != nil {
+		// A freshly registered pool has no poolRoot yet: it is created lazily on
+		// the first volume create. Until then the pool holds nothing, so its used
+		// bytes are 0 rather than an error — otherwise GetPoolUsage (called at
+		// registration, before any volume exists) fails forever and the node
+		// controller spins re-reconciling. This mirrors the file driver's
+		// GetActualUsedBytes, which treats a missing image root as 0 used bytes.
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
 		return 0, err
 	}
 
@@ -285,6 +294,9 @@ func (d *Driver) GetActualUsedBytes(ctx context.Context) (int64, error) {
 		}
 		return nil
 	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}

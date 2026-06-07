@@ -545,8 +545,17 @@ func TestSnapshotAndResizeUnsupportedAfterContextCheck(t *testing.T) {
 
 func TestGetActualUsedBytesReportsMissingRootAndUsage(t *testing.T) {
 	driver, _ := newTestDriver(t)
-	if _, err := driver.GetActualUsedBytes(context.Background()); err == nil {
-		t.Fatalf("GetActualUsedBytes() error = nil, want missing root error")
+	// A freshly registered pool has no poolRoot yet (it is created lazily on the
+	// first volume create). Its used bytes must be 0, not an error: GetPoolUsage
+	// is called at registration before any volume exists, and a missing-root
+	// error there made the node controller spin re-reconciling forever. This
+	// mirrors the file driver's missing-image-root behavior.
+	used, err := driver.GetActualUsedBytes(context.Background())
+	if err != nil {
+		t.Fatalf("GetActualUsedBytes() on missing root error = %v, want nil", err)
+	}
+	if used != 0 {
+		t.Fatalf("GetActualUsedBytes() on missing root = %d, want 0", used)
 	}
 
 	writeFile(t, filepath.Join(driver.poolRoot, "vm-a", "disk.qcow2"), "12345")
@@ -557,7 +566,7 @@ func TestGetActualUsedBytesReportsMissingRootAndUsage(t *testing.T) {
 	if err := os.Symlink(filepath.Join(driver.poolRoot, "vm-a", "disk.qcow2"), filepath.Join(driver.poolRoot, "vm-a", "link.qcow2")); err != nil {
 		t.Fatalf("Symlink() error = %v, want nil", err)
 	}
-	used, err := driver.GetActualUsedBytes(context.Background())
+	used, err = driver.GetActualUsedBytes(context.Background())
 	if err != nil {
 		t.Fatalf("GetActualUsedBytes() error = %v, want nil", err)
 	}
