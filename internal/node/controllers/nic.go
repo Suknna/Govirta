@@ -138,7 +138,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	def, err := c.buildNICDefinition(obj)
 	if err != nil {
 		// A spec that does not parse is a permanent failure: requeue cannot fix it.
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return false, fmt.Errorf("nic controller: parse spec %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("nic spec parsing failed permanently (config error); not requeuing")
@@ -146,7 +146,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	}
 
 	if err := c.nics.RegisterNIC(def); err != nil && !errors.Is(err, networker.ErrAlreadyExists) {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("nic controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("nic controller: register %q: %w", obj.Name, err)
@@ -155,7 +155,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	networkName := netpool.NetworkName(obj.Spec.NetworkRef)
 	vmID := netpool.VMID(obj.Spec.VMRef)
 	if _, err := c.nics.EnsureNIC(ctx, networkName, vmID); err != nil {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("nic controller: ensure %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("nic controller: ensure %q: %w", obj.Name, err)
@@ -164,7 +164,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	// Authoritative read: report from the live aggregated status, never from the
 	// definition we just registered (netpool 的“总以实况为准”约定).
 	if _, err := c.nics.GetNICStatus(ctx, networkName, vmID); err != nil {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("nic controller: read status for %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("nic controller: read status for %q: %w", obj.Name, err)
@@ -177,7 +177,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 		Phase:   nicv1.NICPhaseReady,
 		TapName: string(def.TapName),
 	}
-	if err := c.patchStatus(ctx, obj.Name, status); err != nil {
+	if err := c.patchStatus(ctx, obj.Name, obj.Status, status); err != nil {
 		return true, err
 	}
 
@@ -257,17 +257,26 @@ func (c *NICController) buildNICDefinition(n nicv1.NIC) (netpool.NICDefinition, 
 	}, nil
 }
 
-// reportFailure patches a failed status carrying cause's message.
-func (c *NICController) reportFailure(ctx context.Context, name string, cause error) error {
-	return c.patchStatus(ctx, name, nicv1.NICStatus{
+// reportFailure patches a failed status carrying cause's message, skipping the
+// PATCH when the observed status already matches (no-op guard).
+func (c *NICController) reportFailure(ctx context.Context, name string, observed nicv1.NICStatus, cause error) error {
+	return c.patchStatus(ctx, name, observed, nicv1.NICStatus{
 		Phase:   nicv1.NICPhaseFailed,
 		Message: cause.Error(),
 	})
 }
 
-// patchStatus marshals status and PATCHes it to the master's /status sub-resource.
-func (c *NICController) patchStatus(ctx context.Context, name string, status nicv1.NICStatus) error {
-	body, err := json.Marshal(status)
+// patchStatus marshals desired and PATCHes it to the master's /status
+// sub-resource, but only when it differs from observed (the status carried by the
+// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
+// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
+// triggered idempotence). The Status structs are comparable (scalar fields only),
+// so == is a sound equality test.
+func (c *NICController) patchStatus(ctx context.Context, name string, observed, desired nicv1.NICStatus) error {
+	if observed == desired {
+		return nil
+	}
+	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("nic controller: marshal status for %q: %w", name, err)
 	}

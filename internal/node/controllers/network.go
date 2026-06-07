@@ -113,7 +113,7 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 	def, err := buildNetworkDefinition(obj)
 	if err != nil {
 		// A spec that does not parse is a permanent failure: requeue cannot fix it.
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return false, fmt.Errorf("network controller: parse spec %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("network spec parsing failed permanently (config error); not requeuing")
@@ -124,7 +124,7 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 		// An invalid definition rejected by the netpool core is permanent; any
 		// other registration failure is transient.
 		permanent := errors.Is(err, networker.ErrInvalidRequest)
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return !permanent, fmt.Errorf("network controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		if permanent {
@@ -136,7 +136,7 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 
 	name := netpool.NetworkName(obj.Name)
 	if _, err := c.networks.EnsureNetwork(ctx, name); err != nil {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("network controller: ensure %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("network controller: ensure %q: %w", obj.Name, err)
@@ -146,7 +146,7 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 	// definition we just registered (netpool 的“总以实况为准”约定).
 	status, err := c.networks.GetNetworkStatus(ctx, name)
 	if err != nil {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("network controller: read status for %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("network controller: read status for %q: %w", obj.Name, err)
@@ -157,7 +157,7 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 	if phase == networkv1.NetworkPhaseFailed {
 		apiStatus.Message = fmt.Sprintf("dhcp server in unexpected state %q after ensure", status.DHCP.State)
 	}
-	if err := c.patchStatus(ctx, obj.Name, apiStatus); err != nil {
+	if err := c.patchStatus(ctx, obj.Name, obj.Status, apiStatus); err != nil {
 		return true, err
 	}
 
@@ -171,17 +171,26 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 	return requeue, nil
 }
 
-// reportFailure patches a failed status carrying cause's message.
-func (c *NetworkController) reportFailure(ctx context.Context, name string, cause error) error {
-	return c.patchStatus(ctx, name, networkv1.NetworkStatus{
+// reportFailure patches a failed status carrying cause's message, skipping the
+// PATCH when the observed status already matches (no-op guard).
+func (c *NetworkController) reportFailure(ctx context.Context, name string, observed networkv1.NetworkStatus, cause error) error {
+	return c.patchStatus(ctx, name, observed, networkv1.NetworkStatus{
 		Phase:   networkv1.NetworkPhaseFailed,
 		Message: cause.Error(),
 	})
 }
 
-// patchStatus marshals status and PATCHes it to the master's /status sub-resource.
-func (c *NetworkController) patchStatus(ctx context.Context, name string, status networkv1.NetworkStatus) error {
-	body, err := json.Marshal(status)
+// patchStatus marshals desired and PATCHes it to the master's /status
+// sub-resource, but only when it differs from observed (the status carried by the
+// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
+// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
+// triggered idempotence). The Status structs are comparable (scalar fields only),
+// so == is a sound equality test.
+func (c *NetworkController) patchStatus(ctx context.Context, name string, observed, desired networkv1.NetworkStatus) error {
+	if observed == desired {
+		return nil
+	}
+	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("network controller: marshal status for %q: %w", name, err)
 	}

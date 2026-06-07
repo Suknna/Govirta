@@ -113,7 +113,7 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 	copied, err := c.fetch(ctx, img)
 	if err != nil {
 		permanent := isPermanent(err)
-		if perr := c.reportFailure(ctx, img.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, img.Name, img.Status, err); perr != nil {
 			// 状态上报也失败：永久错误不重排，瞬时错误重排。
 			return !permanent, fmt.Errorf("image controller: fetch %q failed and status report failed: %w", img.Name, errors.Join(err, perr))
 		}
@@ -128,7 +128,7 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 		Phase:          imagev1.ImagePhaseReady,
 		LocalSizeBytes: copied,
 	}
-	if err := c.patchStatus(ctx, img.Name, status); err != nil {
+	if err := c.patchStatus(ctx, img.Name, img.Status, status); err != nil {
 		return true, err
 	}
 
@@ -273,17 +273,26 @@ func (c *ImageController) openHTTPSource(ctx context.Context, location string) (
 	return resp.Body, nil
 }
 
-// reportFailure patches a failed status carrying cause's message.
-func (c *ImageController) reportFailure(ctx context.Context, name string, cause error) error {
-	return c.patchStatus(ctx, name, imagev1.ImageStatus{
+// reportFailure patches a failed status carrying cause's message, skipping the
+// PATCH when the observed status already matches (no-op guard).
+func (c *ImageController) reportFailure(ctx context.Context, name string, observed imagev1.ImageStatus, cause error) error {
+	return c.patchStatus(ctx, name, observed, imagev1.ImageStatus{
 		Phase:   imagev1.ImagePhaseFailed,
 		Message: cause.Error(),
 	})
 }
 
-// patchStatus marshals status and PATCHes it to the master's /status sub-resource.
-func (c *ImageController) patchStatus(ctx context.Context, name string, status imagev1.ImageStatus) error {
-	body, err := json.Marshal(status)
+// patchStatus marshals desired and PATCHes it to the master's /status
+// sub-resource, but only when it differs from observed (the status carried by the
+// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
+// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
+// triggered idempotence). The Status structs are comparable (scalar fields only),
+// so == is a sound equality test.
+func (c *ImageController) patchStatus(ctx context.Context, name string, observed, desired imagev1.ImageStatus) error {
+	if observed == desired {
+		return nil
+	}
+	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("image controller: marshal status for %q: %w", name, err)
 	}

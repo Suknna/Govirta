@@ -117,7 +117,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 				Str("vmm_phase", string(existing.Phase)).
 				Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
 		}
-		if err := c.patchStatus(ctx, obj.Name, vmv1.VMStatus{Phase: phase}); err != nil {
+		if err := c.patchStatus(ctx, obj.Name, obj.Status, vmv1.VMStatus{Phase: phase}); err != nil {
 			return true, err
 		}
 		// Transient phases (Starting/Stopping) settle on their own; requeue so
@@ -133,7 +133,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 		return requeue, nil
 	} else if !errors.Is(err, vmm.ErrNotFound) {
 		// A real status error (not "not yet created") is transient.
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("vm controller: status %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("vm controller: status %q: %w", obj.Name, err)
@@ -153,7 +153,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 	builder, err := c.buildVM(obj, diskPaths, tapNames)
 	if err != nil {
 		// Bad spec (e.g. unsupported arch) is permanent: requeue cannot fix it.
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return false, fmt.Errorf("vm controller: build %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("vm spec rejected permanently (config error); not requeuing")
@@ -172,7 +172,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 		},
 	}
 	if _, err := c.vmm.Create(ctx, create); err != nil && !errors.Is(err, vmm.ErrAlreadyExists) {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("vm controller: create %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("vm controller: create %q: %w", obj.Name, err)
@@ -180,7 +180,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 
 	started, err := c.vmm.Start(ctx, obj.UID)
 	if err != nil {
-		if perr := c.reportFailure(ctx, obj.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
 			return true, fmt.Errorf("vm controller: start %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
@@ -194,7 +194,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 			Str("vmm_phase", string(started.Phase)).
 			Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
 	}
-	if err := c.patchStatus(ctx, obj.Name, vmv1.VMStatus{Phase: startedPhase}); err != nil {
+	if err := c.patchStatus(ctx, obj.Name, obj.Status, vmv1.VMStatus{Phase: startedPhase}); err != nil {
 		return true, err
 	}
 
@@ -356,17 +356,26 @@ func isTransientPhase(p vmm.Phase) bool {
 	return p == vmm.PhaseStarting || p == vmm.PhaseStopping
 }
 
-// reportFailure patches a failed status carrying cause's message.
-func (c *VMController) reportFailure(ctx context.Context, name string, cause error) error {
-	return c.patchStatus(ctx, name, vmv1.VMStatus{
+// reportFailure patches a failed status carrying cause's message, skipping the
+// PATCH when the observed status already matches (no-op guard).
+func (c *VMController) reportFailure(ctx context.Context, name string, observed vmv1.VMStatus, cause error) error {
+	return c.patchStatus(ctx, name, observed, vmv1.VMStatus{
 		Phase:   vmv1.VMPhaseFailed,
 		Message: cause.Error(),
 	})
 }
 
-// patchStatus marshals status and PATCHes it to the master's /status sub-resource.
-func (c *VMController) patchStatus(ctx context.Context, name string, status vmv1.VMStatus) error {
-	body, err := json.Marshal(status)
+// patchStatus marshals desired and PATCHes it to the master's /status
+// sub-resource, but only when it differs from observed (the status carried by the
+// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
+// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
+// triggered idempotence). The Status structs are comparable (scalar fields only),
+// so == is a sound equality test.
+func (c *VMController) patchStatus(ctx context.Context, name string, observed, desired vmv1.VMStatus) error {
+	if observed == desired {
+		return nil
+	}
+	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("vm controller: marshal status for %q: %w", name, err)
 	}

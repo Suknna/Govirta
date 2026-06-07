@@ -126,7 +126,7 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	// config error mapped before any byte work: report failed, do not requeue.
 	imageFormat, err := mapImageFormat(img.Spec.Format)
 	if err != nil {
-		if perr := c.reportFailure(ctx, vol.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, vol.Name, vol.Status, err); perr != nil {
 			return false, fmt.Errorf("volume controller: map image format for %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("volume image format unmappable (config error); not requeuing")
@@ -135,7 +135,7 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 
 	created, err := c.createRootVolume(ctx, vol, imageFormat)
 	if err != nil {
-		if perr := c.reportFailure(ctx, vol.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, vol.Name, vol.Status, err); perr != nil {
 			return true, fmt.Errorf("volume controller: create root volume %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("volume controller: create root volume %q: %w", vol.Name, err)
@@ -146,7 +146,7 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		// A created volume without a host path is an internal inconsistency:
 		// treat it as transient (report failed and requeue).
 		missing := fmt.Errorf("volume controller: created volume %q reports no host path", vol.Name)
-		if perr := c.reportFailure(ctx, vol.Name, missing); perr != nil {
+		if perr := c.reportFailure(ctx, vol.Name, vol.Status, missing); perr != nil {
 			return true, fmt.Errorf("volume controller: %q missing path and status report failed: %w", vol.Name, errors.Join(missing, perr))
 		}
 		return true, missing
@@ -156,7 +156,7 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		Phase:      volumev1.VolumePhaseReady,
 		VolumePath: path,
 	}
-	if err := c.patchStatus(ctx, vol.Name, status); err != nil {
+	if err := c.patchStatus(ctx, vol.Name, vol.Status, status); err != nil {
 		return true, err
 	}
 
@@ -271,17 +271,26 @@ func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Vo
 	return created, nil
 }
 
-// reportFailure patches a failed status carrying cause's message.
-func (c *VolumeController) reportFailure(ctx context.Context, name string, cause error) error {
-	return c.patchStatus(ctx, name, volumev1.VolumeStatus{
+// reportFailure patches a failed status carrying cause's message, skipping the
+// PATCH when the observed status already matches (no-op guard).
+func (c *VolumeController) reportFailure(ctx context.Context, name string, observed volumev1.VolumeStatus, cause error) error {
+	return c.patchStatus(ctx, name, observed, volumev1.VolumeStatus{
 		Phase:   volumev1.VolumePhaseFailed,
 		Message: cause.Error(),
 	})
 }
 
-// patchStatus marshals status and PATCHes it to the master's /status sub-resource.
-func (c *VolumeController) patchStatus(ctx context.Context, name string, status volumev1.VolumeStatus) error {
-	body, err := json.Marshal(status)
+// patchStatus marshals desired and PATCHes it to the master's /status
+// sub-resource, but only when it differs from observed (the status carried by the
+// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
+// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
+// triggered idempotence). The Status structs are comparable (scalar fields only),
+// so == is a sound equality test.
+func (c *VolumeController) patchStatus(ctx context.Context, name string, observed, desired volumev1.VolumeStatus) error {
+	if observed == desired {
+		return nil
+	}
+	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("volume controller: marshal status for %q: %w", name, err)
 	}

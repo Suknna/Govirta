@@ -102,7 +102,7 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 	p, err := buildPool(sp)
 	if err != nil {
 		// A spec that does not map is a permanent failure: requeue cannot fix it.
-		if perr := c.reportFailure(ctx, sp.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, sp.Name, sp.Status, err); perr != nil {
 			return false, fmt.Errorf("storagepool controller: map spec %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("storagepool spec mapping failed")
@@ -110,7 +110,7 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 	}
 
 	if err := c.pools.RegisterPool(p); err != nil && !errors.Is(err, pool.ErrPoolAlreadyExists) {
-		if perr := c.reportFailure(ctx, sp.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, sp.Name, sp.Status, err); perr != nil {
 			return true, fmt.Errorf("storagepool controller: register pool %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("storagepool controller: register pool %q: %w", sp.Name, err)
@@ -118,7 +118,7 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 
 	usage, err := c.pools.GetPoolUsage(ctx, sp.Name)
 	if err != nil {
-		if perr := c.reportFailure(ctx, sp.Name, err); perr != nil {
+		if perr := c.reportFailure(ctx, sp.Name, sp.Status, err); perr != nil {
 			return true, fmt.Errorf("storagepool controller: read usage for %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
 		}
 		return true, fmt.Errorf("storagepool controller: read usage for %q: %w", sp.Name, err)
@@ -128,7 +128,7 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 		Phase:          storagepoolv1.PoolPhaseReady,
 		AllocatedBytes: usage.AllocatedBytes,
 	}
-	if err := c.patchStatus(ctx, sp.Name, status); err != nil {
+	if err := c.patchStatus(ctx, sp.Name, sp.Status, status); err != nil {
 		return true, err
 	}
 
@@ -139,17 +139,26 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 	return false, nil
 }
 
-// reportFailure patches a failed status carrying cause's message.
-func (c *StoragePoolController) reportFailure(ctx context.Context, name string, cause error) error {
-	return c.patchStatus(ctx, name, storagepoolv1.StoragePoolStatus{
+// reportFailure patches a failed status carrying cause's message, skipping the
+// PATCH when the observed status already matches (no-op guard).
+func (c *StoragePoolController) reportFailure(ctx context.Context, name string, observed storagepoolv1.StoragePoolStatus, cause error) error {
+	return c.patchStatus(ctx, name, observed, storagepoolv1.StoragePoolStatus{
 		Phase:   storagepoolv1.PoolPhaseFailed,
 		Message: cause.Error(),
 	})
 }
 
-// patchStatus marshals status and PATCHes it to the master's /status sub-resource.
-func (c *StoragePoolController) patchStatus(ctx context.Context, name string, status storagepoolv1.StoragePoolStatus) error {
-	body, err := json.Marshal(status)
+// patchStatus marshals desired and PATCHes it to the master's /status
+// sub-resource, but only when it differs from observed (the status carried by the
+// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
+// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
+// triggered idempotence). The Status structs are comparable (scalar fields only),
+// so == is a sound equality test.
+func (c *StoragePoolController) patchStatus(ctx context.Context, name string, observed, desired storagepoolv1.StoragePoolStatus) error {
+	if observed == desired {
+		return nil
+	}
+	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("storagepool controller: marshal status for %q: %w", name, err)
 	}

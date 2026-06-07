@@ -149,6 +149,40 @@ func TestStoragePoolReconcileAddedReady(t *testing.T) {
 	}
 }
 
+// TestStoragePoolReconcileNoOpWhenStatusAlreadyDesired proves the level-triggered
+// no-op guard: when the watched object already carries the exact status the
+// controller would write (phase ready + matching allocatedBytes), Reconcile must
+// register/read usage as usual but skip the PATCH entirely. Without this guard the
+// PATCH produced a MODIFIED watch event that re-triggered Reconcile, spinning a
+// status→MODIFIED→reconcile→PATCH feedback loop (observed ~70 reconciles/sec in
+// e2e). Zero PATCH calls here is the regression assertion.
+func TestStoragePoolReconcileNoOpWhenStatusAlreadyDesired(t *testing.T) {
+	pools := &fakePoolRegistrar{usage: pool.Usage{AllocatedBytes: 4096}}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	sp := validStoragePool("pool-steady")
+	// The object arrives already carrying the status the controller would derive
+	// (ready + allocatedBytes 4096), mimicking the MODIFIED event a prior PATCH
+	// produced. The controller must recognize observed == desired and not PATCH.
+	sp.Status = storagepoolv1.StoragePoolStatus{
+		Phase:          storagepoolv1.PoolPhaseReady,
+		AllocatedBytes: 4096,
+	}
+	ev := newStoragePoolEvent(t, controller.EventModified, sp)
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false")
+	}
+	if reporter.patchCalls != 0 {
+		t.Fatalf("PatchStatus called %d times, want 0 when observed status already equals desired", reporter.patchCalls)
+	}
+}
+
 func TestStoragePoolReconcileAlreadyRegisteredIsIdempotent(t *testing.T) {
 	pools := &fakePoolRegistrar{registerErr: pool.ErrPoolAlreadyExists, usage: pool.Usage{AllocatedBytes: 1 << 20}}
 	reporter := &fakeStatusReporter{}
