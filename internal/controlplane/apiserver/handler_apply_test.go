@@ -280,3 +280,78 @@ func TestApplyPreservesExistingFinalizers(t *testing.T) {
 		t.Fatalf("stored finalizers = %v, want %v (existing must be preserved as-is)", stored.Finalizers, []metav1.Finalizer{existing})
 	}
 }
+
+// TestApplyNICAllocInjectsNodeTeardownFinalizer 验证：apply 一个 MAC 为空的 NIC 时，
+// 走 applyNIC 的 WithAllocation 分配分支——该分支在闭包内对 *nic 重新 json.Marshal 后
+// store.Put，是与直 put 结构不同的独立 marshal 路径。注入点位置若写错（例如 injectFinalizer
+// 误挪到分配之后、或 MAC-empty 分支独立 marshal 时漏带 finalizer），落盘字节就会丢 finalizer。
+// 本测试从 fake store 取持久化的原始字节 unmarshal，断言 finalizer 经分配闭包重新 marshal 后仍在。
+func TestApplyNICAllocInjectsNodeTeardownFinalizer(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validNIC()
+	if obj.Spec.MAC != "" {
+		t.Fatalf("fixture precondition: NIC MAC must be empty (drives WithAllocation path)")
+	}
+	if len(obj.Finalizers) != 0 {
+		t.Fatalf("fixture precondition: NIC Finalizers must be empty")
+	}
+
+	rec := doApply(t, srv, metav1.KindNIC, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindNIC, obj.Name)
+	var stored nicv1.NIC
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored NIC: %v", err)
+	}
+
+	// Sanity: we really took the allocation branch (an empty MAC got filled in).
+	if stored.Spec.MAC == "" {
+		t.Fatalf("stored NIC MAC is empty; allocation branch did not run")
+	}
+
+	want := []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	if len(stored.Finalizers) != len(want) || stored.Finalizers[0] != want[0] {
+		t.Fatalf("stored finalizers = %v, want %v (lost across applyNIC re-marshal)", stored.Finalizers, want)
+	}
+}
+
+// TestApplyVMScheduleInjectsNodeTeardownFinalizer 验证：apply 一个无显式 NodeName 的 VM 时，
+// 走 bindVM 调度分支——先由 scheduler 写 ObjectMeta.NodeName，再 put 持久化。注入点位置若写错
+// （例如 injectFinalizer 误挪到 bindVM 之后、或调度改写 meta 时覆盖掉 finalizer），落盘就会丢 finalizer。
+// 本测试从 fake store 取持久化的原始字节 unmarshal，断言调度写回 NodeName 后 finalizer 仍随对象落盘。
+func TestApplyVMScheduleInjectsNodeTeardownFinalizer(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if obj.NodeName != "" {
+		t.Fatalf("fixture precondition: VM NodeName must be empty (drives bindVM schedule path)")
+	}
+	if len(obj.Finalizers) != 0 {
+		t.Fatalf("fixture precondition: VM Finalizers must be empty")
+	}
+
+	rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindVM, obj.Name)
+	var stored vmv1.VM
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored VM: %v", err)
+	}
+
+	// Sanity: we really took the schedule branch (an empty NodeName got bound).
+	if stored.NodeName == "" {
+		t.Fatalf("stored VM NodeName is empty; schedule branch did not run")
+	}
+
+	want := []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	if len(stored.Finalizers) != len(want) || stored.Finalizers[0] != want[0] {
+		t.Fatalf("stored finalizers = %v, want %v (lost across bindVM schedule + put)", stored.Finalizers, want)
+	}
+}
