@@ -75,6 +75,9 @@ func (s *Server) Handler() http.Handler {
 	// Status sub-resource (up-reconcile) shares the same Handler() so node
 	// status reports land on the one /apis surface as apply and get.
 	s.statusHandler(mux)
+	// Delete (finalizer two-phase entry: stamp deletionTimestamp) shares the
+	// same Handler() so a DELETE lands on the one /apis surface as the rest.
+	s.deleteHandler(mux)
 	return mux
 }
 
