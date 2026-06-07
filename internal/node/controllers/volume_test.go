@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -705,18 +706,31 @@ func deletingVolume(name string) volumev1.Volume {
 	return vol
 }
 
+// wantTeardownVolumeID derives the SAME server-side key the create path stores a
+// volume under — volume.ID(fmt.Sprintf("%s-%s-%d", VMRef, role, DiskIndex)), see
+// storage.VolumeService.CreateRootVolumeFromReader — so teardown tests assert the
+// controller deletes by the real storage key, NOT the object name. Modeling real
+// storage keying is what catches a teardown that keys by the wrong field: because
+// a wrong-key delete returns the tolerated volume.ErrVolumeNotFound (silent leak),
+// only asserting the exact VolumeID can detect the bug.
+func wantTeardownVolumeID(vol volumev1.Volume) volume.ID {
+	return volume.ID(fmt.Sprintf("%s-%s-%d", vol.Spec.VMRef, vol.Spec.Role, vol.Spec.DiskIndex))
+}
+
 // TestVolumeReconcileTeardownDeletesAndRemovesFinalizer proves the teardown
-// branch: a deletion-stamped volume is deleted from its block pool (keyed by the
-// object name as volume.ID and the spec PoolRef) and, once deleted, the
-// node-teardown finalizer is removed so apiserver can finalize the delete. The
-// ensure path (GetImage / CreateRootVolumeFromReader) must not run.
+// branch: a deletion-stamped volume is deleted from its block pool keyed by the
+// SERVER-DERIVED volume id (<VMRef>-<role>-<DiskIndex>, the same key the create
+// path stored it under — NOT the object name) and the spec PoolRef, and, once
+// deleted, the node-teardown finalizer is removed so apiserver can finalize the
+// delete. The ensure path (GetImage / CreateRootVolumeFromReader) must not run.
 func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	creator := &fakeRootVolumeCreator{}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, deletingVolume("vol-del")))
+	vol := deletingVolume("vol-del")
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
@@ -726,8 +740,11 @@ func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	if creator.deleteCalls != 1 {
 		t.Fatalf("DeleteVolume called %d times, want 1", creator.deleteCalls)
 	}
-	if creator.gotDeleteReq.VolumeID != volume.ID("vol-del") {
-		t.Errorf("DeleteVolume VolumeID = %q, want %q", creator.gotDeleteReq.VolumeID, volume.ID("vol-del"))
+	// Real storage keying: teardown must delete by the derived id the create path
+	// stored, not the object name. wantTeardownVolumeID rebuilds that key.
+	wantID := wantTeardownVolumeID(vol)
+	if creator.gotDeleteReq.VolumeID != wantID {
+		t.Errorf("DeleteVolume VolumeID = %q, want %q (derived <VMRef>-<role>-<DiskIndex>)", creator.gotDeleteReq.VolumeID, wantID)
 	}
 	if creator.gotDeleteReq.PoolName != "block-pool" {
 		t.Errorf("DeleteVolume PoolName = %q, want %q", creator.gotDeleteReq.PoolName, "block-pool")
@@ -758,7 +775,8 @@ func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 	dep := &fakeDependencyReader{}
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, deletingVolume("vol-gone")))
+	vol := deletingVolume("vol-gone")
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-deleted volume", err)
 	}
@@ -767,6 +785,12 @@ func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 	}
 	if creator.deleteCalls != 1 {
 		t.Fatalf("DeleteVolume called %d times, want 1", creator.deleteCalls)
+	}
+	// Even on the idempotent NotFound path the controller must key by the derived
+	// id (the storage layer matched the wrong-key delete to NotFound — exactly the
+	// silent-leak the wrong convention produced), so assert the real key here too.
+	if wantID := wantTeardownVolumeID(vol); creator.gotDeleteReq.VolumeID != wantID {
+		t.Errorf("DeleteVolume VolumeID = %q, want %q (derived <VMRef>-<role>-<DiskIndex>)", creator.gotDeleteReq.VolumeID, wantID)
 	}
 	if dep.removeFinalizerCalls != 1 {
 		t.Fatalf("RemoveFinalizer called %d times, want 1 (NotFound is idempotent success)", dep.removeFinalizerCalls)
@@ -783,12 +807,18 @@ func TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing
 	dep := &fakeDependencyReader{}
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, deletingVolume("vol-busy")))
+	vol := deletingVolume("vol-busy")
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err == nil || !errors.Is(err, volume.ErrVolumeInUse) {
 		t.Fatalf("Reconcile() error = %v, want wrapped volume.ErrVolumeInUse", err)
 	}
 	if !requeue {
 		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	}
+	// The conflict must come from deleting the right (derived) key: assert it so a
+	// regression to keying by the object name can't masquerade as this conflict.
+	if wantID := wantTeardownVolumeID(vol); creator.gotDeleteReq.VolumeID != wantID {
+		t.Errorf("DeleteVolume VolumeID = %q, want %q (derived <VMRef>-<role>-<DiskIndex>)", creator.gotDeleteReq.VolumeID, wantID)
 	}
 	if dep.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", dep.removeFinalizerCalls)

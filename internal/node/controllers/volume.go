@@ -299,21 +299,47 @@ func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Vo
 	return created, nil
 }
 
-// teardown deletes the live volume from its block pool. The volume id is derived
-// from the object name (volume.ID) and the pool from the spec's PoolRef. Deleting
-// an already-gone volume (volume.ErrVolumeNotFound) is treated as an idempotent
-// success so a re-driven teardown still progresses to dropping the finalizer. Any
-// other error (e.g. volume.ErrVolumeInUse — still attached to a running VM) is a
-// real conflict: it is returned so the finalizer is kept and the reconcile
-// requeued, letting the referencing VM tear down first.
+// teardown deletes the live volume from its block pool. The storage layer keys a
+// volume by a SERVER-DERIVED id (NOT the object name): the create path stores it
+// under volume.ID(fmt.Sprintf("%s-%s-%d", VMRef, role, DiskIndex)) — see
+// storage.VolumeService.CreateRootVolumeFromReader (internal/storage/service.go).
+// pool.Service.DeleteVolume looks that derived id up with no name fallback, so
+// teardown MUST reconstruct the SAME key or the delete misses, returns the
+// tolerated volume.ErrVolumeNotFound, drops the finalizer, and silently leaks the
+// qcow2 file + pool capacity reservation. The pool comes from the spec's PoolRef.
+// Deleting an already-gone volume (volume.ErrVolumeNotFound) is treated as an
+// idempotent success so a re-driven teardown still progresses to dropping the
+// finalizer. Any other error (e.g. volume.ErrVolumeInUse — still attached to a
+// running VM) is a real conflict: it is returned so the finalizer is kept and the
+// reconcile requeued, letting the referencing VM tear down first.
 func (c *VolumeController) teardown(ctx context.Context, vol volumev1.Volume) error {
+	volID := volume.ID(fmt.Sprintf("%s-%s-%d", vol.Spec.VMRef, mapVolumeRole(vol.Spec.Role), vol.Spec.DiskIndex))
 	if err := c.volumes.DeleteVolume(ctx, storage.DeleteVolumeRequest{
-		VolumeID: volume.ID(vol.Name),
+		VolumeID: volID,
 		PoolName: vol.Spec.PoolRef,
 	}); err != nil && !errors.Is(err, volume.ErrVolumeNotFound) {
-		return fmt.Errorf("volume controller: delete volume %q from pool %q: %w", vol.Name, vol.Spec.PoolRef, err)
+		return fmt.Errorf("volume controller: delete volume %q (id %q) from pool %q: %w", vol.Name, volID, vol.Spec.PoolRef, err)
 	}
 	return nil
+}
+
+// mapVolumeRole converts an apis volume role to the storage volume role,
+// converting explicitly (no blind string conversion, mirroring mapImageFormat) so
+// teardown derives the SAME key the create path stored the volume under. The two
+// role types share string values ("root"/"data"); the explicit switch keeps the
+// conversion typed and total over the known roles.
+func mapVolumeRole(r volumev1.VolumeRole) volume.Role {
+	switch r {
+	case volumev1.VolumeRoleRoot:
+		return volume.RoleRoot
+	case volumev1.VolumeRoleData:
+		return volume.RoleData
+	default:
+		// Unreachable for a persisted object: VolumeSpec.Validate rejects unknown
+		// roles before a finalizer is injected. Fall back to the faithful string
+		// conversion so an unexpected role still yields a deterministic key.
+		return volume.Role(string(r))
+	}
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

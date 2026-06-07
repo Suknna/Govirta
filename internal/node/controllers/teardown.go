@@ -31,13 +31,21 @@ package controllers
 //  2. storage.VolumeService.DeleteVolume(ctx, req)  —— internal/storage/{service.go,pool/service.go}
 //     透传到 pool.Service.DeleteVolume。池不存在：pool.ErrPoolNotFound；
 //     卷不存在：volume.ErrVolumeNotFound；卷仍 attached：volume.ErrVolumeInUse。
-//     → 非幂等，Task 9 需对 volume.ErrVolumeNotFound（及池已删时 pool.ErrPoolNotFound）容错。
+//     → 非幂等，Task 9 需对 volume.ErrVolumeNotFound 容错。
+//     注意：pool.ErrPoolNotFound 绝不可容错——命中它必须 requeue（保留 finalizer），
+//     等 StoragePool 控制器把池重新注册回来后再删，因为 UnregisterPool 只动内存
+//     注册项、不碰磁盘；磁盘上的 qcow2 文件仍在，若此时容错丢掉 finalizer，文件就会
+//     泄漏。池对象本身也还在（apiserver 的 referenceGuard 拒绝删除仍被卷引用的池），
+//     所以这是安全的自愈路径而非死循环。
 //
 //  3. storage.ImageService.DeleteImage(ctx, req)  —— internal/storage/{image_service.go,pool/service.go}
 //     透传到 pool.Service.DeleteImage。池不存在：pool.ErrPoolNotFound；
 //     镜像不存在或非 Ready 态：image.ErrImageNotFound（memory 357：无引用计数，
 //     删除是按 ID 直接拆，不存在即 NotFound）。
-//     → 非幂等，Task 9 需对 image.ErrImageNotFound（及 pool.ErrPoolNotFound）容错。
+//     → 非幂等，Task 9 需对 image.ErrImageNotFound 容错。
+//     注意：与卷同理，pool.ErrPoolNotFound 绝不可容错——命中它必须 requeue（保留
+//     finalizer），等 StoragePool 控制器重新注册池后再删，因为 UnregisterPool 只动
+//     内存、磁盘上的 qcow2 镜像文件仍在；若此时容错丢掉 finalizer，文件就会泄漏。
 //
 //  4. pool.Service.UnregisterPool(name)  —— internal/storage/pool/service.go
 //     已注销：pool.ErrPoolNotFound；仍有卷/镜像：pool.ErrPoolNotEmpty。

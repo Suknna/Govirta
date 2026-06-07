@@ -173,6 +173,14 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 // (image.ErrImageNotFound) is an idempotent success so a re-driven teardown
 // still progresses to dropping the finalizer.
 func (c *ImageController) teardown(ctx context.Context, img imagev1.Image) error {
+	// The map-error path is defensive-only and can never gate a real deletion: a
+	// persisted Image always carries a mappable format. ImageSpec.Validate
+	// (pkg/apis/image/v1alpha1/types.go) rejects invalid formats, and the apply
+	// path runs validateObject BEFORE injectFinalizer — so a bad-format Image is
+	// rejected with 400 before any finalizer is injected and can never be stored
+	// with one. Thus an unmappable format here is unreachable for an object that
+	// has a teardown finalizer; returning the error (keeping the finalizer) is the
+	// safe guard, never a real deadlock.
 	format, err := mapImageFormat(img.Spec.Format)
 	if err != nil {
 		return err
