@@ -60,6 +60,26 @@ govirtad_log="$tmp_dir/govirtad.log"
 govirtctl_bin="$tmp_dir/govirtctl"
 govirtad_bin="$tmp_dir/govirtad"
 
+# 逆向拆除后的 host 侧无孤儿核查用的派生身份。这些不是随意值：每个都和
+# test/e2e/manifests 的固定 fixture 一一对应，且 TAP 名 / nftables 链名 /
+# qcow2 路径都由控制器从稳定身份纯函数派生（internal/node/identity,
+# internal/storage/local），核查必须重算出 SAME 名字才能证明 live 资源真没了。
+#   - orphan_vm_uid: 07-vm.json metadata.uid。vmm 以 uid 为 runtime 目录名，
+#     QEMU argv（-pidfile/-chardev/-serial）也都嵌这个 uid，故 pgrep -f 它能定位进程。
+#   - orphan_vm_name: 07-vm.json metadata.name，块卷 qcow2 文件名的 <vmName> 段。
+#   - orphan_bridge: 05-network.json spec.bridgeName（network 控制器建的网桥）。
+#   - orphan_network: 05-network.json metadata.name，masquerade/forward 链名后缀。
+#   - orphan_block_pool: 01-storagepool-block.json metadata.name，qcow2 路径的 <pool> 段。
+#   - orphan_disk_index: 04-volume.json spec.diskIndex，qcow2 文件名的 <idx> 段。
+# TAP 名（gv+sha256(uid)[:8]+"."+nicIndex）在 guest 内由 uid 现算（见
+# verify_no_orphans），避免在此硬编码哈希而随 uid 漂移失真。
+orphan_vm_uid="vm-e2e-001"
+orphan_vm_name="vm-e2e"
+orphan_bridge="govirta0"
+orphan_network="net-e2e"
+orphan_block_pool="pool-block"
+orphan_disk_index="0"
+
 usage() {
 	cat <<EOF
 Usage: scripts/e2e.sh [mode]
@@ -298,6 +318,89 @@ run_closure() {
 		go test -v -tags e2e -count=1 "$repo_root/test/e2e/..."
 }
 
+# verify_no_orphans proves the reverse teardown left NO live kernel/QEMU/disk
+# resources behind in the guest. The closure test runs on the host and can only
+# see API 404s; the upper/lower consistency iron law demands we also confirm the
+# live resources the node built are actually gone — a dropped finalizer that
+# skipped the real delete would still 404 at the API while leaking a TAP, an
+# nftables chain, a bridge, a QEMU process, or a qcow2 file.
+#
+# All checks run INSIDE the Lima guest via limactl shell, because the bridge,
+# TAP, nftables ruleset, QEMU process and state_root all live in the guest, not
+# on the macOS host. The single inlined guest script recomputes the derived TAP
+# name from the VM uid (gv + first 8 hex of sha256(uid) + "." + nicIndex, see
+# internal/node/identity.DeriveNICIdentity) so the check tracks the controller's
+# derivation instead of a hard-coded hash. Any survivor prints a diagnostic and
+# makes the function (and thus the e2e run) fail non-zero.
+verify_no_orphans() {
+	LIMA_HOME="$lima_home" limactl shell "$instance_name" -- sh -eu -c '
+		vm_uid="'"$orphan_vm_uid"'"
+		vm_name="'"$orphan_vm_name"'"
+		bridge="'"$orphan_bridge"'"
+		network="'"$orphan_network"'"
+		block_pool="'"$orphan_block_pool"'"
+		disk_index="'"$orphan_disk_index"'"
+		runtime_root="'"$guest_runtime_root"'"
+		state_root="'"$guest_state_root"'"
+
+		# Recompute the TAP name exactly as DeriveNICIdentity does: nic index 0 is
+		# the VM s only NIC in the fixture (06-nic.json, single nicRef).
+		hash=$(printf "%s" "$vm_uid" | sha256sum | cut -c1-8)
+		tap="gv${hash}.0"
+		anti_spoof_chain="gv-as-${tap}"
+		masq_chain="gv-masq-${network}"
+		fwd_chain="gv-fwd-${network}"
+		vm_dir="${runtime_root}/${vm_uid}"
+		qcow2="${state_root}/block/pool/${block_pool}/${vm_uid}/${vm_name}-disk-${disk_index}.qcow2"
+
+		fail=0
+		report() { printf "ORPHAN: %s\n" "$1" >&2; fail=1; }
+
+		# VM: no QEMU process keyed by uid, and no runtime dir.
+		if pgrep -f "$vm_uid" >/dev/null 2>&1; then
+			report "QEMU process still running for VM uid $vm_uid"
+			pgrep -af "$vm_uid" >&2 || true
+		fi
+		if [ -e "$vm_dir" ]; then
+			report "VM runtime dir still present: $vm_dir"
+			sudo ls -la "$vm_dir" >&2 || true
+		fi
+
+		# NIC: no TAP link, no anti-spoofing chain.
+		if ip link show "$tap" >/dev/null 2>&1; then
+			report "TAP link still present: $tap"
+			ip link show "$tap" >&2 || true
+		fi
+		ruleset=$(sudo nft list ruleset 2>/dev/null || true)
+		if printf "%s" "$ruleset" | grep -q "$anti_spoof_chain"; then
+			report "anti-spoofing chain still present: $anti_spoof_chain"
+		fi
+
+		# Network: no bridge link, no masquerade/forward chains.
+		if ip link show "$bridge" >/dev/null 2>&1; then
+			report "bridge link still present: $bridge"
+			ip link show "$bridge" >&2 || true
+		fi
+		if printf "%s" "$ruleset" | grep -q "$masq_chain"; then
+			report "masquerade chain still present: $masq_chain"
+		fi
+		if printf "%s" "$ruleset" | grep -q "$fwd_chain"; then
+			report "forward chain still present: $fwd_chain"
+		fi
+
+		# Volume: no qcow2 file under the block pool.
+		if sudo test -e "$qcow2"; then
+			report "block volume qcow2 still present: $qcow2"
+		fi
+
+		if [ "$fail" -ne 0 ]; then
+			printf "host-side orphan check FAILED: live resources leaked after teardown\n" >&2
+			exit 1
+		fi
+		printf "host-side orphan check passed: no live VM/TAP/bridge/nftables/qcow2 resources remain\n"
+	'
+}
+
 run_full() {
 	check_tools
 	prepare_cache
@@ -309,6 +412,7 @@ run_full() {
 	start_govirtad
 	start_lima_govirtlet
 	run_closure
+	verify_no_orphans
 }
 
 run_full_logged() {
