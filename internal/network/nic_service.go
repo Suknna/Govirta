@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/suknna/govirta/internal/network/netpool"
-	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 // NICService is the VM-facing API for per-VM network interfaces. It shares the
@@ -33,13 +32,13 @@ func (s *NICService) EnsureNIC(ctx context.Context, networkName netpool.NetworkN
 }
 
 // DeleteNIC tears down one registered NIC in reverse dependency order. The
-// anti-spoofing rule reference identifies the firewall rule to remove and is
-// forwarded to the netpool core unchanged.
-func (s *NICService) DeleteNIC(ctx context.Context, networkName netpool.NetworkName, vmID netpool.VMID, antiSpoofRef firewall.RuleRef) error {
+// anti-spoofing rule ref is resolved live inside the netpool core, so callers
+// need no firewall handle to drive teardown.
+func (s *NICService) DeleteNIC(ctx context.Context, networkName netpool.NetworkName, vmID netpool.VMID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.pools.DeleteNIC(ctx, networkName, vmID, antiSpoofRef)
+	return s.pools.DeleteNIC(ctx, networkName, vmID)
 }
 
 // GetNICStatus returns the observed live NIC state aggregated from primitives.

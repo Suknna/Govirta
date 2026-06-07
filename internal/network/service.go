@@ -9,7 +9,6 @@ import (
 	"context"
 
 	"github.com/suknna/govirta/internal/network/netpool"
-	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 // NetworkService is the VM-facing API for shared network segments.
@@ -38,13 +37,13 @@ func (s *NetworkService) EnsureNetwork(ctx context.Context, name netpool.Network
 }
 
 // DeleteNetwork tears down one registered network; it fails if NICs remain. The
-// masquerade and forward rule references identify the firewall rules to remove
-// and are forwarded to the netpool core unchanged.
-func (s *NetworkService) DeleteNetwork(ctx context.Context, name netpool.NetworkName, masqueradeRef firewall.RuleRef, forwardRef firewall.RuleRef) error {
+// firewall rule refs are resolved live inside the netpool core, so callers need
+// no firewall handle to drive teardown.
+func (s *NetworkService) DeleteNetwork(ctx context.Context, name netpool.NetworkName) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.pools.DeleteNetwork(ctx, name, masqueradeRef, forwardRef)
+	return s.pools.DeleteNetwork(ctx, name)
 }
 
 // GetNetworkStatus returns the observed live state aggregated from primitives.

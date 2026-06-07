@@ -111,19 +111,87 @@ func TestDeleteNetworkReverseOrder(t *testing.T) {
 	// delete-phase slice is clean.
 	rec.reset()
 
-	if err := svc.DeleteNetwork(context.Background(), "net0", firewall.RuleRef{}, firewall.RuleRef{}); err != nil {
+	if err := svc.DeleteNetwork(context.Background(), "net0"); err != nil {
 		t.Fatalf("DeleteNetwork error = %v, want nil", err)
 	}
 
 	got := rec.sequence()
+	// The delete path now resolves each firewall rule ref live before deleting
+	// it (callers carry no firewall handle), so a ListRules read precedes each
+	// firewall delete. The reverse teardown order is otherwise unchanged.
 	want := []string{
 		"dhcp.Stop",
+		"firewall.ListRules",
 		"firewall.DeleteForwardAccept",
+		"firewall.ListRules",
 		"firewall.DeleteMasquerade",
 		"link.Delete",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("delete-phase order = %v, want %v", got, want)
+	}
+}
+
+func TestDeleteNetworkIdempotentWhenRulesAbsent(t *testing.T) {
+	svc, _, _, ff, _, _ := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+
+	// No EnsureNetwork: the masquerade and forward-accept rules were never
+	// created, so the live ref resolution observes nothing. A delete that
+	// cannot find a rule must treat it as already torn down rather than error,
+	// so repeated Delete retries stay idempotent.
+	if err := svc.DeleteNetwork(context.Background(), "net0"); err != nil {
+		t.Fatalf("DeleteNetwork(rules absent) error = %v, want nil", err)
+	}
+	if len(ff.deletedRefs) != 0 {
+		t.Fatalf("firewall deletes recorded = %v, want none when no rule observed", ff.deletedRefs)
+	}
+}
+
+func TestDeleteNICResolvesAntiSpoofingRefLive(t *testing.T) {
+	svc, _, _, ff, _, _ := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+	if _, err := svc.EnsureNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("EnsureNIC error = %v, want nil", err)
+	}
+
+	if err := svc.DeleteNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("DeleteNIC error = %v, want nil", err)
+	}
+
+	// The caller passed no ref; the service must resolve it live from observed
+	// firewall state and delete the matching anti-spoofing rule.
+	if len(ff.deletedRefs) != 1 {
+		t.Fatalf("anti-spoofing deletes recorded = %d, want 1; refs=%v", len(ff.deletedRefs), ff.deletedRefs)
+	}
+	if got := ff.deletedRefs[0].Purpose; got != firewall.RulePurposeEndpointAntiSpoofing {
+		t.Fatalf("deleted ref purpose = %q, want %q", got, firewall.RulePurposeEndpointAntiSpoofing)
+	}
+}
+
+func TestDeleteNICIdempotentWhenRuleAbsent(t *testing.T) {
+	svc, _, _, ff, _, _ := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+
+	// No EnsureNIC: the anti-spoofing rule was never created. The delete must
+	// treat the missing rule as already torn down rather than error.
+	if err := svc.DeleteNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("DeleteNIC(rule absent) error = %v, want nil", err)
+	}
+	if len(ff.deletedRefs) != 0 {
+		t.Fatalf("firewall deletes recorded = %v, want none when no rule observed", ff.deletedRefs)
 	}
 }
 

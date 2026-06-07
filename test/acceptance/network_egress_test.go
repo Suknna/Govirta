@@ -74,33 +74,6 @@ func TestNetworkEgressEndToEnd(t *testing.T) {
 	netSvc := network.NewNetworkService(pools)
 	nicSvc := network.NewNICService(pools)
 
-	// Firewall ListRules filters used to resolve the live rule refs needed by
-	// the orchestration/firewall delete APIs. GetNetworkStatus and GetNICStatus
-	// deliberately do not populate the Masquerade/Forward/AntiSpoofing RuleInfo
-	// fields, so the refs are not available from the Ensure* return values and
-	// must be resolved from observed host firewall state at cleanup time.
-	masqFilter := firewall.RuleFilter{
-		Owner:   firewall.FilterOwner(egressOwner),
-		Purpose: firewall.FilterPurpose(firewall.RulePurposeMasquerade),
-		Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
-		Table:   firewall.FilterTable(egressNATTable),
-		Chain:   firewall.FilterChain(egressMasqChn),
-	}
-	fwdFilter := firewall.RuleFilter{
-		Owner:   firewall.FilterOwner(egressOwner),
-		Purpose: firewall.FilterPurpose(firewall.RulePurposeForwardAccept),
-		Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
-		Table:   firewall.FilterTable(egressNATTable),
-		Chain:   firewall.FilterChain(egressFwdChn),
-	}
-	antiSpoofFilter := firewall.RuleFilter{
-		Owner:   firewall.FilterOwner(egressOwner),
-		Purpose: firewall.FilterPurpose(firewall.RulePurposeEndpointAntiSpoofing),
-		Family:  firewall.FilterFamily(firewall.TableFamilyBridge),
-		Table:   firewall.FilterTable(egressBrTable),
-		Chain:   firewall.FilterChain(egressBrChn),
-	}
-
 	netDef := netpool.NetworkDefinition{
 		Name:        egressNetwork,
 		BridgeName:  bridgeName,
@@ -135,47 +108,32 @@ func TestNetworkEgressEndToEnd(t *testing.T) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 
-		// Exercise the orchestration NIC delete path with a live-resolved
-		// anti-spoofing rule ref.
-		if ref, err := lowestHandleRuleRef(cleanupCtx, firewallMgr, antiSpoofFilter); err != nil {
-			t.Logf("resolve anti-spoofing ref for cleanup: %v", err)
-		} else if err := nicSvc.DeleteNIC(cleanupCtx, egressNetwork, egressVM, ref); err != nil {
+		// Exercise the orchestration NIC delete path. The service now resolves
+		// the anti-spoofing rule ref live from observed firewall state, so the
+		// caller needs no firewall handle.
+		if err := nicSvc.DeleteNIC(cleanupCtx, egressNetwork, egressVM); err != nil {
 			t.Logf("delete nic: %v", err)
 		}
 
-		// Resolve the masquerade and forward-accept refs and attempt the
-		// orchestration network delete to exercise that path. It is expected to
-		// return networker.ErrConflict here: DeleteNIC keeps the NIC definition
-		// registered and this phase exposes no NIC-unregister API, so the
-		// network's NIC count stays non-zero and DeleteNetwork refuses before
-		// tearing anything down. The shared resources are therefore torn down
-		// directly below so the fixed gvbr0/govirta-nat resources are clean for
-		// the next run.
-		masqRef, masqErr := lowestHandleRuleRef(cleanupCtx, firewallMgr, masqFilter)
-		fwdRef, fwdErr := lowestHandleRuleRef(cleanupCtx, firewallMgr, fwdFilter)
-		if masqErr == nil && fwdErr == nil {
-			if err := netSvc.DeleteNetwork(cleanupCtx, egressNetwork, masqRef, fwdRef); err != nil {
-				t.Logf("delete network via orchestration (expected ErrConflict while NIC stays registered): %v", err)
-			}
-		} else {
-			t.Logf("resolve network refs for cleanup: masquerade=%v forward=%v", masqErr, fwdErr)
+		// Attempt the orchestration network delete to exercise that path. It is
+		// expected to return networker.ErrConflict here: DeleteNIC keeps the NIC
+		// definition registered and this phase exposes no NIC-unregister API, so
+		// the network's NIC count stays non-zero and DeleteNetwork refuses
+		// before tearing anything down. The service resolves the masquerade and
+		// forward-accept refs internally, so the caller passes only the network
+		// name.
+		if err := netSvc.DeleteNetwork(cleanupCtx, egressNetwork); err != nil {
+			t.Logf("delete network via orchestration (expected ErrConflict while NIC stays registered): %v", err)
 		}
 
-		// Direct best-effort teardown of any shared resources the orchestration
-		// delete path could not remove. All host deletes are idempotent and
-		// return nil when the resource is already absent.
+		// Direct best-effort teardown of the shared resources the orchestration
+		// delete path could not remove while the NIC stays registered. The DHCP
+		// server and links are torn down by stable identity (no firewall handle
+		// needed); the masquerade and forward-accept rules are left in place and
+		// are reconciled idempotently by EnsureNetwork on the next run. All host
+		// deletes are idempotent and return nil when the resource is absent.
 		if err := dhcpMgr.Stop(cleanupCtx, egressDHCPID); err != nil {
 			t.Logf("stop dhcp server: %v", err)
-		}
-		if fwdErr == nil {
-			if err := firewallMgr.DeleteForwardAccept(cleanupCtx, fwdRef); err != nil {
-				t.Logf("delete forward-accept: %v", err)
-			}
-		}
-		if masqErr == nil {
-			if err := firewallMgr.DeleteMasquerade(cleanupCtx, masqRef); err != nil {
-				t.Logf("delete masquerade: %v", err)
-			}
 		}
 		if err := linkMgr.Delete(cleanupCtx, tapName); err != nil {
 			t.Logf("delete tap: %v", err)
@@ -335,26 +293,4 @@ func defaultEgressInterface(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no default-route egress interface found")
 	}
 	return iface, nil
-}
-
-// lowestHandleRuleRef resolves the firewall rule ref expected by the delete APIs
-// for a logical rule group. Grouped rules (forward-accept, endpoint
-// anti-spoofing) share owner/purpose/family/table/chain and are selected by the
-// lowest platform handle in the group; single rules (masquerade) return their
-// only ref. It errors when no rule matches the filter.
-func lowestHandleRuleRef(ctx context.Context, mgr firewall.Manager, filter firewall.RuleFilter) (firewall.RuleRef, error) {
-	rules, err := mgr.ListRules(ctx, filter)
-	if err != nil {
-		return firewall.RuleRef{}, err
-	}
-	if len(rules) == 0 {
-		return firewall.RuleRef{}, fmt.Errorf("no firewall rules matched filter %+v", filter)
-	}
-	lowest := rules[0].Ref
-	for _, rule := range rules[1:] {
-		if rule.Ref.Handle < lowest.Handle {
-			lowest = rule.Ref
-		}
-	}
-	return lowest, nil
 }

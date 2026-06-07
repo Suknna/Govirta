@@ -164,9 +164,12 @@ func (s *Service) EnsureNIC(ctx context.Context, networkName NetworkName, vmID V
 }
 
 // DeleteNIC tears down one NIC's host resources in reverse order, preserving
-// every error via errors.Join. The logical definition stays registered; callers
+// every error via errors.Join. The anti-spoofing rule ref is resolved live from
+// observed firewall state (callers carry no firewall handle), and a rule that is
+// already absent is treated as torn down rather than an error so repeated Delete
+// retries stay idempotent. The logical definition stays registered; callers
 // remove it explicitly if desired (out of scope for this method).
-func (s *Service) DeleteNIC(ctx context.Context, networkName NetworkName, vmID VMID, antiSpoofRef firewall.RuleRef) error {
+func (s *Service) DeleteNIC(ctx context.Context, networkName NetworkName, vmID VMID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -181,9 +184,18 @@ func (s *Service) DeleteNIC(ctx context.Context, networkName NetworkName, vmID V
 	if !exists {
 		return networker.ErrNotFound
 	}
+	nic = cloneNICDefinition(nic)
+	def = cloneNetworkDefinition(def)
 
 	var errs []error
-	if err := s.firewall.DeleteEndpointAntiSpoofing(ctx, antiSpoofRef); err != nil {
+	// 反查 anti-spoofing rule ref 后删除：调用方不持有 firewall handle，ref 只能从
+	// 观测到的 live 规则解析。规则已不存在（ErrNotFound）视为已拆除，跳过删除以保证
+	// Delete 重试的幂等性；其它解析错误必须向上传播。
+	if info, err := s.nicAntiSpoofingRule(ctx, def.RuleOwner, nic); err != nil {
+		if !errors.Is(err, networker.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("resolve anti-spoofing: %w", err))
+		}
+	} else if err := s.firewall.DeleteEndpointAntiSpoofing(ctx, info.Ref); err != nil {
 		errs = append(errs, fmt.Errorf("delete anti-spoofing: %w", err))
 	}
 	if err := s.dhcp.RemoveBinding(ctx, dhcp.BindingQuery{ServerID: def.DHCPServerID, MAC: nic.MAC}); err != nil {
@@ -196,8 +208,11 @@ func (s *Service) DeleteNIC(ctx context.Context, networkName NetworkName, vmID V
 }
 
 // DeleteNetwork tears down a network's shared host resources in reverse order.
-// It refuses to delete a network that still has registered NICs.
-func (s *Service) DeleteNetwork(ctx context.Context, name NetworkName, masqueradeRef firewall.RuleRef, forwardRef firewall.RuleRef) error {
+// It refuses to delete a network that still has registered NICs. The masquerade
+// and forward-accept rule refs are resolved live from observed firewall state
+// (callers carry no firewall handle); a rule that is already absent is treated
+// as torn down rather than an error so repeated Delete retries stay idempotent.
+func (s *Service) DeleteNetwork(ctx context.Context, name NetworkName) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -217,10 +232,33 @@ func (s *Service) DeleteNetwork(ctx context.Context, name NetworkName, masquerad
 	if err := s.dhcp.Stop(ctx, def.DHCPServerID); err != nil {
 		errs = append(errs, fmt.Errorf("stop dhcp: %w", err))
 	}
-	if err := s.firewall.DeleteForwardAccept(ctx, forwardRef); err != nil {
+	// 反查 forward-accept / masquerade rule ref 后删除：ref 只能从观测到的 live 规则
+	// 解析。各自规则已不存在（ErrNotFound）视为已拆除，跳过删除以保证幂等；其它解析
+	// 错误必须向上传播。逆序拆除：先 forward-accept，后 masquerade。
+	if info, err := s.firewallRule(ctx, firewall.RuleFilter{
+		Owner:   firewall.FilterOwner(def.RuleOwner),
+		Purpose: firewall.FilterPurpose(firewall.RulePurposeForwardAccept),
+		Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
+		Table:   firewall.FilterTable(def.FirewallTable),
+		Chain:   firewall.FilterChain(def.ForwardChain),
+	}); err != nil {
+		if !errors.Is(err, networker.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("resolve forward-accept: %w", err))
+		}
+	} else if err := s.firewall.DeleteForwardAccept(ctx, info.Ref); err != nil {
 		errs = append(errs, fmt.Errorf("delete forward-accept: %w", err))
 	}
-	if err := s.firewall.DeleteMasquerade(ctx, masqueradeRef); err != nil {
+	if info, err := s.firewallRule(ctx, firewall.RuleFilter{
+		Owner:   firewall.FilterOwner(def.RuleOwner),
+		Purpose: firewall.FilterPurpose(firewall.RulePurposeMasquerade),
+		Family:  firewall.FilterFamily(firewall.TableFamilyIPv4),
+		Table:   firewall.FilterTable(def.FirewallTable),
+		Chain:   firewall.FilterChain(def.MasqueradeChain),
+	}); err != nil {
+		if !errors.Is(err, networker.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("resolve masquerade: %w", err))
+		}
+	} else if err := s.firewall.DeleteMasquerade(ctx, info.Ref); err != nil {
 		errs = append(errs, fmt.Errorf("delete masquerade: %w", err))
 	}
 	if err := s.link.Delete(ctx, def.BridgeName); err != nil {

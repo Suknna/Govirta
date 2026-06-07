@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/suknna/govirta/internal/network/networker"
-	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 func TestRegisterNetworkRejectsEmptyName(t *testing.T) {
@@ -130,7 +129,7 @@ func TestDeleteNetworkRejectsWhenNICsPresent(t *testing.T) {
 		t.Fatalf("RegisterNIC error = %v, want nil", err)
 	}
 
-	err := svc.DeleteNetwork(context.Background(), "net0", firewall.RuleRef{}, firewall.RuleRef{})
+	err := svc.DeleteNetwork(context.Background(), "net0")
 	if !errors.Is(err, networker.ErrConflict) {
 		t.Fatalf("DeleteNetwork(NICs present) error = %v, want ErrConflict", err)
 	}

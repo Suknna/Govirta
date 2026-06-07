@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/suknna/govirta/internal/network/netpool"
-	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 func TestNetworkServiceCanceledContext(t *testing.T) {
@@ -18,7 +17,7 @@ func TestNetworkServiceCanceledContext(t *testing.T) {
 	if _, err := svc.EnsureNetwork(canceled, "net0"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("EnsureNetwork canceled = %v, want context.Canceled", err)
 	}
-	if err := svc.DeleteNetwork(canceled, "net0", firewall.RuleRef{}, firewall.RuleRef{}); !errors.Is(err, context.Canceled) {
+	if err := svc.DeleteNetwork(canceled, "net0"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("DeleteNetwork canceled = %v, want context.Canceled", err)
 	}
 }

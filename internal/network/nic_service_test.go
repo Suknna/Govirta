@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/suknna/govirta/internal/network/netpool"
-	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
 func TestNICServiceCanceledContext(t *testing.T) {
@@ -18,7 +17,7 @@ func TestNICServiceCanceledContext(t *testing.T) {
 	if _, err := svc.EnsureNIC(canceled, "net0", "vm1"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("EnsureNIC canceled = %v, want context.Canceled", err)
 	}
-	if err := svc.DeleteNIC(canceled, "net0", "vm1", firewall.RuleRef{}); !errors.Is(err, context.Canceled) {
+	if err := svc.DeleteNIC(canceled, "net0", "vm1"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("DeleteNIC canceled = %v, want context.Canceled", err)
 	}
 	if _, err := svc.GetNICStatus(canceled, "net0", "vm1"); !errors.Is(err, context.Canceled) {
