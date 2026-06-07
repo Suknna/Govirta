@@ -1532,6 +1532,15 @@ func TestUnregisterPoolMissingReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestUnregisterPoolRequiresExplicitName(t *testing.T) {
+	service := NewService()
+
+	// 空名拒绝与同包 getPool("") 契约平价：先于注册表查找返回 ErrPoolRequired。
+	if err := service.UnregisterPool(""); !errors.Is(err, ErrPoolRequired) {
+		t.Fatalf("UnregisterPool() empty name error = %v, want %v", err, ErrPoolRequired)
+	}
+}
+
 func TestUnregisterPoolWithVolumeReturnsNotEmpty(t *testing.T) {
 	service := NewService()
 	if err := service.RegisterPool(newTestPool("pool-a", PoolTypeBlock, BackendLocalBlock, 100, &lifecycleDriver{})); err != nil {

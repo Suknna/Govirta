@@ -68,6 +68,14 @@ func (s *Service) RegisterPool(p *Pool) error {
 // 为什么拒绝注销非空池：上下一致铁律要求池注销前先清空其卷/镜像，
 // 这里与 apiserver 的反向引用拒绝形成执行层兜底，避免遗留对象失去管理入口。
 //
+// 并发契约（诚实声明，不是无条件防孤儿）：本方法在持 s.mu 期间完成"空池检查 + 删除注册项"，
+// 但 getPool 在返回 *Pool 后即释放 s.mu，因此一个已经拿到该 *Pool 指针的 in-flight
+// CreateVolume/PutImage 仍可能在本方法删除注册项之后写入这个（已脱离注册表的）pool，
+// 造成失去管理入口的遗留对象。本方法不在执行层堵死这个窗口（堵死需要侵入已冻结的 create 路径）。
+// 调用方必须自行串行化"同一个池的 unregister 与 create"：在 Govirta 中由控制面反向引用守卫保证
+// （仍被 Volume/Image 引用的 Pool 不会进入删除），且每个节点资源由单一控制器以单写者方式 reconcile，
+// 不存在并发的 unregister 与 create 同时作用于同一个池。
+//
 // 锁顺序：先 s.mu 再 p.mu，与 RegisterPool/CreateVolume 等既有方法保持一致，
 // 没有方法在持 p.mu 时反向获取 s.mu，因此不会死锁。
 func (s *Service) UnregisterPool(name string) error {
