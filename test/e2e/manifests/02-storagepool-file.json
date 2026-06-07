@@ -1,0 +1,11 @@
+{
+  "apiVersion": "govirta.io/v1alpha1",
+  "kind": "StoragePool",
+  "metadata": { "name": "pool-file", "uid": "pool-file-001", "nodeName": "node0" },
+  "spec": {
+    "backend": "local-file",
+    "type": "file",
+    "storageRoot": "/var/lib/govirta/file",
+    "capacityBytes": 10737418240
+  }
+}

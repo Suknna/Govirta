@@ -1,0 +1,15 @@
+{
+  "apiVersion": "govirta.io/v1alpha1",
+  "kind": "Network",
+  "metadata": { "name": "net-e2e", "uid": "net-e2e-001", "nodeName": "node0" },
+  "spec": {
+    "bridgeName": "govirta0",
+    "subnet": "192.168.100.0/24",
+    "gatewayCIDR": "192.168.100.1/24",
+    "dhcpRangeStart": "192.168.100.10",
+    "dhcpRangeEnd": "192.168.100.100",
+    "egressInterface": "eth0",
+    "dns": ["8.8.8.8"],
+    "leaseSeconds": 3600
+  }
+}

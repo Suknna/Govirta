@@ -1,0 +1,14 @@
+{
+  "apiVersion": "govirta.io/v1alpha1",
+  "kind": "Image",
+  "metadata": { "name": "image-cirros", "uid": "image-cirros-001", "nodeName": "node0" },
+  "spec": {
+    "filePoolRef": "pool-file",
+    "source": {
+      "type": "file",
+      "location": "file:///var/lib/govirta/images/cirros-aarch64.qcow2"
+    },
+    "format": "qcow2",
+    "declaredSizeBytes": 134217728
+  }
+}

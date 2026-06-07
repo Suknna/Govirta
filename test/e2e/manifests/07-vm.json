@@ -1,0 +1,12 @@
+{
+  "apiVersion": "govirta.io/v1alpha1",
+  "kind": "VM",
+  "metadata": { "name": "vm-e2e", "uid": "vm-e2e-001" },
+  "spec": {
+    "arch": "aarch64",
+    "vcpus": 1,
+    "memoryMiB": 256,
+    "volumeRefs": ["vol-e2e-root"],
+    "nicRefs": ["nic-e2e"]
+  }
+}

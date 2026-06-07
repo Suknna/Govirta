@@ -1,0 +1,15 @@
+{
+  "apiVersion": "govirta.io/v1alpha1",
+  "kind": "Volume",
+  "metadata": { "name": "vol-e2e-root", "uid": "vol-e2e-root-001", "nodeName": "node0" },
+  "spec": {
+    "poolRef": "pool-block",
+    "vmRef": "vm-e2e-001",
+    "vmName": "vm-e2e",
+    "diskIndex": 0,
+    "capacityBytes": 1073741824,
+    "role": "root",
+    "imageRef": "image-cirros",
+    "imageFilePoolRef": "pool-file"
+  }
+}
