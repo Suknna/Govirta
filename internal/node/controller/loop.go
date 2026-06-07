@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/rs/zerolog"
 )
 
 // runController drives one Controller: a feeder goroutine streams events from
@@ -106,10 +108,10 @@ func consume(ctx context.Context, ch <-chan Event, q *Queue, startRV string) str
 // reconcileLoop pulls Events from q and reconciles them until q is shut down and
 // drained (Get reports ok=false). A reconcile that requeues or errors re-Adds the
 // same Event for another attempt — the thinnest retry, with no backoff. The error
-// is not swallowed: it is acted on by re-enqueuing (and per the Controller
-// contract is meant to be logged; wiring a logger is out of this task's scope).
-// After shutdown, a requeue's Add is dropped by the closed Queue, so the loop
-// always terminates.
+// is not swallowed: it is re-enqueued for retry AND logged at error level (with
+// kind/key/requeue context) so a controller failing transiently in a tight retry
+// loop is observable rather than spinning silently. After shutdown, a requeue's
+// Add is dropped by the closed Queue, so the loop always terminates.
 func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
 	for {
 		ev, ok := q.Get()
@@ -117,6 +119,22 @@ func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
 			return
 		}
 		requeue, err := c.Reconcile(ctx, ev)
+		if err != nil {
+			// A reconcile error must not be silently swallowed (项目铁律: 不吞错误).
+			// It is acted on by re-enqueuing below, but it is also recorded here —
+			// this is the single chokepoint every controller's transient failure
+			// flows through, and controllers do not all log their own transient
+			// errors. Without this line a controller that fails every attempt
+			// spins invisibly (the exact blind spot that hid a stuck reconcile in
+			// e2e). A pure requeue with no error is a controller's own dependency
+			// wait, which the controller already logs, so it is not logged here.
+			zerolog.Ctx(ctx).Error().
+				Err(err).
+				Str("kind", c.Kind()).
+				Str("key", ev.Key).
+				Bool("requeue", requeue).
+				Msg("controller reconcile failed")
+		}
 		if requeue || err != nil {
 			q.Add(ev)
 		}

@@ -1,11 +1,15 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 func TestLoop_RequeueReprocessesKey(t *testing.T) {
@@ -169,4 +173,93 @@ func TestLoop_WatchErrorSurfaces(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Run returned %v, want it to wrap %v", err, wantErr)
 	}
+}
+
+// errController returns a fixed error on every reconcile, exercising the loop's
+// transient-failure path. It signals each reconcile attempt so a test can stop
+// the manager after the failure has been observed and logged.
+type errController struct {
+	kind       string
+	err        error
+	reconciled chan struct{}
+}
+
+func (c *errController) Kind() string { return c.kind }
+
+func (c *errController) Reconcile(ctx context.Context, ev Event) (bool, error) {
+	select {
+	case c.reconciled <- struct{}{}:
+	case <-ctx.Done():
+	}
+	return false, c.err
+}
+
+// TestLoop_ReconcileErrorIsLogged proves the reconcile loop does not silently
+// swallow a controller error: it records the failure (with kind/key/err) at the
+// single chokepoint every controller's transient failure flows through. This is
+// the observability fix for the e2e blind spot where a controller failing every
+// attempt spun invisibly.
+func TestLoop_ReconcileErrorIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	logger := zerolog.New(&lockedWriter{w: &buf, mu: &mu})
+	ctx, cancel := context.WithCancel(logger.WithContext(context.Background()))
+	defer cancel()
+
+	wantErr := errors.New("reconcile boom")
+	ctrl := &errController{kind: "VM", err: wantErr, reconciled: make(chan struct{}, 1)}
+	src := &fakeSource{events: map[string][]Event{
+		"VM": {{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)}},
+	}}
+	mgr := NewManager(src, []Controller{ctrl})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- mgr.Run(ctx) }()
+
+	// Wait until the controller has failed at least once so the loop has had a
+	// chance to log it.
+	select {
+	case <-ctrl.reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the controller to reconcile")
+	}
+
+	// Poll the buffer until the error line appears (the log write races the
+	// reconcile signal slightly), then stop the manager.
+	deadline := time.Now().Add(2 * time.Second)
+	var logged string
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		logged = buf.String()
+		mu.Unlock()
+		if strings.Contains(logged, "reconcile boom") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-runErr
+
+	if !strings.Contains(logged, "reconcile boom") {
+		t.Fatalf("reconcile error was not logged; log=%q", logged)
+	}
+	if !strings.Contains(logged, `"kind":"VM"`) {
+		t.Fatalf("log missing kind field; log=%q", logged)
+	}
+	if !strings.Contains(logged, `"key":"vm-a"`) {
+		t.Fatalf("log missing key field; log=%q", logged)
+	}
+}
+
+// lockedWriter serializes concurrent writes to the underlying buffer so the
+// test reads a consistent view while the manager's goroutine logs.
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
