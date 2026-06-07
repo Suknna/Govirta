@@ -21,9 +21,13 @@ import (
 // and the real delete (真删) happens here — and only here — when the last
 // finalizer is removed from an object that has been marked for deletion.
 //
-// 最小权限：body 只支持 {"remove": "<finalizer>"}。一个 node 只能摘掉 finalizer，
-// 物理上碰不到 spec/status 或其它 metadata 字段——复用 metadataPatchObject 透传模型，
-// 移除 finalizer 时 spec/status 以原始字节穿过，保证不被改写。
+// 最小权限：body 只支持 {"remove": "<finalizer>"}。两类保证强度不同，区分清楚：
+//   - spec/status 是字节级物理透传保证：复用 metadataPatchObject 只解 metadata，
+//     spec/status 以原始字节穿过 re-marshal，端点物理上无法改写它们。
+//   - metadata 不是字节级物理保证：metadata 被 decodeMetadataPatchObject 完整解码再
+//     re-marshal，模型层面能改任意 metadata 字段。它的最小权限来自“输入契约 + handler
+//     行为”：请求体 finalizerPatch 只有 remove 一个字段，handler 也只动 Finalizers。
+//     不要高估 metadata 侧的保证强度——它是契约约束，不是物理隔离。
 //
 // 收口的安全语义（关键）：清空 finalizer 触发真删，当且仅当对象带 deletionTimestamp
 // （存在删除意图）。若对象没有 deletionTimestamp 却被清空了 finalizer，绝不真删——
@@ -135,6 +139,14 @@ func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.Ra
 
 	// 收口判定：finalizer 清空 且 对象带 deletionTimestamp（存在删除意图）→ 真删。
 	// 这是真删唯一发生的地方：DELETE 只打戳，等所有 finalizer 拆净才在此收口。
+	//
+	// 已知版本一致性窗口（I1，本刀接受）：回写路径用 raw.ResourceVersion 做 CAS
+	// （conditional Put），但真删路径用无条件 store.Delete（store 接口的 Delete 无 version
+	// 参数）。Get→Delete 之间若有并发写（如 apply 重写该对象、清掉 deletionTimestamp 复活
+	// 它），无条件 Delete 仍会盲删。当前架构下正常流不会触发：每个 node 控制器对自己负责的
+	// 对象是单写者 reconcile，且 DELETE 入口已做反向引用守卫。严格的版本化删除需要 store
+	// 接口支持 conditional delete（带 expectedVersion），属于已冻结的 store 层改动，记为
+	// backlog；本刀不改 store 接口、接受此窗口。
 	if len(obj.Metadata.Finalizers) == 0 && obj.Metadata.DeletionTimestamp != "" {
 		if err := s.store.Delete(ctx, key); err != nil {
 			return store.RawObject{}, false, internalErr(fmt.Errorf("apiserver: finalizers delete %s/%s: %w", kind, name, err))

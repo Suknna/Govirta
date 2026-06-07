@@ -280,3 +280,54 @@ func TestPatchFinalizersConcurrentWriteReturns409(t *testing.T) {
 		t.Fatalf("forced CAS conflict not consumed; failsRemaining = %d", wrapped.failsRemaining)
 	}
 }
+
+// TestPatchFinalizersMissingObjectReturns404 covers the 404 error branch: a
+// PATCH of the finalizers sub-resource on an object that was never created
+// resolves to store.ErrNotFound -> 404, with the uniform {"error": "..."}
+// envelope carrying a non-empty message.
+// 缺失对象（store.ErrNotFound）必须映射为 404，并带非空 error body。
+func TestPatchFinalizersMissingObjectReturns404(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	rec := doPatchFinalizers(t, srv, metav1.KindVolume, "nonexistent", metav1.FinalizerNodeTeardown)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+}
+
+// TestPatchFinalizersMissingRemoveFieldReturns400 covers the required-field
+// validation branch: a PATCH body whose "remove" field is empty (absent, or the
+// empty string) must be rejected with 400 before any store access, with the
+// uniform {"error": "..."} envelope carrying a non-empty message.
+// 请求体缺 remove 字段（或 remove 为空串）直接触发必填校验 -> 400 + 非空 error body。
+func TestPatchFinalizersMissingRemoveFieldReturns400(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	// Seed a live Volume so the failure is unambiguously the required-field
+	// check rather than a missing object — the validation rejects the body
+	// before the store is ever read.
+	vol := validVolume()
+	if rec := doApply(t, srv, metav1.KindVolume, vol.Name, vol); rec.Code != http.StatusCreated {
+		t.Fatalf("seed volume apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Empty remove (the zero value of finalizerPatch) trips the required-field
+	// guard: patch.Remove == "" -> 400.
+	rec := doPatchFinalizers(t, srv, metav1.KindVolume, vol.Name, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+
+	// The required-field check must short-circuit before touching the store:
+	// the seeded object stays intact with its finalizers untouched.
+	after := storedMeta(t, st, metav1.KindVolume, vol.Name)
+	if !slices.Contains(after.Finalizers, metav1.FinalizerNodeTeardown) {
+		t.Fatalf("finalizers = %v, want still to contain %q (a rejected 400 must not mutate the object)", after.Finalizers, metav1.FinalizerNodeTeardown)
+	}
+}
