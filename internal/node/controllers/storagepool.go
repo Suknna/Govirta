@@ -30,17 +30,21 @@ var errUnsupportedBackend = errors.New("storagepool controller: unsupported back
 var errUnsupportedPoolType = errors.New("storagepool controller: unsupported pool type")
 
 // PoolRegistrar is the narrow slice of the storage pool service the controller
-// needs: register a pool and read its live usage. *pool.Service satisfies it.
+// needs: register a pool, read its live usage, and unregister it on teardown.
+// *pool.Service satisfies it. UnregisterPool takes no ctx — it is a pure
+// in-memory deregistration symmetric with RegisterPool (Task 1b).
 type PoolRegistrar interface {
 	RegisterPool(p *pool.Pool) error
 	GetPoolUsage(ctx context.Context, name string) (pool.Usage, error)
+	UnregisterPool(name string) error
 }
 
 // StatusReporter is the narrow slice of the master client the controller needs:
-// PATCH an object's /status sub-resource with a raw JSON body. *client.Client
-// satisfies it.
+// PATCH an object's /status sub-resource with a raw JSON body, and remove a
+// finalizer once live resources are torn down. *client.Client satisfies it.
 type StatusReporter interface {
 	PatchStatus(ctx context.Context, kind, name string, status []byte) ([]byte, error)
+	FinalizerRemover
 }
 
 // Compile-time proof that the real production types satisfy the narrow
@@ -99,6 +103,19 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 		return false, fmt.Errorf("storagepool controller: decode object %q: %w", ev.Key, err)
 	}
 
+	// Teardown branch: a deletion-stamped object means apiserver wants this pool
+	// gone. Tear down the live registration before the ensure path runs. A
+	// teardown failure keeps the finalizer (object stays "deleting") and requeues.
+	if isDeleting(sp.ObjectMeta) {
+		if err := c.teardown(sp); err != nil {
+			return true, fmt.Errorf("storagepool controller: teardown %q: %w", sp.Name, err)
+		}
+		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), sp.Name); err != nil {
+			return true, fmt.Errorf("storagepool controller: remove finalizer %q: %w", sp.Name, err)
+		}
+		return false, nil
+	}
+
 	p, err := buildPool(sp)
 	if err != nil {
 		// A spec that does not map is a permanent failure: requeue cannot fix it.
@@ -137,6 +154,20 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 		Int64("allocatedBytes", usage.AllocatedBytes).
 		Msg("storagepool ready")
 	return false, nil
+}
+
+// teardown unregisters the pool from the local pool service. Unregistering an
+// already-gone pool (pool.ErrPoolNotFound) is treated as an idempotent success
+// so a re-driven teardown still progresses to dropping the finalizer. A pool
+// that still holds volumes/images (pool.ErrPoolNotEmpty) is a real conflict: the
+// error is returned so the finalizer is kept and the reconcile requeued, letting
+// the referencing volumes/images tear down first. UnregisterPool is a pure
+// in-memory operation (symmetric with RegisterPool) and takes no ctx.
+func (c *StoragePoolController) teardown(sp storagepoolv1.StoragePool) error {
+	if err := c.pools.UnregisterPool(sp.Name); err != nil && !errors.Is(err, pool.ErrPoolNotFound) {
+		return fmt.Errorf("storagepool controller: unregister pool %q: %w", sp.Name, err)
+	}
+	return nil
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

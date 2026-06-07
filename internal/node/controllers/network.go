@@ -40,12 +40,13 @@ const (
 
 // NetworkEnsurer is the narrow slice of the network service the controller
 // needs: register a logical network definition, reconcile its host primitives,
-// and read its live aggregated status. *network.NetworkService satisfies it
-// (积木式 + 可测).
+// read its live aggregated status, and delete it on teardown.
+// *network.NetworkService satisfies it (积木式 + 可测).
 type NetworkEnsurer interface {
 	RegisterNetwork(def netpool.NetworkDefinition) error
 	EnsureNetwork(ctx context.Context, name netpool.NetworkName) (netpool.NetworkStatus, error)
 	GetNetworkStatus(ctx context.Context, name netpool.NetworkName) (netpool.NetworkStatus, error)
+	DeleteNetwork(ctx context.Context, name netpool.NetworkName) error
 }
 
 // 编译期证明真实生产类型满足窄接口。
@@ -110,6 +111,20 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 		return false, fmt.Errorf("network controller: decode object %q: %w", ev.Key, err)
 	}
 
+	// Teardown branch: a deletion-stamped object means apiserver wants this
+	// network gone. Delete the live host primitives before the ensure path runs.
+	// A teardown failure keeps the finalizer (object stays "deleting") and
+	// requeues.
+	if isDeleting(obj.ObjectMeta) {
+		if err := c.teardown(ctx, obj); err != nil {
+			return true, fmt.Errorf("network controller: teardown %q: %w", obj.Name, err)
+		}
+		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), obj.Name); err != nil {
+			return true, fmt.Errorf("network controller: remove finalizer %q: %w", obj.Name, err)
+		}
+		return false, nil
+	}
+
 	def, err := buildNetworkDefinition(obj)
 	if err != nil {
 		// A spec that does not parse is a permanent failure: requeue cannot fix it.
@@ -169,6 +184,19 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 		Bool("requeue", requeue).
 		Msg("network reconciled")
 	return requeue, nil
+}
+
+// teardown deletes the live network host primitives via the network service.
+// Deleting an already-gone network (networker.ErrNotFound) is treated as an
+// idempotent success so a re-driven teardown still progresses to dropping the
+// finalizer. Any other error (e.g. networker.ErrConflict — the network still has
+// registered NICs) is a real conflict: it is returned so the finalizer is kept
+// and the reconcile requeued, letting the referencing NICs tear down first.
+func (c *NetworkController) teardown(ctx context.Context, obj networkv1.Network) error {
+	if err := c.networks.DeleteNetwork(ctx, netpool.NetworkName(obj.Name)); err != nil && !errors.Is(err, networker.ErrNotFound) {
+		return fmt.Errorf("network controller: delete network %q: %w", obj.Name, err)
+	}
+	return nil
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

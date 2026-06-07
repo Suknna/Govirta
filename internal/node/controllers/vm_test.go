@@ -31,8 +31,13 @@ type fakeVMRunner struct {
 	startErr   error
 	startPhase vmm.Phase
 
+	stopErr   error
+	deleteErr error
+
 	createCalls int
 	startCalls  int
+	stopCalls   int
+	deleteCalls int
 	lastCreate  vmm.CreateRequest
 }
 
@@ -66,6 +71,25 @@ func (f *fakeVMRunner) Status(ctx context.Context, uuid string) (vmm.VM, error) 
 	return vmm.VM{UUID: uuid, Phase: f.statusPhase}, nil
 }
 
+// Stop records the graceful-powerdown call the teardown state machine issues for
+// a live guest and returns a canned error. Faithful to *vmm.VMMService.
+func (f *fakeVMRunner) Stop(ctx context.Context, uuid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopCalls++
+	return f.stopErr
+}
+
+// Delete records the runtime-state removal the teardown state machine issues once
+// the guest process is dead and returns a canned error. Faithful to
+// *vmm.VMMService.
+func (f *fakeVMRunner) Delete(ctx context.Context, uuid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteCalls++
+	return f.deleteErr
+}
+
 // fakeVMDepReader serves Volume and NIC objects by kind/name for dependency
 // gating and captures the VM status patches. Per-ref readiness is configured via
 // the seeded raw objects; a ref absent from the maps returns client.ErrNotFound.
@@ -77,6 +101,11 @@ type fakeVMDepReader struct {
 	getErr  map[string]error
 
 	patched []vmv1.VMStatus
+
+	removeFinalizerErr   error
+	removeFinalizerCalls int
+	lastFinalizerName    string
+	lastFinalizer        string
 }
 
 func (f *fakeVMDepReader) Get(ctx context.Context, kind, name string) ([]byte, error) {
@@ -112,6 +141,18 @@ func (f *fakeVMDepReader) PatchStatus(ctx context.Context, kind, name string, st
 	}
 	f.patched = append(f.patched, s)
 	return status, nil
+}
+
+// RemoveFinalizer records the teardown finalizer removal so a test can assert
+// the controller dropped the finalizer only once the guest is fully gone.
+// Faithful to *client.Client.
+func (f *fakeVMDepReader) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removeFinalizerCalls++
+	f.lastFinalizerName = name
+	f.lastFinalizer = finalizer
+	return f.removeFinalizerErr
 }
 
 func (f *fakeVMDepReader) lastPatch(t *testing.T) vmv1.VMStatus {
@@ -411,5 +452,263 @@ func TestVMReconcileContextCancelledPropagates(t *testing.T) {
 	}
 	if requeue {
 		t.Fatalf("requeue = true, want false on cancelled context")
+	}
+}
+
+// deletingVMObject returns a valid VM stamped for deletion (carrying a
+// deletionTimestamp), driving the controller into its teardown branch.
+func deletingVMObject() vmv1.VM {
+	vm := validVMObject()
+	vm.ObjectMeta.DeletionTimestamp = "2026-01-02T15:04:05Z"
+	return vm
+}
+
+// TestVMReconcileTeardownRunningStopsAndRequeuesKeepingFinalizer proves the
+// multi-step teardown's first leg: a live (Running) guest is gracefully powered
+// down (vmm.Stop) and the reconcile requeues WITHOUT dropping the finalizer, so
+// the object stays "deleting" until a later pass observes the process gone.
+// vmm.Delete must not run on a running guest (it would return ErrConflict).
+func TestVMReconcileTeardownRunningStopsAndRequeuesKeepingFinalizer(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseRunning}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil while teardown in progress", err)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true while awaiting process exit")
+	}
+	if runner.stopCalls != 1 {
+		t.Fatalf("Stop called %d times, want 1 for a running guest", runner.stopCalls)
+	}
+	if runner.deleteCalls != 0 {
+		t.Fatalf("Delete called %d times, want 0 for a still-running guest (would ErrConflict)", runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 while teardown in progress (finalizer kept)", dep.removeFinalizerCalls)
+	}
+	if runner.createCalls != 0 || runner.startCalls != 0 {
+		t.Fatalf("create=%d start=%d, want 0/0 during teardown", runner.createCalls, runner.startCalls)
+	}
+}
+
+// TestVMReconcileTeardownStartingStopsAndRequeues proves a guest still coming up
+// (Starting) is also gracefully stopped and requeued without dropping the
+// finalizer — the same first-leg behavior as Running.
+func TestVMReconcileTeardownStartingStopsAndRequeues(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStarting}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil while teardown in progress", err)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true while awaiting process exit")
+	}
+	if runner.stopCalls != 1 {
+		t.Fatalf("Stop called %d times, want 1 for a starting guest", runner.stopCalls)
+	}
+	if runner.deleteCalls != 0 {
+		t.Fatalf("Delete called %d times, want 0 for a not-yet-terminal guest", runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 while teardown in progress", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownStoppingRequeuesWithoutStopOrDelete proves a powerdown
+// already in flight (Stopping) is left alone: no second Stop, no Delete, and the
+// finalizer is kept while the reconcile requeues to await the terminal state.
+func TestVMReconcileTeardownStoppingRequeuesWithoutStopOrDelete(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStopping}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil while teardown in progress", err)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true while awaiting terminal state")
+	}
+	if runner.stopCalls != 0 {
+		t.Fatalf("Stop called %d times, want 0 when powerdown already in flight", runner.stopCalls)
+	}
+	if runner.deleteCalls != 0 {
+		t.Fatalf("Delete called %d times, want 0 while still stopping", runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 while teardown in progress", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownStoppedDeletesAndRemovesFinalizer proves the multi-step
+// teardown's second leg: a dead guest (Stopped) has its persisted runtime state
+// removed (vmm.Delete) and, once gone, the node-teardown finalizer is dropped so
+// apiserver can finalize the delete.
+func TestVMReconcileTeardownStoppedDeletesAndRemovesFinalizer(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStopped}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false after delete + finalizer removal")
+	}
+	if runner.stopCalls != 0 {
+		t.Fatalf("Stop called %d times, want 0 for an already-dead guest", runner.stopCalls)
+	}
+	if runner.deleteCalls != 1 {
+		t.Fatalf("Delete called %d times, want 1 for a stopped guest", runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1", dep.removeFinalizerCalls)
+	}
+	if dep.lastFinalizerName != "vm-a" {
+		t.Errorf("RemoveFinalizer name = %q, want %q", dep.lastFinalizerName, "vm-a")
+	}
+	if dep.lastFinalizer != string(metav1.FinalizerNodeTeardown) {
+		t.Errorf("RemoveFinalizer finalizer = %q, want %q", dep.lastFinalizer, metav1.FinalizerNodeTeardown)
+	}
+}
+
+// TestVMReconcileTeardownFailedDeletesAndRemovesFinalizer proves a guest that
+// died abnormally (Failed) is also a terminal state the teardown deletes, then
+// drops the finalizer.
+func TestVMReconcileTeardownFailedDeletesAndRemovesFinalizer(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseFailed}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false after delete + finalizer removal")
+	}
+	if runner.deleteCalls != 1 {
+		t.Fatalf("Delete called %d times, want 1 for a failed (terminal) guest", runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownAlreadyGoneRemovesFinalizer proves that when the guest's
+// state is already gone (vmm.ErrNotFound from Status), teardown treats it as torn
+// down and drops the finalizer without calling Stop or Delete.
+func TestVMReconcileTeardownAlreadyGoneRemovesFinalizer(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for already-gone guest", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false when guest already gone")
+	}
+	if runner.stopCalls != 0 || runner.deleteCalls != 0 {
+		t.Fatalf("stop=%d delete=%d, want 0/0 when state already gone", runner.stopCalls, runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (already gone is torn down)", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownDeleteNotFoundIsIdempotent proves Delete returning
+// vmm.ErrNotFound (the state vanished between Status and Delete) is an idempotent
+// success: the finalizer is still dropped.
+func TestVMReconcileTeardownDeleteNotFoundIsIdempotent(t *testing.T) {
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStopped, deleteErr: vmm.ErrNotFound}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for idempotent delete-not-found", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false on idempotent delete")
+	}
+	if runner.deleteCalls != 1 {
+		t.Fatalf("Delete called %d times, want 1", runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (delete NotFound is idempotent success)", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownStopFailureRequeuesKeepingFinalizer proves a Stop failure
+// keeps the finalizer and requeues: the guest could not be confirmed gone, so the
+// object stays "deleting".
+func TestVMReconcileTeardownStopFailureRequeuesKeepingFinalizer(t *testing.T) {
+	stopErr := errors.New("qmp powerdown failed")
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseRunning, stopErr: stopErr}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err == nil || !errors.Is(err, stopErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, stopErr)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on stop failure")
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when stop fails (finalizer kept)", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownDeleteFailureRequeuesKeepingFinalizer proves a real
+// (non-NotFound) Delete failure keeps the finalizer and requeues.
+func TestVMReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing.T) {
+	deleteErr := errors.New("remove state dir failed")
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStopped, deleteErr: deleteErr}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err == nil || !errors.Is(err, deleteErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, deleteErr)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on delete failure")
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when delete fails (finalizer kept)", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVMReconcileTeardownStatusErrorRequeuesKeepingFinalizer proves a transient
+// Status error (not ErrNotFound) keeps the finalizer and requeues: readiness to
+// tear down could not be assessed.
+func TestVMReconcileTeardownStatusErrorRequeuesKeepingFinalizer(t *testing.T) {
+	statusErr := errors.New("state file unreadable")
+	runner := &fakeVMRunner{statusErr: statusErr}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	if err == nil || !errors.Is(err, statusErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, statusErr)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on transient status error during teardown")
+	}
+	if runner.stopCalls != 0 || runner.deleteCalls != 0 {
+		t.Fatalf("stop=%d delete=%d, want 0/0 when status could not be read", runner.stopCalls, runner.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when status read fails (finalizer kept)", dep.removeFinalizerCalls)
 	}
 }

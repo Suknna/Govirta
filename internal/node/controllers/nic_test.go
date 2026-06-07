@@ -31,6 +31,11 @@ type fakeNICEnsurer struct {
 	statusErr      error
 	ensureCalls    int
 	getStatusCalls int
+
+	deleteErr   error
+	deleteCalls int
+	lastDelNet  netpool.NetworkName
+	lastDelVMID netpool.VMID
 }
 
 func (f *fakeNICEnsurer) RegisterNIC(def netpool.NICDefinition) error {
@@ -60,6 +65,19 @@ func (f *fakeNICEnsurer) GetNICStatus(ctx context.Context, networkName netpool.N
 	return f.statusResult, nil
 }
 
+// DeleteNIC records the teardown delete and returns a canned error so a test can
+// assert the controller tore the NIC down by network name + VM ref. It honours
+// ctx cancellation, faithful to *network.NICService.
+func (f *fakeNICEnsurer) DeleteNIC(ctx context.Context, networkName netpool.NetworkName, vmID netpool.VMID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.deleteCalls++
+	f.lastDelNet = networkName
+	f.lastDelVMID = vmID
+	return f.deleteErr
+}
+
 // fakeDependencyReader serves a canned Network object (by phase) for the gate
 // read and captures the NIC status JSON patched. It honours ctx cancellation,
 // faithful to *client.Client, and can report client.ErrNotFound for the gate.
@@ -71,6 +89,11 @@ type fakeNICDependencyReader struct {
 	getCalls       int
 	patchCalls     int
 	patches        []capturedNICPatch
+
+	removeFinalizerErr   error
+	removeFinalizerCalls int
+	lastFinalizerName    string
+	lastFinalizer        string
 }
 
 type capturedNICPatch struct {
@@ -116,6 +139,19 @@ func (f *fakeNICDependencyReader) PatchStatus(ctx context.Context, kind, name st
 	}
 	f.patches = append(f.patches, capturedNICPatch{kind: kind, name: name, status: decoded})
 	return status, nil
+}
+
+// RemoveFinalizer records the teardown finalizer removal so a test can assert
+// the controller dropped the finalizer after a successful teardown. Faithful to
+// *client.Client.
+func (f *fakeNICDependencyReader) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.removeFinalizerCalls++
+	f.lastFinalizerName = name
+	f.lastFinalizer = finalizer
+	return f.removeFinalizerErr
 }
 
 // testMAC is the apiserver-allocated MAC the controller must thread through
@@ -572,5 +608,111 @@ func TestNICReconcileContextCancelledPropagates(t *testing.T) {
 	}
 	if reader.patchCalls != 0 {
 		t.Errorf("PatchStatus called %d times after ctx cancel, want 0", reader.patchCalls)
+	}
+}
+
+// deletingNIC returns a valid NIC stamped for deletion (carrying a
+// deletionTimestamp), driving the controller into its teardown branch.
+func deletingNIC(name string) nicv1.NIC {
+	n := validNIC(name)
+	n.ObjectMeta.DeletionTimestamp = "2026-01-02T15:04:05Z"
+	return n
+}
+
+// TestNICReconcileTeardownDeletesAndRemovesFinalizer proves the teardown branch:
+// a deletion-stamped NIC is deleted from the NIC service (keyed by network name +
+// VM ref) and, once deleted, the node-teardown finalizer is removed so apiserver
+// can finalize the delete. Teardown runs before the network-ready gate and the
+// ensure path (RegisterNIC/EnsureNIC) must not run.
+func TestNICReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
+	nics := &fakeNICEnsurer{}
+	reader := &fakeNICDependencyReader{networkPhase: networkv1.NetworkPhaseReady}
+	c := newReadyNICController(nics, reader)
+
+	nic := deletingNIC("nic-del")
+	ev := newNICEvent(t, controller.EventModified, nic)
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	}
+	if nics.deleteCalls != 1 {
+		t.Fatalf("DeleteNIC called %d times, want 1", nics.deleteCalls)
+	}
+	if nics.lastDelNet != netpool.NetworkName("net-a") {
+		t.Errorf("DeleteNIC network = %q, want %q", nics.lastDelNet, "net-a")
+	}
+	if nics.lastDelVMID != netpool.VMID("vm-nic-del") {
+		t.Errorf("DeleteNIC vmID = %q, want %q", nics.lastDelVMID, "vm-nic-del")
+	}
+	if len(nics.registered) != 0 {
+		t.Errorf("RegisterNIC called %d times during teardown, want 0", len(nics.registered))
+	}
+	if nics.ensureCalls != 0 {
+		t.Errorf("EnsureNIC called %d times during teardown, want 0", nics.ensureCalls)
+	}
+	// Teardown must not even consult the referenced Network (it runs before the gate).
+	if reader.getCalls != 0 {
+		t.Errorf("Get called %d times during teardown, want 0 (teardown precedes the gate)", reader.getCalls)
+	}
+	if reader.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1", reader.removeFinalizerCalls)
+	}
+	if reader.lastFinalizerName != "nic-del" {
+		t.Errorf("RemoveFinalizer name = %q, want %q", reader.lastFinalizerName, "nic-del")
+	}
+	if reader.lastFinalizer != string(metav1.FinalizerNodeTeardown) {
+		t.Errorf("RemoveFinalizer finalizer = %q, want %q", reader.lastFinalizer, metav1.FinalizerNodeTeardown)
+	}
+}
+
+// TestNICReconcileTeardownAlreadyGoneIsIdempotent proves a teardown where the NIC
+// is already gone (networker.ErrNotFound) still drops the finalizer: an
+// already-deleted NIC is a tear-down success, not a stall.
+func TestNICReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
+	nics := &fakeNICEnsurer{deleteErr: networker.ErrNotFound}
+	reader := &fakeNICDependencyReader{networkPhase: networkv1.NetworkPhaseReady}
+	c := newReadyNICController(nics, reader)
+
+	ev := newNICEvent(t, controller.EventModified, deletingNIC("nic-gone"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for already-deleted NIC", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false when NIC already gone")
+	}
+	if nics.deleteCalls != 1 {
+		t.Fatalf("DeleteNIC called %d times, want 1", nics.deleteCalls)
+	}
+	if reader.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (NotFound is idempotent success)", reader.removeFinalizerCalls)
+	}
+}
+
+// TestNICReconcileTeardownDeleteFailureRequeuesKeepingFinalizer proves a real
+// teardown failure (a non-NotFound delete error) keeps the finalizer and requeues
+// so the NIC stays "deleting" until the live primitive is actually torn down.
+func TestNICReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing.T) {
+	deleteErr := errors.New("tap delete failed")
+	nics := &fakeNICEnsurer{deleteErr: deleteErr}
+	reader := &fakeNICDependencyReader{networkPhase: networkv1.NetworkPhaseReady}
+	c := newReadyNICController(nics, reader)
+
+	ev := newNICEvent(t, controller.EventModified, deletingNIC("nic-busy"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err == nil || !errors.Is(err, deleteErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, deleteErr)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on a teardown failure")
+	}
+	if reader.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown fails (finalizer kept)", reader.removeFinalizerCalls)
 	}
 }

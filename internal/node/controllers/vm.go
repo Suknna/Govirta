@@ -30,12 +30,15 @@ import (
 var errUnsupportedArch = errors.New("vm controller: unsupported arch")
 
 // VMRunner is the narrow slice of the VM process manager the controller needs:
-// create a daemonized QEMU from a configured builder, start it, and read its
-// live phase. *vmm.VMMService satisfies it (积木式 + 可测).
+// create a daemonized QEMU from a configured builder, start it, read its live
+// phase, and on teardown gracefully stop a running guest then delete its
+// persisted state. *vmm.VMMService satisfies it (积木式 + 可测).
 type VMRunner interface {
 	Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error)
 	Start(ctx context.Context, uuid string) (vmm.VM, error)
 	Status(ctx context.Context, uuid string) (vmm.VM, error)
+	Stop(ctx context.Context, uuid string) error
+	Delete(ctx context.Context, uuid string) error
 }
 
 // 编译期证明真实生产类型满足窄接口。
@@ -105,6 +108,28 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 	var obj vmv1.VM
 	if err := json.Unmarshal(ev.Object, &obj); err != nil {
 		return false, fmt.Errorf("vm controller: decode object %q: %w", ev.Key, err)
+	}
+
+	// Teardown branch: a deletion-stamped object means apiserver wants this guest
+	// gone. Unlike the other controllers, VM teardown is multi-step (stop-then-
+	// delete): vmm.Delete refuses a running VM (ErrConflict), so a live guest must
+	// first be gracefully powered down and the reconcile requeued until the
+	// process exits. teardown returns done=true only once the guest is fully gone;
+	// done=false means "teardown in progress" → requeue WITHOUT dropping the
+	// finalizer so the object stays "deleting" until the next pass observes the
+	// terminal state.
+	if isDeleting(obj.ObjectMeta) {
+		done, err := c.teardown(ctx, obj)
+		if err != nil {
+			return true, fmt.Errorf("vm controller: teardown %q: %w", obj.Name, err)
+		}
+		if !done {
+			return true, nil
+		}
+		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), obj.Name); err != nil {
+			return true, fmt.Errorf("vm controller: remove finalizer %q: %w", obj.Name, err)
+		}
+		return false, nil
 	}
 
 	// Idempotency / liveness loop: if the guest already exists, never re-create.
@@ -362,6 +387,58 @@ func mapVMPhase(p vmm.Phase) (vmv1.VMPhase, bool) {
 // bounded tight poll is preferred over a guest frozen at Starting in the master.
 func isTransientPhase(p vmm.Phase) bool {
 	return p == vmm.PhaseStarting || p == vmm.PhaseStopping
+}
+
+// teardown drives the guest process toward gone, returning done=true only once
+// the process and its persisted state no longer exist. Because vmm.Delete refuses
+// a running VM (ErrConflict), teardown is a phase-driven state machine reading the
+// live vmm phase:
+//
+//   - vmm.ErrNotFound from Status → the state file is already gone: torn down
+//     (done=true). A re-driven teardown lands here and drops the finalizer.
+//   - PhaseRunning / PhaseStarting → still alive: issue a graceful QMP powerdown
+//     (vmm.Stop) and report done=false so the reconcile requeues to await exit.
+//     The finalizer is kept until the process actually leaves.
+//   - PhaseStopping → powerdown already in flight: do nothing, done=false, requeue
+//     to await the terminal state.
+//   - PhaseStopped / PhaseFailed / PhaseDefined → the process is dead: vmm.Delete
+//     removes the persisted runtime state. Deleting an already-gone VM
+//     (vmm.ErrNotFound) is an idempotent success. done=true on a clean delete so
+//     the finalizer is dropped.
+//
+// Any unexpected error (Status / Stop / Delete) is returned so the reconcile
+// requeues with the finalizer kept; teardown never drops a finalizer on a guest
+// it could not confirm gone.
+func (c *VMController) teardown(ctx context.Context, obj vmv1.VM) (bool, error) {
+	v, err := c.vmm.Status(ctx, obj.UID)
+	if err != nil {
+		if errors.Is(err, vmm.ErrNotFound) {
+			// Process/state already gone: torn down, drop the finalizer.
+			return true, nil
+		}
+		return false, fmt.Errorf("vm controller: status %q for teardown: %w", obj.Name, err)
+	}
+
+	switch v.Phase {
+	case vmm.PhaseRunning, vmm.PhaseStarting:
+		// Alive: gracefully power down, then requeue to await process exit. The
+		// finalizer is kept (done=false) until a later pass observes a terminal
+		// phase and reaches Delete.
+		if err := c.vmm.Stop(ctx, obj.UID); err != nil {
+			return false, fmt.Errorf("vm controller: stop %q for teardown: %w", obj.Name, err)
+		}
+		return false, nil
+	case vmm.PhaseStopping:
+		// Powerdown already in flight: requeue to await the terminal state.
+		return false, nil
+	default:
+		// PhaseStopped / PhaseFailed / PhaseDefined: process is dead, remove the
+		// persisted state. An already-gone VM is an idempotent success.
+		if err := c.vmm.Delete(ctx, obj.UID); err != nil && !errors.Is(err, vmm.ErrNotFound) {
+			return false, fmt.Errorf("vm controller: delete %q for teardown: %w", obj.Name, err)
+		}
+		return true, nil
+	}
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

@@ -22,10 +22,11 @@ import (
 )
 
 // RootVolumeCreator is the narrow slice of the volume service the controller
-// needs: derive an independent root qcow2 volume from an image byte reader.
-// *storage.VolumeService satisfies it (积木式 + 可测).
+// needs: derive an independent root qcow2 volume from an image byte reader, and
+// delete a volume on teardown. *storage.VolumeService satisfies it (积木式 + 可测).
 type RootVolumeCreator interface {
 	CreateRootVolumeFromReader(ctx context.Context, req storage.CreateRootVolumeFromReaderRequest) (volume.Volume, error)
+	DeleteVolume(ctx context.Context, req storage.DeleteVolumeRequest) error
 }
 
 // ImageGetter is the narrow slice of the image service the controller needs:
@@ -36,12 +37,14 @@ type ImageGetter interface {
 }
 
 // DependencyReader is the narrow slice of the master client the controller
-// needs: read a referenced object's status for gating and PATCH this volume's
-// own status. *client.Client satisfies it. A Get that maps to client.ErrNotFound
-// means the dependency does not exist yet and the volume must wait (requeue).
+// needs: read a referenced object's status for gating, PATCH this volume's own
+// status, and remove a finalizer once live resources are torn down.
+// *client.Client satisfies it. A Get that maps to client.ErrNotFound means the
+// dependency does not exist yet and the volume must wait (requeue).
 type DependencyReader interface {
 	Get(ctx context.Context, kind, name string) ([]byte, error)
 	PatchStatus(ctx context.Context, kind, name string, status []byte) ([]byte, error)
+	FinalizerRemover
 }
 
 // 编译期证明真实生产类型满足窄接口。
@@ -107,6 +110,20 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	var vol volumev1.Volume
 	if err := json.Unmarshal(ev.Object, &vol); err != nil {
 		return false, fmt.Errorf("volume controller: decode object %q: %w", ev.Key, err)
+	}
+
+	// Teardown branch: a deletion-stamped object means apiserver wants this
+	// volume gone. Delete the live volume from its block pool before the ensure
+	// path runs. A teardown failure keeps the finalizer (object stays "deleting")
+	// and requeues.
+	if isDeleting(vol.ObjectMeta) {
+		if err := c.teardown(ctx, vol); err != nil {
+			return true, fmt.Errorf("volume controller: teardown %q: %w", vol.Name, err)
+		}
+		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), vol.Name); err != nil {
+			return true, fmt.Errorf("volume controller: remove finalizer %q: %w", vol.Name, err)
+		}
+		return false, nil
 	}
 
 	// Level-triggered idempotence: a ready volume is already at its desired
@@ -280,6 +297,23 @@ func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Vo
 		return created, errors.Join(createErr, closeErr)
 	}
 	return created, nil
+}
+
+// teardown deletes the live volume from its block pool. The volume id is derived
+// from the object name (volume.ID) and the pool from the spec's PoolRef. Deleting
+// an already-gone volume (volume.ErrVolumeNotFound) is treated as an idempotent
+// success so a re-driven teardown still progresses to dropping the finalizer. Any
+// other error (e.g. volume.ErrVolumeInUse — still attached to a running VM) is a
+// real conflict: it is returned so the finalizer is kept and the reconcile
+// requeued, letting the referencing VM tear down first.
+func (c *VolumeController) teardown(ctx context.Context, vol volumev1.Volume) error {
+	if err := c.volumes.DeleteVolume(ctx, storage.DeleteVolumeRequest{
+		VolumeID: volume.ID(vol.Name),
+		PoolName: vol.Spec.PoolRef,
+	}); err != nil && !errors.Is(err, volume.ErrVolumeNotFound) {
+		return fmt.Errorf("volume controller: delete volume %q from pool %q: %w", vol.Name, vol.Spec.PoolRef, err)
+	}
+	return nil
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

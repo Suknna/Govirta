@@ -17,11 +17,14 @@ import (
 // ErrPoolAlreadyExists when configured, and GetPoolUsage honours ctx
 // cancellation before returning.
 type fakePoolRegistrar struct {
-	registered     []*pool.Pool
-	registerErr    error
-	usage          pool.Usage
-	usageErr       error
-	usageCallCount int
+	registered       []*pool.Pool
+	registerErr      error
+	usage            pool.Usage
+	usageErr         error
+	usageCallCount   int
+	unregisterErr    error
+	unregisterCalls  int
+	lastUnregistered string
 }
 
 func (f *fakePoolRegistrar) RegisterPool(p *pool.Pool) error {
@@ -40,12 +43,22 @@ func (f *fakePoolRegistrar) GetPoolUsage(ctx context.Context, name string) (pool
 	return f.usage, nil
 }
 
+func (f *fakePoolRegistrar) UnregisterPool(name string) error {
+	f.unregisterCalls++
+	f.lastUnregistered = name
+	return f.unregisterErr
+}
+
 // fakeStatusReporter captures the last status JSON patched and honours ctx
 // cancellation, faithful to *client.Client.
 type fakeStatusReporter struct {
-	patches    []capturedPatch
-	patchErr   error
-	patchCalls int
+	patches              []capturedPatch
+	patchErr             error
+	patchCalls           int
+	removeFinalizerErr   error
+	removeFinalizerCalls int
+	lastFinalizerName    string
+	lastFinalizer        string
 }
 
 type capturedPatch struct {
@@ -68,6 +81,19 @@ func (f *fakeStatusReporter) PatchStatus(ctx context.Context, kind, name string,
 	}
 	f.patches = append(f.patches, capturedPatch{kind: kind, name: name, status: decoded})
 	return status, nil
+}
+
+// RemoveFinalizer records the teardown finalizer removal so a test can assert
+// the controller dropped the finalizer after a successful teardown. Faithful to
+// *client.Client.
+func (f *fakeStatusReporter) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.removeFinalizerCalls++
+	f.lastFinalizerName = name
+	f.lastFinalizer = finalizer
+	return f.removeFinalizerErr
 }
 
 func newStoragePoolEvent(t *testing.T, evType controller.EventType, sp storagepoolv1.StoragePool) controller.Event {
@@ -421,5 +447,99 @@ func TestStoragePoolReconcileNFSBackendIsPermanentFailure(t *testing.T) {
 	}
 	if phase := reporter.patches[0].status.Phase; phase != storagepoolv1.PoolPhaseFailed {
 		t.Fatalf("patched phase = %q, want %q", phase, storagepoolv1.PoolPhaseFailed)
+	}
+}
+
+// deletingStoragePool returns a valid pool stamped for deletion (carrying a
+// deletionTimestamp), driving the controller into its teardown branch.
+func deletingStoragePool(name string) storagepoolv1.StoragePool {
+	sp := validStoragePool(name)
+	sp.ObjectMeta.DeletionTimestamp = "2026-01-02T15:04:05Z"
+	return sp
+}
+
+// TestStoragePoolReconcileTeardownUnregistersAndRemovesFinalizer proves the
+// teardown branch: a deletion-stamped pool is unregistered from the pool service
+// and, once unregistered, the node-teardown finalizer is removed so apiserver can
+// finalize the delete. The ensure path (RegisterPool) must not run.
+func TestStoragePoolReconcileTeardownUnregistersAndRemovesFinalizer(t *testing.T) {
+	pools := &fakePoolRegistrar{}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	ev := newStoragePoolEvent(t, controller.EventModified, deletingStoragePool("pool-del"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	}
+	if pools.unregisterCalls != 1 {
+		t.Fatalf("UnregisterPool called %d times, want 1", pools.unregisterCalls)
+	}
+	if pools.lastUnregistered != "pool-del" {
+		t.Errorf("UnregisterPool name = %q, want %q", pools.lastUnregistered, "pool-del")
+	}
+	if len(pools.registered) != 0 {
+		t.Errorf("RegisterPool called %d times during teardown, want 0", len(pools.registered))
+	}
+	if reporter.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1", reporter.removeFinalizerCalls)
+	}
+	if reporter.lastFinalizerName != "pool-del" {
+		t.Errorf("RemoveFinalizer name = %q, want %q", reporter.lastFinalizerName, "pool-del")
+	}
+	if reporter.lastFinalizer != string(metav1.FinalizerNodeTeardown) {
+		t.Errorf("RemoveFinalizer finalizer = %q, want %q", reporter.lastFinalizer, metav1.FinalizerNodeTeardown)
+	}
+}
+
+// TestStoragePoolReconcileTeardownAlreadyUnregisteredIsIdempotent proves a
+// teardown where the pool is already gone (pool.ErrPoolNotFound) still drops the
+// finalizer: an already-deregistered pool is a tear-down success, not a stall.
+func TestStoragePoolReconcileTeardownAlreadyUnregisteredIsIdempotent(t *testing.T) {
+	pools := &fakePoolRegistrar{unregisterErr: pool.ErrPoolNotFound}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	ev := newStoragePoolEvent(t, controller.EventModified, deletingStoragePool("pool-gone"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for already-unregistered pool", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false when pool already gone")
+	}
+	if pools.unregisterCalls != 1 {
+		t.Fatalf("UnregisterPool called %d times, want 1", pools.unregisterCalls)
+	}
+	if reporter.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (NotFound is idempotent success)", reporter.removeFinalizerCalls)
+	}
+}
+
+// TestStoragePoolReconcileTeardownPoolNotEmptyRequeuesKeepingFinalizer proves a
+// real conflict (pool.ErrPoolNotEmpty: the pool still holds volumes/images) keeps
+// the finalizer and requeues so the referencing resources tear down first. This
+// is the execution-layer backstop behind the apiserver reference guard.
+func TestStoragePoolReconcileTeardownPoolNotEmptyRequeuesKeepingFinalizer(t *testing.T) {
+	pools := &fakePoolRegistrar{unregisterErr: pool.ErrPoolNotEmpty}
+	reporter := &fakeStatusReporter{}
+	c := NewStoragePoolController(pools, reporter)
+
+	ev := newStoragePoolEvent(t, controller.EventModified, deletingStoragePool("pool-busy"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err == nil || !errors.Is(err, pool.ErrPoolNotEmpty) {
+		t.Fatalf("Reconcile() error = %v, want wrapped pool.ErrPoolNotEmpty", err)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	}
+	if reporter.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", reporter.removeFinalizerCalls)
 	}
 }

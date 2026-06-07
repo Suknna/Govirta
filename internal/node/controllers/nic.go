@@ -43,12 +43,14 @@ const (
 )
 
 // NICEnsurer is the narrow slice of the NIC service the controller needs:
-// register a logical NIC definition, reconcile its host primitives, and read its
-// live aggregated status. *network.NICService satisfies it (积木式 + 可测).
+// register a logical NIC definition, reconcile its host primitives, read its
+// live aggregated status, and delete it on teardown. *network.NICService
+// satisfies it (积木式 + 可测).
 type NICEnsurer interface {
 	RegisterNIC(def netpool.NICDefinition) error
 	EnsureNIC(ctx context.Context, networkName netpool.NetworkName, vmID netpool.VMID) (netpool.NICStatus, error)
 	GetNICStatus(ctx context.Context, networkName netpool.NetworkName, vmID netpool.VMID) (netpool.NICStatus, error)
+	DeleteNIC(ctx context.Context, networkName netpool.NetworkName, vmID netpool.VMID) error
 }
 
 // 编译期证明真实生产类型满足窄接口。DependencyReader 复用 volume.go 的既有定义。
@@ -118,6 +120,20 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	var obj nicv1.NIC
 	if err := json.Unmarshal(ev.Object, &obj); err != nil {
 		return false, fmt.Errorf("nic controller: decode object %q: %w", ev.Key, err)
+	}
+
+	// Teardown branch: a deletion-stamped object means apiserver wants this NIC
+	// gone. Delete the live host primitives before the network-ready gate runs —
+	// a deleting NIC tears down regardless of its network's readiness. A teardown
+	// failure keeps the finalizer (object stays "deleting") and requeues.
+	if isDeleting(obj.ObjectMeta) {
+		if err := c.teardown(ctx, obj); err != nil {
+			return true, fmt.Errorf("nic controller: teardown %q: %w", obj.Name, err)
+		}
+		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), obj.Name); err != nil {
+			return true, fmt.Errorf("nic controller: remove finalizer %q: %w", obj.Name, err)
+		}
+		return false, nil
 	}
 
 	// Gate: the referenced Network must be live Ready before any NIC work. A
@@ -255,6 +271,18 @@ func (c *NICController) buildNICDefinition(n nicv1.NIC) (netpool.NICDefinition, 
 		AntiSpoofChain:    id.AntiSpoofChain,
 		AntiSpoofPriority: id.AntiSpoofPriority,
 	}, nil
+}
+
+// teardown deletes the live NIC host primitives via the NIC service, keyed by
+// the referenced network name and VM ref. Deleting an already-gone NIC
+// (networker.ErrNotFound) is treated as an idempotent success so a re-driven
+// teardown still progresses to dropping the finalizer. Any other error is a real
+// failure: it is returned so the finalizer is kept and the reconcile requeued.
+func (c *NICController) teardown(ctx context.Context, obj nicv1.NIC) error {
+	if err := c.nics.DeleteNIC(ctx, netpool.NetworkName(obj.Spec.NetworkRef), netpool.VMID(obj.Spec.VMRef)); err != nil && !errors.Is(err, networker.ErrNotFound) {
+		return fmt.Errorf("nic controller: delete nic for vm %q on network %q: %w", obj.Spec.VMRef, obj.Spec.NetworkRef, err)
+	}
+	return nil
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

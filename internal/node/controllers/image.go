@@ -39,10 +39,11 @@ var (
 // *storage.ImageService 满足它（积木式 + 可测）。
 //
 // ImagePutter is the narrow slice of the image service the controller needs:
-// open a writer for a new image in a file pool. *storage.ImageService satisfies
-// it.
+// open a writer for a new image in a file pool, and delete a committed image on
+// teardown. *storage.ImageService satisfies it.
 type ImagePutter interface {
 	PutImage(ctx context.Context, req storage.PutImageRequest) (image.ImageWriter, error)
+	DeleteImage(ctx context.Context, req storage.DeleteImageRequest) error
 }
 
 // 编译期证明真实生产类型满足窄接口。
@@ -110,6 +111,20 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 		return false, fmt.Errorf("image controller: decode object %q: %w", ev.Key, err)
 	}
 
+	// Teardown branch: a deletion-stamped object means apiserver wants this image
+	// gone. Delete the committed image from its file pool before the ensure path
+	// runs. A teardown failure keeps the finalizer (object stays "deleting") and
+	// requeues.
+	if isDeleting(img.ObjectMeta) {
+		if err := c.teardown(ctx, img); err != nil {
+			return true, fmt.Errorf("image controller: teardown %q: %w", img.Name, err)
+		}
+		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), img.Name); err != nil {
+			return true, fmt.Errorf("image controller: remove finalizer %q: %w", img.Name, err)
+		}
+		return false, nil
+	}
+
 	// Level-triggered idempotence: a ready image is already at its desired state.
 	// Re-reconciling (e.g. on the MODIFIED event our own ready-patch produced)
 	// must not re-fetch — PutImage would return ErrImageExists, which fails
@@ -147,6 +162,29 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 		Int64("localSizeBytes", copied).
 		Msg("image ready")
 	return false, nil
+}
+
+// teardown deletes the committed image from its file pool. The format must be
+// mapped (DeleteImage matches on it); an unmappable format is propagated as a
+// permanent error — the finalizer stays and the reconcile requeues, but a
+// requeue cannot fix a bad format, so it surfaces loudly rather than silently
+// dropping the finalizer on a half-understood object (ensure validated the
+// format already, so this is a defensive guard). Deleting an already-gone image
+// (image.ErrImageNotFound) is an idempotent success so a re-driven teardown
+// still progresses to dropping the finalizer.
+func (c *ImageController) teardown(ctx context.Context, img imagev1.Image) error {
+	format, err := mapImageFormat(img.Spec.Format)
+	if err != nil {
+		return err
+	}
+	if err := c.images.DeleteImage(ctx, storage.DeleteImageRequest{
+		PoolName: img.Spec.FilePoolRef,
+		ImageID:  img.Name,
+		Format:   format,
+	}); err != nil && !errors.Is(err, image.ErrImageNotFound) {
+		return fmt.Errorf("image controller: delete image %q from pool %q: %w", img.Name, img.Spec.FilePoolRef, err)
+	}
+	return nil
 }
 
 // fetch maps the format, then copies the source bytes into the file pool and

@@ -29,6 +29,10 @@ type fakeNetworkEnsurer struct {
 	statusErr      error
 	ensureCalls    int
 	getStatusCalls int
+
+	deleteErr   error
+	deleteCalls int
+	lastDeleted netpool.NetworkName
 }
 
 func (f *fakeNetworkEnsurer) RegisterNetwork(def netpool.NetworkDefinition) error {
@@ -58,12 +62,28 @@ func (f *fakeNetworkEnsurer) GetNetworkStatus(ctx context.Context, name netpool.
 	return f.statusResult, nil
 }
 
+// DeleteNetwork records the teardown delete and returns a canned error so a test
+// can assert the controller tore the network down by name. It honours ctx
+// cancellation, faithful to *network.NetworkService.
+func (f *fakeNetworkEnsurer) DeleteNetwork(ctx context.Context, name netpool.NetworkName) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.deleteCalls++
+	f.lastDeleted = name
+	return f.deleteErr
+}
+
 // fakeNetworkStatusReporter captures the last NetworkStatus JSON patched and
 // honours ctx cancellation, faithful to *client.Client.
 type fakeNetworkStatusReporter struct {
-	patches    []capturedNetworkPatch
-	patchErr   error
-	patchCalls int
+	patches              []capturedNetworkPatch
+	patchErr             error
+	patchCalls           int
+	removeFinalizerErr   error
+	removeFinalizerCalls int
+	lastFinalizerName    string
+	lastFinalizer        string
 }
 
 type capturedNetworkPatch struct {
@@ -86,6 +106,19 @@ func (f *fakeNetworkStatusReporter) PatchStatus(ctx context.Context, kind, name 
 	}
 	f.patches = append(f.patches, capturedNetworkPatch{kind: kind, name: name, status: decoded})
 	return status, nil
+}
+
+// RemoveFinalizer records the teardown finalizer removal so a test can assert
+// the controller dropped the finalizer after a successful teardown. Faithful to
+// *client.Client.
+func (f *fakeNetworkStatusReporter) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.removeFinalizerCalls++
+	f.lastFinalizerName = name
+	f.lastFinalizer = finalizer
+	return f.removeFinalizerErr
 }
 
 func newNetworkEvent(t *testing.T, evType controller.EventType, n networkv1.Network) controller.Event {
@@ -453,5 +486,102 @@ func TestNetworkReconcileContextCancelledPropagates(t *testing.T) {
 	}
 	if reporter.patchCalls != 0 {
 		t.Errorf("PatchStatus called %d times after ctx cancel, want 0", reporter.patchCalls)
+	}
+}
+
+// deletingNetwork returns a valid network stamped for deletion (carrying a
+// deletionTimestamp), driving the controller into its teardown branch.
+func deletingNetwork(name string) networkv1.Network {
+	n := validNetwork(name)
+	n.ObjectMeta.DeletionTimestamp = "2026-01-02T15:04:05Z"
+	return n
+}
+
+// TestNetworkReconcileTeardownDeletesAndRemovesFinalizer proves the teardown
+// branch: a deletion-stamped network is deleted from the network service (keyed
+// by name) and, once deleted, the node-teardown finalizer is removed so apiserver
+// can finalize the delete. The ensure path (RegisterNetwork/EnsureNetwork) must
+// not run.
+func TestNetworkReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
+	networks := &fakeNetworkEnsurer{}
+	reporter := &fakeNetworkStatusReporter{}
+	c := NewNetworkController(networks, reporter)
+
+	ev := newNetworkEvent(t, controller.EventModified, deletingNetwork("net-del"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	}
+	if networks.deleteCalls != 1 {
+		t.Fatalf("DeleteNetwork called %d times, want 1", networks.deleteCalls)
+	}
+	if networks.lastDeleted != netpool.NetworkName("net-del") {
+		t.Errorf("DeleteNetwork name = %q, want %q", networks.lastDeleted, "net-del")
+	}
+	if len(networks.registered) != 0 {
+		t.Errorf("RegisterNetwork called %d times during teardown, want 0", len(networks.registered))
+	}
+	if networks.ensureCalls != 0 {
+		t.Errorf("EnsureNetwork called %d times during teardown, want 0", networks.ensureCalls)
+	}
+	if reporter.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1", reporter.removeFinalizerCalls)
+	}
+	if reporter.lastFinalizerName != "net-del" {
+		t.Errorf("RemoveFinalizer name = %q, want %q", reporter.lastFinalizerName, "net-del")
+	}
+	if reporter.lastFinalizer != string(metav1.FinalizerNodeTeardown) {
+		t.Errorf("RemoveFinalizer finalizer = %q, want %q", reporter.lastFinalizer, metav1.FinalizerNodeTeardown)
+	}
+}
+
+// TestNetworkReconcileTeardownAlreadyGoneIsIdempotent proves a teardown where the
+// network is already gone (networker.ErrNotFound) still drops the finalizer: an
+// already-deleted network is a tear-down success, not a stall.
+func TestNetworkReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
+	networks := &fakeNetworkEnsurer{deleteErr: networker.ErrNotFound}
+	reporter := &fakeNetworkStatusReporter{}
+	c := NewNetworkController(networks, reporter)
+
+	ev := newNetworkEvent(t, controller.EventModified, deletingNetwork("net-gone"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for already-deleted network", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false when network already gone")
+	}
+	if networks.deleteCalls != 1 {
+		t.Fatalf("DeleteNetwork called %d times, want 1", networks.deleteCalls)
+	}
+	if reporter.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (NotFound is idempotent success)", reporter.removeFinalizerCalls)
+	}
+}
+
+// TestNetworkReconcileTeardownConflictRequeuesKeepingFinalizer proves a real
+// conflict (networker.ErrConflict: the network still has registered NICs) keeps
+// the finalizer and requeues so the referencing NICs tear down first.
+func TestNetworkReconcileTeardownConflictRequeuesKeepingFinalizer(t *testing.T) {
+	networks := &fakeNetworkEnsurer{deleteErr: networker.ErrConflict}
+	reporter := &fakeNetworkStatusReporter{}
+	c := NewNetworkController(networks, reporter)
+
+	ev := newNetworkEvent(t, controller.EventModified, deletingNetwork("net-busy"))
+
+	requeue, err := c.Reconcile(context.Background(), ev)
+	if err == nil || !errors.Is(err, networker.ErrConflict) {
+		t.Fatalf("Reconcile() error = %v, want wrapped networker.ErrConflict", err)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	}
+	if reporter.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", reporter.removeFinalizerCalls)
 	}
 }

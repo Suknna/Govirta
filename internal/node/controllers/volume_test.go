@@ -30,6 +30,10 @@ type fakeRootVolumeCreator struct {
 	gotReq      storage.CreateRootVolumeFromReaderRequest
 	gotReader   []byte
 	createCalls int
+
+	deleteErr    error
+	deleteCalls  int
+	gotDeleteReq storage.DeleteVolumeRequest
 }
 
 func (f *fakeRootVolumeCreator) CreateRootVolumeFromReader(ctx context.Context, req storage.CreateRootVolumeFromReaderRequest) (volume.Volume, error) {
@@ -48,6 +52,18 @@ func (f *fakeRootVolumeCreator) CreateRootVolumeFromReader(ctx context.Context, 
 		return volume.Volume{}, f.createErr
 	}
 	return f.created, nil
+}
+
+// DeleteVolume records the teardown delete request and returns a canned error so
+// a test can assert the controller tore the volume down with the right id/pool.
+// It honours ctx cancellation, faithful to *storage.VolumeService.
+func (f *fakeRootVolumeCreator) DeleteVolume(ctx context.Context, req storage.DeleteVolumeRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.deleteCalls++
+	f.gotDeleteReq = req
+	return f.deleteErr
 }
 
 // trackingReadCloser wraps a reader and records whether Close was called. It lets
@@ -101,6 +117,11 @@ type fakeDependencyReader struct {
 	patchErr   error
 	patchCalls int
 	getCalls   int
+
+	removeFinalizerErr   error
+	removeFinalizerCalls int
+	lastFinalizerName    string
+	lastFinalizer        string
 }
 
 type capturedVolumePatch struct {
@@ -146,6 +167,19 @@ func (f *fakeDependencyReader) PatchStatus(ctx context.Context, kind, name strin
 	}
 	f.patches = append(f.patches, capturedVolumePatch{kind: kind, name: name, status: decoded})
 	return status, nil
+}
+
+// RemoveFinalizer records the teardown finalizer removal so a test can assert
+// the controller dropped the finalizer after a successful teardown. It honours
+// ctx cancellation, faithful to *client.Client.
+func (f *fakeDependencyReader) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.removeFinalizerCalls++
+	f.lastFinalizerName = name
+	f.lastFinalizer = finalizer
+	return f.removeFinalizerErr
 }
 
 // --- builders ---------------------------------------------------------------
@@ -660,5 +694,103 @@ func TestVolumeReconcileContextCancelledPropagates(t *testing.T) {
 	}
 	if dep.getCalls != 0 || dep.patchCalls != 0 {
 		t.Errorf("client called after ctx cancel: get=%d patch=%d, want 0/0", dep.getCalls, dep.patchCalls)
+	}
+}
+
+// deletingVolume returns a valid root volume stamped for deletion (carrying a
+// deletionTimestamp), driving the controller into its teardown branch.
+func deletingVolume(name string) volumev1.Volume {
+	vol := rootVolumeObject(name)
+	vol.ObjectMeta.DeletionTimestamp = "2026-01-02T15:04:05Z"
+	return vol
+}
+
+// TestVolumeReconcileTeardownDeletesAndRemovesFinalizer proves the teardown
+// branch: a deletion-stamped volume is deleted from its block pool (keyed by the
+// object name as volume.ID and the spec PoolRef) and, once deleted, the
+// node-teardown finalizer is removed so apiserver can finalize the delete. The
+// ensure path (GetImage / CreateRootVolumeFromReader) must not run.
+func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
+	creator := &fakeRootVolumeCreator{}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := &fakeDependencyReader{}
+	c := NewVolumeController(creator, getter, dep)
+
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, deletingVolume("vol-del")))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	}
+	if creator.deleteCalls != 1 {
+		t.Fatalf("DeleteVolume called %d times, want 1", creator.deleteCalls)
+	}
+	if creator.gotDeleteReq.VolumeID != volume.ID("vol-del") {
+		t.Errorf("DeleteVolume VolumeID = %q, want %q", creator.gotDeleteReq.VolumeID, volume.ID("vol-del"))
+	}
+	if creator.gotDeleteReq.PoolName != "block-pool" {
+		t.Errorf("DeleteVolume PoolName = %q, want %q", creator.gotDeleteReq.PoolName, "block-pool")
+	}
+	if creator.createCalls != 0 {
+		t.Errorf("CreateRootVolumeFromReader called %d times during teardown, want 0", creator.createCalls)
+	}
+	if getter.getCalls != 0 {
+		t.Errorf("GetImage called %d times during teardown, want 0", getter.getCalls)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1", dep.removeFinalizerCalls)
+	}
+	if dep.lastFinalizerName != "vol-del" {
+		t.Errorf("RemoveFinalizer name = %q, want %q", dep.lastFinalizerName, "vol-del")
+	}
+	if dep.lastFinalizer != string(metav1.FinalizerNodeTeardown) {
+		t.Errorf("RemoveFinalizer finalizer = %q, want %q", dep.lastFinalizer, metav1.FinalizerNodeTeardown)
+	}
+}
+
+// TestVolumeReconcileTeardownAlreadyGoneIsIdempotent proves a teardown where the
+// volume is already gone (volume.ErrVolumeNotFound) still drops the finalizer: an
+// already-deleted volume is a tear-down success, not a stall.
+func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
+	creator := &fakeRootVolumeCreator{deleteErr: volume.ErrVolumeNotFound}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := &fakeDependencyReader{}
+	c := NewVolumeController(creator, getter, dep)
+
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, deletingVolume("vol-gone")))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for already-deleted volume", err)
+	}
+	if requeue {
+		t.Fatalf("Reconcile() requeue = true, want false when volume already gone")
+	}
+	if creator.deleteCalls != 1 {
+		t.Fatalf("DeleteVolume called %d times, want 1", creator.deleteCalls)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (NotFound is idempotent success)", dep.removeFinalizerCalls)
+	}
+}
+
+// TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer proves a real
+// delete error (e.g. volume.ErrVolumeInUse: still attached to a running VM) keeps
+// the finalizer and requeues so the referencing VM tears down first. This is the
+// execution-layer backstop behind the apiserver reference guard.
+func TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing.T) {
+	creator := &fakeRootVolumeCreator{deleteErr: volume.ErrVolumeInUse}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := &fakeDependencyReader{}
+	c := NewVolumeController(creator, getter, dep)
+
+	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, deletingVolume("vol-busy")))
+	if err == nil || !errors.Is(err, volume.ErrVolumeInUse) {
+		t.Fatalf("Reconcile() error = %v, want wrapped volume.ErrVolumeInUse", err)
+	}
+	if !requeue {
+		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	}
+	if dep.removeFinalizerCalls != 0 {
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", dep.removeFinalizerCalls)
 	}
 }

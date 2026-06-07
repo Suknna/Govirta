@@ -45,10 +45,13 @@ func (w *bufferImageWriter) Cancel() error {
 // writer/error. It honours ctx cancellation before returning, faithful to
 // *storage.ImageService.
 type fakeImagePutter struct {
-	writer   *bufferImageWriter
-	putErr   error
-	gotReq   storage.PutImageRequest
-	putCalls int
+	writer       *bufferImageWriter
+	putErr       error
+	gotReq       storage.PutImageRequest
+	putCalls     int
+	deleteErr    error
+	deleteCalls  int
+	gotDeleteReq storage.DeleteImageRequest
 }
 
 func (f *fakeImagePutter) PutImage(ctx context.Context, req storage.PutImageRequest) (image.ImageWriter, error) {
@@ -63,14 +66,30 @@ func (f *fakeImagePutter) PutImage(ctx context.Context, req storage.PutImageRequ
 	return f.writer, nil
 }
 
+// DeleteImage records the teardown delete request and returns a canned error so
+// a test can assert the controller tore the image down with the right
+// pool/id/format. Faithful to *storage.ImageService.
+func (f *fakeImagePutter) DeleteImage(ctx context.Context, req storage.DeleteImageRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.deleteCalls++
+	f.gotDeleteReq = req
+	return f.deleteErr
+}
+
 // fakeImageStatusReporter captures the last ImageStatus patched and honours ctx
 // cancellation, faithful to *client.Client. It is image-specific so it can
 // decode into ImageStatus (the package's StoragePool fake decodes a different
 // status type).
 type fakeImageStatusReporter struct {
-	patches    []capturedImagePatch
-	patchErr   error
-	patchCalls int
+	patches              []capturedImagePatch
+	patchErr             error
+	patchCalls           int
+	removeFinalizerErr   error
+	removeFinalizerCalls int
+	lastFinalizerName    string
+	lastFinalizer        string
 }
 
 type capturedImagePatch struct {
@@ -93,6 +112,19 @@ func (f *fakeImageStatusReporter) PatchStatus(ctx context.Context, kind, name st
 	}
 	f.patches = append(f.patches, capturedImagePatch{kind: kind, name: name, status: decoded})
 	return status, nil
+}
+
+// RemoveFinalizer records the teardown finalizer removal so a test can assert
+// the controller dropped the finalizer after a successful teardown. Faithful to
+// *client.Client.
+func (f *fakeImageStatusReporter) RemoveFinalizer(ctx context.Context, kind, name, finalizer string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.removeFinalizerCalls++
+	f.lastFinalizerName = name
+	f.lastFinalizer = finalizer
+	return f.removeFinalizerErr
 }
 
 func newImageEvent(t *testing.T, evType controller.EventType, img imagev1.Image) controller.Event {
