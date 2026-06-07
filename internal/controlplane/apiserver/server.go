@@ -78,6 +78,12 @@ func (s *Server) Handler() http.Handler {
 	// Delete (finalizer two-phase entry: stamp deletionTimestamp) shares the
 	// same Handler() so a DELETE lands on the one /apis surface as the rest.
 	s.deleteHandler(mux)
+	// Finalizers sub-resource (finalizer two-phase exit: remove a finalizer and,
+	// when the last one drains on a deletion-marked object, perform the real
+	// delete) shares the same Handler(). Its PATCH .../finalizers path coexists
+	// with the status PATCH .../status sub-resource; ServeMux routes on the full
+	// pattern so the two PATCH sub-resources do not collide.
+	s.finalizersHandler(mux)
 	return mux
 }
 
