@@ -81,6 +81,82 @@ func TestClientGetNotFound(t *testing.T) {
 	}
 }
 
+func TestClientDeleteAcceptedReturnsNil(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	if err := c.Delete(context.Background(), "VM", "vm-a"); err != nil {
+		t.Fatalf("Delete error = %v, want nil", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Fatalf("server saw method %q, want DELETE", gotMethod)
+	}
+	if gotPath != "/apis/VM/vm-a" {
+		t.Fatalf("server saw path %q, want /apis/VM/vm-a", gotPath)
+	}
+}
+
+func TestClientDeleteNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	err := c.Delete(context.Background(), "VM", "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestClientDeleteReferencedCarriesBody(t *testing.T) {
+	var gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"still referenced by VM/vm-a"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	err := c.Delete(context.Background(), "StoragePool", "pool-a")
+	if !errors.Is(err, ErrReferenced) {
+		t.Fatalf("Delete error = %v, want ErrReferenced", err)
+	}
+	if got := err.Error(); !contains(got, "still referenced by VM/vm-a") {
+		t.Fatalf("Delete error = %q, want it to carry the referenced-by body text", got)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Fatalf("server saw method %q, want DELETE", gotMethod)
+	}
+}
+
+func TestClientDeleteServerErrorIsGeneric(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	err := c.Delete(context.Background(), "VM", "vm-a")
+	if err == nil {
+		t.Fatal("Delete error = nil, want non-2xx error")
+	}
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrReferenced) {
+		t.Fatalf("Delete error = %v, want a generic error (not a sentinel)", err)
+	}
+	if got := err.Error(); !contains(got, "boom") {
+		t.Fatalf("Delete error = %q, want it to carry the envelope message", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }

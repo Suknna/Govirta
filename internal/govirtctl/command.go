@@ -35,6 +35,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runApply(ctx, args[1:], stdout, stderr)
 	case "get":
 		return runGet(ctx, args[1:], stdout, stderr)
+	case "delete":
+		return runDelete(ctx, args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, versionString())
 		return 0
@@ -47,6 +49,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 const usage = `usage:
   govirtctl apply --server <url> -f <manifest.json>
   govirtctl get --server <url> <kind> <name>
+  govirtctl delete --server <url> <kind> <name>
   govirtctl version`
 
 // runApply reads a manifest file, locates its kind/name, and applies it.
@@ -135,6 +138,37 @@ func runGet(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := json.Unmarshal(body, &withStatus); err == nil && withStatus.Status.Phase != "" {
 		fmt.Fprintf(stdout, "phase: %s\n", withStatus.Status.Phase)
 	}
+	return 0
+}
+
+// runDelete triggers the master's finalizer-two-phase deletion for one object.
+// On acceptance it prints "<kind>/<name> deleting" (async teardown is still in
+// flight, not done). A 409 surfaces the apiserver's "still referenced by ..."
+// protection text so the operator sees what blocks the delete.
+func runDelete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	server := fs.String("server", "", "master apiserver root (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if *server == "" {
+		fmt.Fprintln(stderr, "govirtctl delete: --server is required")
+		return 2
+	}
+	if len(rest) != 2 {
+		fmt.Fprintln(stderr, "govirtctl delete: expected <kind> <name>")
+		return 2
+	}
+	kind, name := rest[0], rest[1]
+
+	c := NewClient(*server, nil)
+	if err := c.Delete(ctx, kind, name); err != nil {
+		fmt.Fprintf(stderr, "govirtctl delete: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s/%s deleting\n", kind, name)
 	return 0
 }
 

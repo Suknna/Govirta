@@ -18,6 +18,11 @@ import (
 // ErrNotFound is returned by Get when the master has no object of that kind/name.
 var ErrNotFound = errors.New("govirtctl: object not found")
 
+// ErrReferenced is returned by Delete when the master refuses (409) because the
+// object is still referenced by another object (finalizer protection). The
+// wrapping error carries the apiserver's "still referenced by <Kind>/<name>" text.
+var ErrReferenced = errors.New("govirtctl: object still referenced")
+
 // resourceVersionHeader mirrors the apiserver's X-Resource-Version response
 // header (internal/controlplane/apiserver/handler_get.go).
 const resourceVersionHeader = "X-Resource-Version"
@@ -99,6 +104,42 @@ func (c *Client) Get(ctx context.Context, kind, name string) (_ []byte, _ string
 		return nil, "", fmt.Errorf("govirtctl: get %s/%s: master returned %d: %s", kind, name, resp.StatusCode, errorMessage(respBody))
 	}
 	return respBody, resp.Header.Get(resourceVersionHeader), nil
+}
+
+// Delete issues DELETE /apis/{kind}/{name} to the master. It maps the apiserver's
+// finalizer-two-phase responses: 202 Accepted → nil (deletion accepted, async teardown);
+// 404 → ErrNotFound (wrapped); 409 → ErrReferenced (wrapped, body carries "still referenced by ...").
+func (c *Client) Delete(ctx context.Context, kind, name string) (err error) {
+	url := fmt.Sprintf("%s/apis/%s/%s", c.baseURL, kind, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("govirtctl: build delete request for %s/%s: %w", kind, name, err)
+	}
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("govirtctl: delete %s/%s: %w", kind, name, err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("govirtctl: close delete response body: %w", cerr)
+		}
+	}()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return fmt.Errorf("govirtctl: read delete response for %s/%s: %w", kind, name, readErr)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("govirtctl: delete %s/%s: %w", kind, name, ErrNotFound)
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("govirtctl: delete %s/%s: %w: %s", kind, name, ErrReferenced, errorMessage(respBody))
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("govirtctl: delete %s/%s: master returned %d: %s", kind, name, resp.StatusCode, errorMessage(respBody))
+	}
+	return nil
 }
 
 // errorMessage extracts the apiserver {"error":"..."} message, falling back to
