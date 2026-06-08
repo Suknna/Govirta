@@ -30,16 +30,17 @@ import (
 var errUnsupportedArch = errors.New("vm controller: unsupported arch")
 
 // VMRunner is the narrow slice of the VM process manager the controller needs:
-// create a daemonized QEMU from a configured builder, start it, read its live
-// phase, and on teardown forcibly kill a running guest then delete its
-// persisted state. Deletion is a destroy intent (ESXi-aligned), so teardown
+// create a daemonized QEMU from a configured builder, start or gracefully stop
+// it, read its live phase, and on teardown forcibly kill a running guest then
+// delete its persisted state. Deletion is a destroy intent (ESXi-aligned), so teardown
 // uses forced termination (QMP quit + SIGKILL fallback), not graceful ACPI
 // powerdown — a minimal guest (e.g. CirrOS) ignores ACPI and would otherwise
-// never converge. Graceful guest shutdown is a separate powerState=Off concern.
+// never converge. Graceful guest shutdown is a separate powerState=Shutdown concern.
 // *vmm.VMMService satisfies it (积木式 + 可测).
 type VMRunner interface {
 	Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error)
 	Start(ctx context.Context, uuid string) (vmm.VM, error)
+	Stop(ctx context.Context, uuid string) error
 	Status(ctx context.Context, uuid string) (vmm.VM, error)
 	Kill(ctx context.Context, uuid string) error
 	Delete(ctx context.Context, uuid string) error

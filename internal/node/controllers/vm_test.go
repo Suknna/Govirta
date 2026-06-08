@@ -29,6 +29,7 @@ type fakeVMRunner struct {
 
 	createErr  error
 	startErr   error
+	stopErr    error
 	startPhase vmm.Phase
 
 	killErr   error
@@ -36,6 +37,7 @@ type fakeVMRunner struct {
 
 	createCalls int
 	startCalls  int
+	stopCalls   int
 	killCalls   int
 	deleteCalls int
 	lastCreate  vmm.CreateRequest
@@ -60,6 +62,13 @@ func (f *fakeVMRunner) Start(ctx context.Context, uuid string) (vmm.VM, error) {
 		return vmm.VM{}, f.startErr
 	}
 	return vmm.VM{UUID: uuid, Phase: f.startPhase}, nil
+}
+
+func (f *fakeVMRunner) Stop(ctx context.Context, uuid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopCalls++
+	return f.stopErr
 }
 
 func (f *fakeVMRunner) Status(ctx context.Context, uuid string) (vmm.VM, error) {
