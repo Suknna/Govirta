@@ -133,6 +133,43 @@ func TestLoop_CancelBeforeDelayedRequeuePreventsRetry(t *testing.T) {
 	}
 }
 
+func TestLoop_WatchErrorCancelsPendingDelayedRequeue(t *testing.T) {
+	src := &failSecondWatchSource{event: Event{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)}}
+	ctrl := &scriptedController{
+		kind:       "VM",
+		reconciled: make(chan Event, 4),
+		results: []ReconcileResult{
+			RequeueAfter(10 * time.Second),
+			Done(),
+		},
+	}
+	mgr := NewManager(src, []Controller{ctrl})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- mgr.Run(context.Background()) }()
+
+	select {
+	case <-ctrl.reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first reconcile")
+	}
+
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, errSecondWatch) {
+			t.Fatalf("Run returned %v, want it to wrap %v", err, errSecondWatch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after watch error canceled delayed requeue")
+	}
+
+	select {
+	case ev := <-ctrl.reconciled:
+		t.Fatalf("delayed requeue reconciled after watch error: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestLoop_ErrorWithEmptyResultDefaultsToImmediateRetry(t *testing.T) {
 	q := New()
 	q.Add(Event{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)})
@@ -204,6 +241,31 @@ func (c *scriptedController) Reconcile(ctx context.Context, ev Event) (Reconcile
 		err = c.errs[call]
 	}
 	return result, err
+}
+
+var errSecondWatch = errors.New("second watch failed")
+
+type failSecondWatchSource struct {
+	event Event
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *failSecondWatchSource) Watch(ctx context.Context, kind string, startRevision string) (<-chan Event, error) {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+
+	if call > 1 {
+		return nil, errSecondWatch
+	}
+
+	ch := make(chan Event, 1)
+	ch <- s.event
+	close(ch)
+	return ch, nil
 }
 
 // resumeSource records the startRevision handed to each Watch call and, on the

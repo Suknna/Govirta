@@ -12,8 +12,10 @@ import (
 // runController drives one Controller: a feeder goroutine streams events from
 // the source into a private Queue, while the reconcile loop (running in this
 // goroutine) drains the Queue and calls Reconcile. The feeder is the only extra
-// goroutine and is joined via WaitGroup, so runController returns with nothing
-// left running. Shutdown is unified: whatever stops the feeder (ctx cancel or a
+// goroutine is joined via WaitGroup, and delayed requeue timers are owned by a
+// child context that is canceled when the reconcile loop exits. Therefore
+// runController returns with no feeder or delayed-requeue goroutines left
+// running. Shutdown is unified: whatever stops the feeder (ctx cancel or a
 // non-recoverable watch error) also closes the Queue, which unblocks the
 // reconcile loop's Get and lets it drain remaining work before exiting.
 //
@@ -21,12 +23,14 @@ import (
 // the EventSource could not be watched.
 func (m *Manager) runController(ctx context.Context, c Controller) error {
 	q := New()
-	var wg sync.WaitGroup
+	var feederWG sync.WaitGroup
+	var delayedWG sync.WaitGroup
+	requeueCtx, cancelRequeues := context.WithCancel(ctx)
 	feederErr := make(chan error, 1)
 
-	wg.Add(1)
+	feederWG.Add(1)
 	go func() {
-		defer wg.Done()
+		defer feederWG.Done()
 		// Whatever ends the feeder — ctx cancellation or a watch error — must
 		// close the Queue so the reconcile loop's blocking Get returns and the
 		// loop exits. Without this, a feeder error would deadlock the loop.
@@ -36,9 +40,11 @@ func (m *Manager) runController(ctx context.Context, c Controller) error {
 
 	// Reconcile loop runs inline in this goroutine; it exits once q is shut
 	// down (and drained).
-	reconcileLoop(ctx, c, q)
+	reconcileLoopWithScheduler(requeueCtx, c, q, &delayedWG)
+	cancelRequeues()
+	delayedWG.Wait()
 
-	wg.Wait()
+	feederWG.Wait()
 	if err := <-feederErr; err != nil {
 		return err
 	}
@@ -113,6 +119,12 @@ func consume(ctx context.Context, ch <-chan Event, q *Queue, startRV string) str
 // failing transiently is observable rather than spinning silently. After shutdown,
 // a requeue's Add is dropped by the closed Queue, so the loop always terminates.
 func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
+	var delayedWG sync.WaitGroup
+	reconcileLoopWithScheduler(ctx, c, q, &delayedWG)
+	delayedWG.Wait()
+}
+
+func reconcileLoopWithScheduler(ctx context.Context, c Controller, q *Queue, delayedWG *sync.WaitGroup) {
 	for {
 		ev, ok := q.Get()
 		if !ok {
@@ -141,7 +153,7 @@ func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
 		}
 		switch {
 		case result.RequeueAfter > 0:
-			scheduleRequeue(ctx, q, ev, result.RequeueAfter)
+			scheduleRequeue(ctx, delayedWG, q, ev, result.RequeueAfter)
 		case result.Requeue:
 			q.Add(ev)
 		}
@@ -149,16 +161,25 @@ func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
 }
 
 // scheduleRequeue re-adds ev after delay unless ctx is cancelled first. The
-// goroutine is owned by the controller run context, and Queue.Add drops the event
-// if the queue has already been shut down.
-func scheduleRequeue(ctx context.Context, q *Queue, ev Event, delay time.Duration) {
-	timer := time.NewTimer(delay)
+// goroutine is owned by the controller run context via delayedWG; runController
+// cancels ctx and waits for delayedWG before it returns, so delayed requeues do
+// not outlive the controller. Queue.Add drops the event if the queue has already
+// been shut down.
+func scheduleRequeue(ctx context.Context, delayedWG *sync.WaitGroup, q *Queue, ev Event, delay time.Duration) {
+	delayedWG.Add(1)
 	go func() {
+		defer delayedWG.Done()
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			q.Add(ev)
 		}
 	}()
