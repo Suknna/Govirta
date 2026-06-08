@@ -185,6 +185,76 @@ func TestManager_NoGoroutineLeak(t *testing.T) {
 	}
 }
 
+func TestManager_WatchErrorCancelsOtherControllers(t *testing.T) {
+	src := &mixedFailureSource{
+		failingKind: "VM",
+		event:       Event{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)},
+	}
+	vm := &scriptedController{
+		kind:       "VM",
+		reconciled: make(chan Event, 4),
+		results: []ReconcileResult{
+			RequeueAfter(10 * time.Second),
+			Done(),
+		},
+	}
+	net := newFakeController("Network")
+	mgr := NewManager(src, []Controller{vm, net})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- mgr.Run(context.Background()) }()
+
+	select {
+	case <-vm.reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failing controller reconcile")
+	}
+
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, errSecondWatch) {
+			t.Fatalf("Run returned %v, want it to wrap %v", err, errSecondWatch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after one controller watch failed")
+	}
+}
+
+type mixedFailureSource struct {
+	failingKind string
+	event       Event
+
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (s *mixedFailureSource) Watch(ctx context.Context, kind string, startRevision string) (<-chan Event, error) {
+	s.mu.Lock()
+	if s.calls == nil {
+		s.calls = make(map[string]int)
+	}
+	s.calls[kind]++
+	call := s.calls[kind]
+	s.mu.Unlock()
+
+	if kind == s.failingKind {
+		if call > 1 {
+			return nil, errSecondWatch
+		}
+		ch := make(chan Event, 1)
+		ch <- s.event
+		close(ch)
+		return ch, nil
+	}
+
+	ch := make(chan Event)
+	go func() {
+		defer close(ch)
+		<-ctx.Done()
+	}()
+	return ch, nil
+}
+
 // settle yields a few times so transient goroutines from prior work can exit.
 func settle() {
 	for i := 0; i < 5; i++ {

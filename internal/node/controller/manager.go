@@ -38,8 +38,13 @@ func NewManager(source EventSource, controllers []Controller) *Manager {
 // every loop (and its feeder) has fully stopped — no fire-and-forget goroutines
 // outlive Run. The normal stop path returns ctx.Err(); if a controller's feeder
 // fails to watch (a non-recoverable source error), that error is surfaced
-// instead, wrapped by runController.
+// instead, wrapped by runController. The first loop failure cancels the shared
+// run context so the remaining loops, their feeds, and pending delayed requeues
+// all stop before Run returns.
 func (m *Manager) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	errs := make(chan error, len(m.controllers))
 
@@ -47,8 +52,9 @@ func (m *Manager) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func(c Controller) {
 			defer wg.Done()
-			if err := m.runController(ctx, c); err != nil {
+			if err := m.runController(runCtx, c); err != nil {
 				errs <- err
+				cancel()
 			}
 		}(c)
 	}
