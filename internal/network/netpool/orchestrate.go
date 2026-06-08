@@ -204,7 +204,18 @@ func (s *Service) DeleteNIC(ctx context.Context, networkName NetworkName, vmID V
 	if err := s.link.Delete(ctx, nic.TapName); err != nil {
 		errs = append(errs, fmt.Errorf("delete tap: %w", err))
 	}
-	return errors.Join(errs...)
+	if joined := errors.Join(errs...); joined != nil {
+		return joined
+	}
+	// All live NIC resources torn down: drop the in-memory registry entry so the
+	// network's NIC count reflects reality. Without this the entry lingers and
+	// DeleteNetwork's nicCount guard would refuse the network forever (上下一致:
+	// the registry must match the now-absent live resources). Failure paths above
+	// keep the entry so a Delete retry re-attempts teardown.
+	s.mu.Lock()
+	delete(record.nics, vmID)
+	s.mu.Unlock()
+	return nil
 }
 
 // DeleteNetwork tears down a network's shared host resources in reverse order.
@@ -264,7 +275,18 @@ func (s *Service) DeleteNetwork(ctx context.Context, name NetworkName) error {
 	if err := s.link.Delete(ctx, def.BridgeName); err != nil {
 		errs = append(errs, fmt.Errorf("delete bridge: %w", err))
 	}
-	return errors.Join(errs...)
+	if joined := errors.Join(errs...); joined != nil {
+		return joined
+	}
+	// All shared host resources torn down: drop the in-memory registry entry so a
+	// re-registration of the same network name is accepted and the network is no
+	// longer reported as present (上下一致: the registry must match the now-absent
+	// live resources). Failure paths above keep the entry so a Delete retry
+	// re-attempts teardown.
+	s.mu.Lock()
+	delete(s.networks, name)
+	s.mu.Unlock()
+	return nil
 }
 
 // GetNetworkStatus aggregates observed network state live from the primitives.

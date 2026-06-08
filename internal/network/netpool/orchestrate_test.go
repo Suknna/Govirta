@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/suknna/govirta/internal/network/networker"
 	"github.com/suknna/govirta/pkg/hostnet/firewall"
 )
 
@@ -358,5 +359,90 @@ func TestDeleteNICPropagatesResolveErrorWithoutShortCircuit(t *testing.T) {
 	// never resolved.
 	if len(ff.deletedRefs) != 0 {
 		t.Fatalf("firewall deletes recorded = %v, want none when resolve failed", ff.deletedRefs)
+	}
+}
+
+// TestDeleteNICClearsRegistryAllowingNetworkDelete is the regression for the
+// defect where DeleteNIC tore down the live TAP/binding/anti-spoofing but never
+// removed the in-memory record.nics entry. The lingering entry kept
+// DeleteNetwork's nicCount>0 guard true forever, so a network whose only NIC had
+// been deleted could never itself be deleted (ErrConflict), orphaning the
+// bridge/masquerade/forward rules. After the fix a successful DeleteNIC clears
+// the entry so the network's NIC count reflects reality and DeleteNetwork
+// succeeds.
+func TestDeleteNICClearsRegistryAllowingNetworkDelete(t *testing.T) {
+	svc, _, _, _, _, _ := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+	if _, err := svc.EnsureNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("EnsureNIC error = %v, want nil", err)
+	}
+
+	if err := svc.DeleteNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("DeleteNIC error = %v, want nil", err)
+	}
+
+	// The NIC's live resources are gone AND its registry entry must be cleared,
+	// so the network now has zero NICs and DeleteNetwork must succeed rather than
+	// return ErrConflict.
+	if err := svc.DeleteNetwork(context.Background(), "net0"); err != nil {
+		t.Fatalf("DeleteNetwork after sole NIC deleted error = %v, want nil (registry entry not cleared?)", err)
+	}
+}
+
+// TestDeleteNICAllowsReRegisteringSameNIC proves the registry entry is truly
+// removed (not merely ignored): after DeleteNIC the same VMID can be registered
+// again, which RegisterNIC rejects with ErrAlreadyExists if the stale entry
+// survived.
+func TestDeleteNICAllowsReRegisteringSameNIC(t *testing.T) {
+	svc, _, _, _, _, _ := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+	if _, err := svc.EnsureNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("EnsureNIC error = %v, want nil", err)
+	}
+	if err := svc.DeleteNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("DeleteNIC error = %v, want nil", err)
+	}
+
+	// Stale entry would make this fail with ErrAlreadyExists.
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC after delete error = %v, want nil (registry entry not cleared?)", err)
+	}
+}
+
+// TestDeleteNICKeepsRegistryOnTeardownFailure proves the registry entry is
+// retained when teardown fails, so a Delete retry re-attempts teardown rather
+// than losing track of a NIC whose live resources may still exist.
+func TestDeleteNICKeepsRegistryOnTeardownFailure(t *testing.T) {
+	svc, fl, _, _, _, _ := newTestService()
+	if err := svc.RegisterNetwork(sampleNetwork()); err != nil {
+		t.Fatalf("RegisterNetwork error = %v, want nil", err)
+	}
+	if err := svc.RegisterNIC(sampleNIC()); err != nil {
+		t.Fatalf("RegisterNIC error = %v, want nil", err)
+	}
+	if _, err := svc.EnsureNIC(context.Background(), "net0", "vm1"); err != nil {
+		t.Fatalf("EnsureNIC error = %v, want nil", err)
+	}
+	// Force the TAP delete to fail so DeleteNIC returns a non-nil joined error.
+	fl.errs["Delete"] = errors.New("tap delete boom")
+
+	if err := svc.DeleteNIC(context.Background(), "net0", "vm1"); err == nil {
+		t.Fatalf("DeleteNIC error = nil, want non-nil on TAP delete failure")
+	}
+
+	// Entry must survive so a retry re-attempts teardown: DeleteNetwork must
+	// still see the NIC and refuse with ErrConflict.
+	if err := svc.DeleteNetwork(context.Background(), "net0"); !errors.Is(err, networker.ErrConflict) {
+		t.Fatalf("DeleteNetwork error = %v, want ErrConflict (entry should survive failed teardown)", err)
 	}
 }
