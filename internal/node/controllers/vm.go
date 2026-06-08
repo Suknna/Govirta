@@ -94,9 +94,9 @@ func (c *VMController) Kind() string {
 //   - dependency read transport error  → requeue=true, no failure patch (transient)
 //   - unsupported arch / bad spec       → permanent failure, no requeue
 //   - vmm.Create / Start / Status error → failure patch + requeue (transient)
-func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("vm controller: context done before reconcile: %w", err)
+		return controller.Done(), fmt.Errorf("vm controller: context done before reconcile: %w", err)
 	}
 
 	logger := zerolog.Ctx(ctx)
@@ -106,12 +106,12 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 			Str("kind", c.Kind()).
 			Str("key", ev.Key).
 			Msg("vm deleted; delete is a no-op in this slice")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	var obj vmv1.VM
 	if err := json.Unmarshal(ev.Object, &obj); err != nil {
-		return false, fmt.Errorf("vm controller: decode object %q: %w", ev.Key, err)
+		return controller.Done(), fmt.Errorf("vm controller: decode object %q: %w", ev.Key, err)
 	}
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this guest
@@ -125,15 +125,15 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 	if isDeleting(obj.ObjectMeta) {
 		done, err := c.teardown(ctx, obj)
 		if err != nil {
-			return true, fmt.Errorf("vm controller: teardown %q: %w", obj.Name, err)
+			return controller.Requeue(), fmt.Errorf("vm controller: teardown %q: %w", obj.Name, err)
 		}
 		if !done {
-			return true, nil
+			return controller.Requeue(), nil
 		}
 		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), obj.Name); err != nil {
-			return true, fmt.Errorf("vm controller: remove finalizer %q: %w", obj.Name, err)
+			return controller.Requeue(), fmt.Errorf("vm controller: remove finalizer %q: %w", obj.Name, err)
 		}
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	// Idempotency / liveness loop: if the guest already exists, never re-create.
@@ -148,7 +148,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 				Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
 		}
 		if err := c.patchStatus(ctx, obj.Name, obj.Status, vmv1.VMStatus{Phase: phase}); err != nil {
-			return true, err
+			return controller.Requeue(), err
 		}
 		// Transient phases (Starting/Stopping) settle on their own; requeue so
 		// the master tracks the guest to a terminal phase instead of freezing at
@@ -160,34 +160,37 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 			Str("phase", string(existing.Phase)).
 			Bool("requeue", requeue).
 			Msg("vm already exists; re-reported live phase")
-		return requeue, nil
+		if requeue {
+			return controller.Requeue(), nil
+		}
+		return controller.Done(), nil
 	} else if !errors.Is(err, vmm.ErrNotFound) {
 		// A real status error (not "not yet created") is transient.
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("vm controller: status %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("vm controller: status %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("vm controller: status %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("vm controller: status %q: %w", obj.Name, err)
 	}
 
 	// Gate on dependencies and collect the disk paths + tap names they expose.
 	diskPaths, tapNames, ready, err := c.gatherDependencies(ctx, obj)
 	if err != nil {
 		// Dependency read transport error: transient, wait and retry.
-		return true, fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
 	}
 	if !ready {
 		logger.Info().Str("key", ev.Key).Msg("vm dependencies not ready; requeuing")
-		return true, nil
+		return controller.Requeue(), nil
 	}
 
 	builder, err := c.buildVM(obj, diskPaths, tapNames)
 	if err != nil {
 		// Bad spec (e.g. unsupported arch) is permanent: requeue cannot fix it.
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return false, fmt.Errorf("vm controller: build %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Done(), fmt.Errorf("vm controller: build %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("vm spec rejected permanently (config error); not requeuing")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	create := vmm.CreateRequest{
@@ -203,17 +206,17 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 	}
 	if _, err := c.vmm.Create(ctx, create); err != nil && !errors.Is(err, vmm.ErrAlreadyExists) {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("vm controller: create %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("vm controller: create %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("vm controller: create %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("vm controller: create %q: %w", obj.Name, err)
 	}
 
 	started, err := c.vmm.Start(ctx, obj.UID)
 	if err != nil {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("vm controller: start %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("vm controller: start %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
 	}
 
 	startedPhase, known := mapVMPhase(started.Phase)
@@ -225,7 +228,7 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 			Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
 	}
 	if err := c.patchStatus(ctx, obj.Name, obj.Status, vmv1.VMStatus{Phase: startedPhase}); err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 
 	// A freshly started guest is typically Starting/Running; if it is still in a
@@ -238,7 +241,10 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (bool
 		Str("phase", string(started.Phase)).
 		Bool("requeue", requeue).
 		Msg("vm reconciled")
-	return requeue, nil
+	if requeue {
+		return controller.Requeue(), nil
+	}
+	return controller.Done(), nil
 }
 
 // gatherDependencies reads every referenced Volume and NIC object's live status.

@@ -46,8 +46,8 @@ type fakeController struct{ kind string }
 
 func (c *fakeController) Kind() string { return c.kind }
 
-func (c *fakeController) Reconcile(context.Context, controller.Event) (bool, error) {
-	return false, nil
+func (c *fakeController) Reconcile(context.Context, controller.Event) (controller.ReconcileResult, error) {
+	return controller.Done(), nil
 }
 
 // TestAgentRunStartsManagerAndStopsOnCancel proves the assembled agent runs its

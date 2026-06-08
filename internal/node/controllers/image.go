@@ -91,9 +91,9 @@ func (c *ImageController) Kind() string {
 // unsafe path, or unmappable format — is reported failed and NOT requeued: a
 // retry cannot fix it. A transport failure (open/get/copy/commit/PutImage) is
 // reported failed and requeued.
-func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("image controller: context done before reconcile: %w", err)
+		return controller.Done(), fmt.Errorf("image controller: context done before reconcile: %w", err)
 	}
 
 	logger := zerolog.Ctx(ctx)
@@ -103,12 +103,12 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 			Str("kind", c.Kind()).
 			Str("key", ev.Key).
 			Msg("image deleted; delete is a no-op in this slice")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	var img imagev1.Image
 	if err := json.Unmarshal(ev.Object, &img); err != nil {
-		return false, fmt.Errorf("image controller: decode object %q: %w", ev.Key, err)
+		return controller.Done(), fmt.Errorf("image controller: decode object %q: %w", ev.Key, err)
 	}
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this image
@@ -117,12 +117,12 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 	// requeues.
 	if isDeleting(img.ObjectMeta) {
 		if err := c.teardown(ctx, img); err != nil {
-			return true, fmt.Errorf("image controller: teardown %q: %w", img.Name, err)
+			return controller.Requeue(), fmt.Errorf("image controller: teardown %q: %w", img.Name, err)
 		}
 		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), img.Name); err != nil {
-			return true, fmt.Errorf("image controller: remove finalizer %q: %w", img.Name, err)
+			return controller.Requeue(), fmt.Errorf("image controller: remove finalizer %q: %w", img.Name, err)
 		}
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	// Level-triggered idempotence: a ready image is already at its desired state.
@@ -132,7 +132,7 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 	// spin forever (the exact e2e blind-spot loop). The early return is the only
 	// thing that breaks it, because the failure happens in fetch, not in patch.
 	if img.Status.Phase == imagev1.ImagePhaseReady {
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	copied, err := c.fetch(ctx, img)
@@ -140,13 +140,16 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 		permanent := isPermanent(err)
 		if perr := c.reportFailure(ctx, img.Name, img.Status, err); perr != nil {
 			// 状态上报也失败：永久错误不重排，瞬时错误重排。
-			return !permanent, fmt.Errorf("image controller: fetch %q failed and status report failed: %w", img.Name, errors.Join(err, perr))
+			if permanent {
+				return controller.Done(), fmt.Errorf("image controller: fetch %q failed and status report failed: %w", img.Name, errors.Join(err, perr))
+			}
+			return controller.Requeue(), fmt.Errorf("image controller: fetch %q failed and status report failed: %w", img.Name, errors.Join(err, perr))
 		}
 		if permanent {
 			logger.Error().Err(err).Str("key", ev.Key).Msg("image fetch failed permanently (config error); not requeuing")
-			return false, nil
+			return controller.Done(), nil
 		}
-		return true, fmt.Errorf("image controller: fetch %q: %w", img.Name, err)
+		return controller.Requeue(), fmt.Errorf("image controller: fetch %q: %w", img.Name, err)
 	}
 
 	status := imagev1.ImageStatus{
@@ -154,14 +157,14 @@ func (c *ImageController) Reconcile(ctx context.Context, ev controller.Event) (b
 		LocalSizeBytes: copied,
 	}
 	if err := c.patchStatus(ctx, img.Name, img.Status, status); err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 
 	logger.Info().
 		Str("key", ev.Key).
 		Int64("localSizeBytes", copied).
 		Msg("image ready")
-	return false, nil
+	return controller.Done(), nil
 }
 
 // teardown deletes the committed image from its file pool. The format must be

@@ -232,12 +232,12 @@ func TestVolumeReconcileReadyVolumeIsNoOp(t *testing.T) {
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false on a ready no-op")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false on a ready no-op")
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times on ready volume, want 0", creator.createCalls)
@@ -307,12 +307,12 @@ func TestVolumeReconcileAllReadyCreatesRootVolume(t *testing.T) {
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false on success")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false on success")
 	}
 
 	// GetImage 用被引用的 file pool + image ref 取流。
@@ -391,12 +391,12 @@ func TestVolumeReconcileRawImageFormatPropagates(t *testing.T) {
 	dep := readyDeps(t, vol, imagev1.ImageFormatRaw)
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if creator.gotReq.Format != diskformat.FormatRaw {
 		t.Errorf("create Format = %q, want %q", creator.gotReq.Format, diskformat.FormatRaw)
@@ -415,12 +415,12 @@ func TestVolumeReconcileImageNotReadyRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for not-ready dependency", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true when image not ready")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true when image not ready")
 	}
 	if getter.getCalls != 0 {
 		t.Errorf("GetImage called %d times, want 0 when image not ready", getter.getCalls)
@@ -434,7 +434,7 @@ func TestVolumeReconcileImageNotReadyRequeues(t *testing.T) {
 }
 
 func TestVolumeReconcileImageNotFoundRequeues(t *testing.T) {
-	// 被引用 Image 还不存在（ErrNotFound）→ 等待（requeue, 不报 failed）。
+	// 被引用 Image 还不存在（ErrNotFound）→ 等待（result.Requeue, 不报 failed）。
 	vol := rootVolumeObject("vol-img-missing")
 	creator := &fakeRootVolumeCreator{}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
@@ -444,12 +444,12 @@ func TestVolumeReconcileImageNotFoundRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for ErrNotFound dependency", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true when image not found")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true when image not found")
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
@@ -469,12 +469,12 @@ func TestVolumeReconcileBlockPoolNotReadyRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for not-ready pool", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true when block pool not ready")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true when block pool not ready")
 	}
 	if getter.getCalls != 0 {
 		t.Errorf("GetImage called %d times, want 0 when block pool not ready", getter.getCalls)
@@ -497,12 +497,12 @@ func TestVolumeReconcileImageFilePoolNotReadyRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for not-ready file pool", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true when image file pool not ready")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true when image file pool not ready")
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
@@ -522,15 +522,15 @@ func TestVolumeReconcileCreateFailureRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil {
 		t.Fatalf("Reconcile() error = nil, want non-nil on create failure")
 	}
 	if !errors.Is(err, createErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, createErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient create failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient create failure")
 	}
 	if !reader.closed {
 		t.Errorf("image reader Close not called on create failure path")
@@ -559,12 +559,12 @@ func TestVolumeReconcileGetImageFailureRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil || !errors.Is(err, getErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, getErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient GetImage failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient GetImage failure")
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0 when GetImage failed", creator.createCalls)
@@ -585,12 +585,12 @@ func TestVolumeReconcileUnsupportedFormatIsPermanentFailure(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for unsupported image format")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for unsupported image format")
 	}
 	if getter.getCalls != 0 {
 		t.Errorf("GetImage called %d times, want 0; format maps before any byte work", getter.getCalls)
@@ -604,7 +604,7 @@ func TestVolumeReconcileUnsupportedFormatIsPermanentFailure(t *testing.T) {
 }
 
 func TestVolumeReconcileDependencyReadErrorRequeuesWithoutPatch(t *testing.T) {
-	// 依赖读取瞬时失败（非 ErrNotFound）→ requeue 且不 patch failed（无法评估就绪）。
+	// 依赖读取瞬时失败（非 ErrNotFound）→ result.Requeue 且不 patch failed（无法评估就绪）。
 	vol := rootVolumeObject("vol-dep-err")
 	readErr := errors.New("master unreachable")
 	creator := &fakeRootVolumeCreator{}
@@ -614,12 +614,12 @@ func TestVolumeReconcileDependencyReadErrorRequeuesWithoutPatch(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil || !errors.Is(err, readErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, readErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient dependency read failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient dependency read failure")
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
@@ -630,7 +630,7 @@ func TestVolumeReconcileDependencyReadErrorRequeuesWithoutPatch(t *testing.T) {
 }
 
 func TestVolumeReconcileMissingHostPathRequeues(t *testing.T) {
-	// create 成功但返回的 volume 无 host path：内部不一致 → 报 failed + requeue。
+	// create 成功但返回的 volume 无 host path：内部不一致 → 报 failed + result.Requeue。
 	vol := rootVolumeObject("vol-no-path")
 	creator := &fakeRootVolumeCreator{created: volume.Volume{Context: map[string]string{}}}
 	reader := &trackingReadCloser{r: strings.NewReader("bytes")}
@@ -639,12 +639,12 @@ func TestVolumeReconcileMissingHostPathRequeues(t *testing.T) {
 
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil {
 		t.Fatalf("Reconcile() error = nil, want non-nil when created volume has no host path")
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on missing host path")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on missing host path")
 	}
 	if len(dep.patches) != 1 || dep.patches[0].status.Phase != volumev1.VolumePhaseFailed {
 		t.Fatalf("expected one failed patch, got %+v", dep.patches)
@@ -658,12 +658,12 @@ func TestVolumeReconcileDeletedIsNoOp(t *testing.T) {
 	dep := &fakeDependencyReader{}
 	c := NewVolumeController(creator, getter, dep)
 
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventDeleted, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventDeleted, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if getter.getCalls != 0 || creator.createCalls != 0 {
 		t.Errorf("downstream called on DELETED: get=%d create=%d, want 0/0", getter.getCalls, creator.createCalls)
@@ -683,12 +683,12 @@ func TestVolumeReconcileContextCancelledPropagates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	requeue, err := c.Reconcile(ctx, newVolumeEvent(t, controller.EventAdded, vol))
+	result, err := c.Reconcile(ctx, newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Reconcile() error = %v, want wrapped context.Canceled", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when context cancelled before work")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when context cancelled before work")
 	}
 	if getter.getCalls != 0 || creator.createCalls != 0 {
 		t.Errorf("downstream called after ctx cancel: get=%d create=%d, want 0/0", getter.getCalls, creator.createCalls)
@@ -730,12 +730,12 @@ func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	c := NewVolumeController(creator, getter, dep)
 
 	vol := deletingVolume("vol-del")
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false after teardown + finalizer removal")
 	}
 	if creator.deleteCalls != 1 {
 		t.Fatalf("DeleteVolume called %d times, want 1", creator.deleteCalls)
@@ -776,12 +776,12 @@ func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 	c := NewVolumeController(creator, getter, dep)
 
 	vol := deletingVolume("vol-gone")
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-deleted volume", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when volume already gone")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when volume already gone")
 	}
 	if creator.deleteCalls != 1 {
 		t.Fatalf("DeleteVolume called %d times, want 1", creator.deleteCalls)
@@ -808,12 +808,12 @@ func TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing
 	c := NewVolumeController(creator, getter, dep)
 
 	vol := deletingVolume("vol-busy")
-	requeue, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err == nil || !errors.Is(err, volume.ErrVolumeInUse) {
 		t.Fatalf("Reconcile() error = %v, want wrapped volume.ErrVolumeInUse", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on a real teardown conflict")
 	}
 	// The conflict must come from deleting the right (derived) key: assert it so a
 	// regression to keying by the object name can't masquerade as this conflict.

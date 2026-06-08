@@ -83,9 +83,9 @@ func (c *StoragePoolController) Kind() string {
 // usage, and patches a ready status. A spec that cannot be mapped is a permanent
 // failure: it is reported failed and not requeued. A registration or usage read
 // failure is treated as transient: it is reported failed and requeued.
-func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("storagepool controller: context done before reconcile: %w", err)
+		return controller.Done(), fmt.Errorf("storagepool controller: context done before reconcile: %w", err)
 	}
 
 	logger := zerolog.Ctx(ctx)
@@ -95,12 +95,12 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 			Str("kind", c.Kind()).
 			Str("key", ev.Key).
 			Msg("storagepool deleted; delete is a no-op in this slice")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	var sp storagepoolv1.StoragePool
 	if err := json.Unmarshal(ev.Object, &sp); err != nil {
-		return false, fmt.Errorf("storagepool controller: decode object %q: %w", ev.Key, err)
+		return controller.Done(), fmt.Errorf("storagepool controller: decode object %q: %w", ev.Key, err)
 	}
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this pool
@@ -108,37 +108,37 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 	// teardown failure keeps the finalizer (object stays "deleting") and requeues.
 	if isDeleting(sp.ObjectMeta) {
 		if err := c.teardown(sp); err != nil {
-			return true, fmt.Errorf("storagepool controller: teardown %q: %w", sp.Name, err)
+			return controller.Requeue(), fmt.Errorf("storagepool controller: teardown %q: %w", sp.Name, err)
 		}
 		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), sp.Name); err != nil {
-			return true, fmt.Errorf("storagepool controller: remove finalizer %q: %w", sp.Name, err)
+			return controller.Requeue(), fmt.Errorf("storagepool controller: remove finalizer %q: %w", sp.Name, err)
 		}
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	p, err := buildPool(sp)
 	if err != nil {
 		// A spec that does not map is a permanent failure: requeue cannot fix it.
 		if perr := c.reportFailure(ctx, sp.Name, sp.Status, err); perr != nil {
-			return false, fmt.Errorf("storagepool controller: map spec %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
+			return controller.Done(), fmt.Errorf("storagepool controller: map spec %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("storagepool spec mapping failed")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	if err := c.pools.RegisterPool(p); err != nil && !errors.Is(err, pool.ErrPoolAlreadyExists) {
 		if perr := c.reportFailure(ctx, sp.Name, sp.Status, err); perr != nil {
-			return true, fmt.Errorf("storagepool controller: register pool %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("storagepool controller: register pool %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("storagepool controller: register pool %q: %w", sp.Name, err)
+		return controller.Requeue(), fmt.Errorf("storagepool controller: register pool %q: %w", sp.Name, err)
 	}
 
 	usage, err := c.pools.GetPoolUsage(ctx, sp.Name)
 	if err != nil {
 		if perr := c.reportFailure(ctx, sp.Name, sp.Status, err); perr != nil {
-			return true, fmt.Errorf("storagepool controller: read usage for %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("storagepool controller: read usage for %q failed and status report failed: %w", sp.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("storagepool controller: read usage for %q: %w", sp.Name, err)
+		return controller.Requeue(), fmt.Errorf("storagepool controller: read usage for %q: %w", sp.Name, err)
 	}
 
 	status := storagepoolv1.StoragePoolStatus{
@@ -146,14 +146,14 @@ func (c *StoragePoolController) Reconcile(ctx context.Context, ev controller.Eve
 		AllocatedBytes: usage.AllocatedBytes,
 	}
 	if err := c.patchStatus(ctx, sp.Name, sp.Status, status); err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 
 	logger.Info().
 		Str("key", ev.Key).
 		Int64("allocatedBytes", usage.AllocatedBytes).
 		Msg("storagepool ready")
-	return false, nil
+	return controller.Done(), nil
 }
 
 // teardown unregisters the pool from the local pool service. Unregistering an

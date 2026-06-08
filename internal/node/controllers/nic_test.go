@@ -193,12 +193,12 @@ func TestNICReconcileAddedReady(t *testing.T) {
 	nic := validNIC("nic-a")
 	ev := newNICEvent(t, controller.EventAdded, nic)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 
 	// RegisterNIC + EnsureNIC + GetNICStatus each called once.
@@ -314,12 +314,12 @@ func TestNICReconcileNetworkNotReadyRequeues(t *testing.T) {
 
 			ev := newNICEvent(t, controller.EventAdded, validNIC("nic-wait"))
 
-			requeue, err := c.Reconcile(context.Background(), ev)
+			result, err := c.Reconcile(context.Background(), ev)
 			if err != nil {
 				t.Fatalf("Reconcile() error = %v, want nil when network not ready (wait)", err)
 			}
-			if !requeue {
-				t.Fatalf("Reconcile() requeue = false, want true when network not ready")
+			if !result.Requeue {
+				t.Fatalf("Reconcile() result.Requeue = false, want true when network not ready")
 			}
 
 			// Gating must short-circuit before any NIC work and any status patch.
@@ -347,12 +347,12 @@ func TestNICReconcileNetworkReadFailureRequeuesNoPatch(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventAdded, validNIC("nic-readfail"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, readErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, readErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient network read failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient network read failure")
 	}
 	if len(nics.registered) != 0 {
 		t.Errorf("RegisterNIC called %d times, want 0 when gate read fails", len(nics.registered))
@@ -370,15 +370,15 @@ func TestNICReconcileEnsureFailureRequeues(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventAdded, validNIC("nic-ensurefail"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil {
 		t.Fatalf("Reconcile() error = nil, want non-nil on ensure failure")
 	}
 	if !errors.Is(err, ensureErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, ensureErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on ensure failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on ensure failure")
 	}
 
 	// Registered before ensure; status never read after ensure failed.
@@ -408,12 +408,12 @@ func TestNICReconcileGetStatusFailureRequeues(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventAdded, validNIC("nic-statusfail"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, statusErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, statusErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on status-read failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on status-read failure")
 	}
 	if nics.ensureCalls != 1 {
 		t.Fatalf("EnsureNIC called %d times, want 1", nics.ensureCalls)
@@ -434,12 +434,12 @@ func TestNICReconcileRegisterFailureRequeues(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventAdded, validNIC("nic-regfail"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, registerErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, registerErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on register failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on register failure")
 	}
 	// Register failed (non-idempotent), so ensure is never reached.
 	if nics.ensureCalls != 0 {
@@ -457,12 +457,12 @@ func TestNICReconcileAlreadyRegisteredIsIdempotent(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventModified, validNIC("nic-idem"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-registered NIC", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	// An already-registered NIC must still be ensured and reported ready.
 	if nics.ensureCalls != 1 {
@@ -485,12 +485,12 @@ func TestNICReconcileEmptyMACIsPermanentFailure(t *testing.T) {
 	nic.Spec.MAC = "" // apiserver allocation absent: permanent config error.
 	ev := newNICEvent(t, controller.EventAdded, nic)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for empty MAC (永久配置错误)")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for empty MAC (永久配置错误)")
 	}
 	// The controller never generates a MAC: an empty MAC must not reach register.
 	if len(nics.registered) != 0 {
@@ -516,12 +516,12 @@ func TestNICReconcileMalformedMACIsPermanentFailure(t *testing.T) {
 	nic.Spec.MAC = "not-a-mac"
 	ev := newNICEvent(t, controller.EventAdded, nic)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for malformed MAC")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for malformed MAC")
 	}
 	if len(nics.registered) != 0 {
 		t.Fatalf("RegisterNIC called %d times, want 0 on malformed MAC", len(nics.registered))
@@ -540,12 +540,12 @@ func TestNICReconcileMalformedIPIsPermanentFailure(t *testing.T) {
 	nic.Spec.IP = "not-an-ip"
 	ev := newNICEvent(t, controller.EventAdded, nic)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for malformed IP")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for malformed IP")
 	}
 	if len(nics.registered) != 0 {
 		t.Fatalf("RegisterNIC called %d times, want 0 on malformed IP", len(nics.registered))
@@ -562,12 +562,12 @@ func TestNICReconcileDeletedIsNoOp(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventDeleted, validNIC("nic-del"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if len(nics.registered) != 0 {
 		t.Errorf("RegisterNIC called %d times on DELETED, want 0", len(nics.registered))
@@ -593,12 +593,12 @@ func TestNICReconcileContextCancelledPropagates(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventAdded, validNIC("nic-ctx"))
 
-	requeue, err := c.Reconcile(ctx, ev)
+	result, err := c.Reconcile(ctx, ev)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Reconcile() error = %v, want wrapped context.Canceled", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when context cancelled before work")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when context cancelled before work")
 	}
 	if len(nics.registered) != 0 {
 		t.Errorf("RegisterNIC called %d times after ctx cancel, want 0", len(nics.registered))
@@ -632,12 +632,12 @@ func TestNICReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	nic := deletingNIC("nic-del")
 	ev := newNICEvent(t, controller.EventModified, nic)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false after teardown + finalizer removal")
 	}
 	if nics.deleteCalls != 1 {
 		t.Fatalf("DeleteNIC called %d times, want 1", nics.deleteCalls)
@@ -679,12 +679,12 @@ func TestNICReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 
 	ev := newNICEvent(t, controller.EventModified, deletingNIC("nic-gone"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-deleted NIC", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when NIC already gone")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when NIC already gone")
 	}
 	if nics.deleteCalls != 1 {
 		t.Fatalf("DeleteNIC called %d times, want 1", nics.deleteCalls)
@@ -705,12 +705,12 @@ func TestNICReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing.T)
 
 	ev := newNICEvent(t, controller.EventModified, deletingNIC("nic-busy"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, deleteErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, deleteErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on a teardown failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on a teardown failure")
 	}
 	if reader.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown fails (finalizer kept)", reader.removeFinalizerCalls)

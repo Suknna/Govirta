@@ -92,9 +92,9 @@ func (c *VolumeController) Kind() string {
 //     failure: patch failed and do NOT requeue;
 //   - GetImage / CreateRootVolumeFromReader fails → transient: patch failed and
 //     requeue with a wrapped error.
-func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("volume controller: context done before reconcile: %w", err)
+		return controller.Done(), fmt.Errorf("volume controller: context done before reconcile: %w", err)
 	}
 
 	logger := zerolog.Ctx(ctx)
@@ -104,12 +104,12 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 			Str("kind", c.Kind()).
 			Str("key", ev.Key).
 			Msg("volume deleted; delete is a no-op in this slice")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	var vol volumev1.Volume
 	if err := json.Unmarshal(ev.Object, &vol); err != nil {
-		return false, fmt.Errorf("volume controller: decode object %q: %w", ev.Key, err)
+		return controller.Done(), fmt.Errorf("volume controller: decode object %q: %w", ev.Key, err)
 	}
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this
@@ -118,12 +118,12 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	// and requeues.
 	if isDeleting(vol.ObjectMeta) {
 		if err := c.teardown(ctx, vol); err != nil {
-			return true, fmt.Errorf("volume controller: teardown %q: %w", vol.Name, err)
+			return controller.Requeue(), fmt.Errorf("volume controller: teardown %q: %w", vol.Name, err)
 		}
 		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), vol.Name); err != nil {
-			return true, fmt.Errorf("volume controller: remove finalizer %q: %w", vol.Name, err)
+			return controller.Requeue(), fmt.Errorf("volume controller: remove finalizer %q: %w", vol.Name, err)
 		}
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	// Level-triggered idempotence: a ready volume is already at its desired
@@ -134,20 +134,20 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	// loop the image controller had). The early return breaks it because the
 	// failure happens in create, not in patch.
 	if vol.Status.Phase == volumev1.VolumePhaseReady {
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	img, ready, err := c.gate(ctx, vol)
 	if err != nil {
 		// A dependency read failed transiently: requeue without patching failed
 		// (the volume itself has not failed; readiness could not be assessed).
-		return true, err
+		return controller.Requeue(), err
 	}
 	if !ready {
 		logger.Info().
 			Str("key", ev.Key).
 			Msg("volume dependencies not all ready; requeueing")
-		return true, nil
+		return controller.Requeue(), nil
 	}
 
 	// Format authority = Image.Spec.Format. An unmappable format is a permanent
@@ -155,18 +155,18 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	imageFormat, err := mapImageFormat(img.Spec.Format)
 	if err != nil {
 		if perr := c.reportFailure(ctx, vol.Name, vol.Status, err); perr != nil {
-			return false, fmt.Errorf("volume controller: map image format for %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
+			return controller.Done(), fmt.Errorf("volume controller: map image format for %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("volume image format unmappable (config error); not requeuing")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	created, err := c.createRootVolume(ctx, vol, imageFormat)
 	if err != nil {
 		if perr := c.reportFailure(ctx, vol.Name, vol.Status, err); perr != nil {
-			return true, fmt.Errorf("volume controller: create root volume %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("volume controller: create root volume %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("volume controller: create root volume %q: %w", vol.Name, err)
+		return controller.Requeue(), fmt.Errorf("volume controller: create root volume %q: %w", vol.Name, err)
 	}
 
 	path := created.Context[local.PathKey]
@@ -175,9 +175,9 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		// treat it as transient (report failed and requeue).
 		missing := fmt.Errorf("volume controller: created volume %q reports no host path", vol.Name)
 		if perr := c.reportFailure(ctx, vol.Name, vol.Status, missing); perr != nil {
-			return true, fmt.Errorf("volume controller: %q missing path and status report failed: %w", vol.Name, errors.Join(missing, perr))
+			return controller.Requeue(), fmt.Errorf("volume controller: %q missing path and status report failed: %w", vol.Name, errors.Join(missing, perr))
 		}
-		return true, missing
+		return controller.Requeue(), missing
 	}
 
 	status := volumev1.VolumeStatus{
@@ -185,14 +185,14 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		VolumePath: path,
 	}
 	if err := c.patchStatus(ctx, vol.Name, vol.Status, status); err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 
 	logger.Info().
 		Str("key", ev.Key).
 		Str("volumePath", path).
 		Msg("volume ready")
-	return false, nil
+	return controller.Done(), nil
 }
 
 // gate reports whether every referenced dependency is live Ready. When all are

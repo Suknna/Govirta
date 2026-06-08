@@ -40,11 +40,11 @@ func newRecordingController(kind string) *recordingController {
 
 func (c *recordingController) Kind() string { return c.kind }
 
-func (c *recordingController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *recordingController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	c.mu.Lock()
 	c.seen[ev.Key] = true
 	c.mu.Unlock()
-	return false, nil
+	return controller.Done(), nil
 }
 
 func (c *recordingController) sawKey(key string) bool {

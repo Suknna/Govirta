@@ -173,12 +173,12 @@ func TestImageReconcileFileSourceReady(t *testing.T) {
 	img := fileSourceImage("img-a", "pool-a", "file://"+path)
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 
 	// PutImage 收到完整请求，源字节格式权威 = Image.Spec.Format。
@@ -248,12 +248,12 @@ func TestImageReconcileReadyIsNoOp(t *testing.T) {
 	img.Status.Phase = imagev1.ImagePhaseReady
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for a ready image")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for a ready image")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times on a ready image, want 0", putter.putCalls)
@@ -277,12 +277,12 @@ func TestImageReconcilePlainFilePathReady(t *testing.T) {
 	img.Spec.Format = imagev1.ImageFormatRaw
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if putter.gotReq.Format != diskformat.FormatRaw {
 		t.Errorf("PutImage Format = %q, want %q", putter.gotReq.Format, diskformat.FormatRaw)
@@ -316,12 +316,12 @@ func TestImageReconcileHTTPSourceReady(t *testing.T) {
 	}
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if got := writer.buf.Bytes(); !bytes.Equal(got, content) {
 		t.Errorf("writer received %q, want %q", got, content)
@@ -357,12 +357,12 @@ func TestImageReconcileUnsupportedSchemeIsPermanentFailure(t *testing.T) {
 	}
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for unsupported scheme (config error)")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for unsupported scheme (config error)")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times, want 0 when source scheme is unsupported", putter.putCalls)
@@ -391,12 +391,12 @@ func TestImageReconcileUnknownSourceTypeIsPermanentFailure(t *testing.T) {
 	img.Spec.Source.Type = imagev1.ImageSourceType("registry")
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for unknown source type")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for unknown source type")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times, want 0", putter.putCalls)
@@ -407,7 +407,7 @@ func TestImageReconcileUnknownSourceTypeIsPermanentFailure(t *testing.T) {
 }
 
 func TestImageReconcileUnsafeFilePathIsPermanentFailure(t *testing.T) {
-	// 源文件在允许根之外：路径安全校验必须拒绝，且这是永久错误（不 requeue）。
+	// 源文件在允许根之外：路径安全校验必须拒绝，且这是永久错误（不 result.Requeue）。
 	root := t.TempDir()
 	outside := t.TempDir()
 	outsidePath := filepath.Join(outside, "escape.img")
@@ -422,12 +422,12 @@ func TestImageReconcileUnsafeFilePathIsPermanentFailure(t *testing.T) {
 	img := fileSourceImage("img-escape", "pool-a", "file://"+outsidePath)
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for unsafe path")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for unsafe path")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times, want 0 for unsafe path", putter.putCalls)
@@ -448,12 +448,12 @@ func TestImageReconcileUnsupportedFormatIsPermanentFailure(t *testing.T) {
 	img.Spec.Format = imagev1.ImageFormat("vmdk")
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent config failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for unsupported format")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for unsupported format")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times, want 0; format maps before opening source", putter.putCalls)
@@ -474,15 +474,15 @@ func TestImageReconcilePutImageFailureRequeues(t *testing.T) {
 	img := fileSourceImage("img-put", "pool-a", "file://"+path)
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil {
 		t.Fatalf("Reconcile() error = nil, want non-nil on PutImage failure")
 	}
 	if !errors.Is(err, putErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, putErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient PutImage failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient PutImage failure")
 	}
 	if len(reporter.patches) != 1 {
 		t.Fatalf("PatchStatus captured %d patches, want 1", len(reporter.patches))
@@ -508,12 +508,12 @@ func TestImageReconcileCommitFailureRequeues(t *testing.T) {
 	img := fileSourceImage("img-commit", "pool-a", "file://"+path)
 	ev := newImageEvent(t, controller.EventAdded, img)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, commitErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, commitErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient commit failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient commit failure")
 	}
 	if len(reporter.patches) != 1 || reporter.patches[0].status.Phase != imagev1.ImagePhaseFailed {
 		t.Fatalf("expected one failed patch, got %+v", reporter.patches)
@@ -527,12 +527,12 @@ func TestImageReconcileDeletedIsNoOp(t *testing.T) {
 
 	ev := newImageEvent(t, controller.EventDeleted, fileSourceImage("img-del", "pool-a", "/x"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times on DELETED, want 0", putter.putCalls)
@@ -552,12 +552,12 @@ func TestImageReconcileContextCancelledPropagates(t *testing.T) {
 
 	ev := newImageEvent(t, controller.EventAdded, fileSourceImage("img-ctx", "pool-a", "/x"))
 
-	requeue, err := c.Reconcile(ctx, ev)
+	result, err := c.Reconcile(ctx, ev)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Reconcile() error = %v, want wrapped context.Canceled", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when context cancelled before work")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when context cancelled before work")
 	}
 	if putter.putCalls != 0 {
 		t.Errorf("PutImage called %d times after ctx cancel, want 0", putter.putCalls)

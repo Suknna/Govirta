@@ -126,12 +126,12 @@ func TestStoragePoolReconcileAddedReady(t *testing.T) {
 	sp := validStoragePool("pool-a")
 	ev := newStoragePoolEvent(t, controller.EventAdded, sp)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 
 	if len(pools.registered) != 1 {
@@ -197,12 +197,12 @@ func TestStoragePoolReconcileNoOpWhenStatusAlreadyDesired(t *testing.T) {
 	}
 	ev := newStoragePoolEvent(t, controller.EventModified, sp)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if reporter.patchCalls != 0 {
 		t.Fatalf("PatchStatus called %d times, want 0 when observed status already equals desired", reporter.patchCalls)
@@ -216,12 +216,12 @@ func TestStoragePoolReconcileAlreadyRegisteredIsIdempotent(t *testing.T) {
 
 	ev := newStoragePoolEvent(t, controller.EventModified, validStoragePool("pool-idem"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-registered pool", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if pools.usageCallCount != 1 {
 		t.Fatalf("GetPoolUsage called %d times, want 1", pools.usageCallCount)
@@ -239,15 +239,15 @@ func TestStoragePoolReconcileRegisterFailureRequeues(t *testing.T) {
 
 	ev := newStoragePoolEvent(t, controller.EventAdded, validStoragePool("pool-fail"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil {
 		t.Fatalf("Reconcile() error = nil, want non-nil on register failure")
 	}
 	if !errors.Is(err, registerErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, registerErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on register failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on register failure")
 	}
 
 	if pools.usageCallCount != 0 {
@@ -276,12 +276,12 @@ func TestStoragePoolReconcileUsageFailureRequeues(t *testing.T) {
 
 	ev := newStoragePoolEvent(t, controller.EventAdded, validStoragePool("pool-usage"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, usageErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, usageErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on usage failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on usage failure")
 	}
 	if len(pools.registered) != 1 {
 		t.Fatalf("RegisterPool called %d times, want 1", len(pools.registered))
@@ -300,12 +300,12 @@ func TestStoragePoolReconcileInvalidBackendIsPermanentFailure(t *testing.T) {
 	sp.Spec.Backend = storagepoolv1.BackendType("ceph-magic")
 	ev := newStoragePoolEvent(t, controller.EventAdded, sp)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent mapping failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for permanent mapping failure")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for permanent mapping failure")
 	}
 	if len(pools.registered) != 0 {
 		t.Fatalf("RegisterPool called %d times, want 0 on mapping failure", len(pools.registered))
@@ -322,12 +322,12 @@ func TestStoragePoolReconcileDeletedIsNoOp(t *testing.T) {
 
 	ev := newStoragePoolEvent(t, controller.EventDeleted, validStoragePool("pool-del"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if len(pools.registered) != 0 {
 		t.Errorf("RegisterPool called %d times on DELETED, want 0", len(pools.registered))
@@ -347,12 +347,12 @@ func TestStoragePoolReconcileContextCancelledPropagates(t *testing.T) {
 
 	ev := newStoragePoolEvent(t, controller.EventAdded, validStoragePool("pool-ctx"))
 
-	requeue, err := c.Reconcile(ctx, ev)
+	result, err := c.Reconcile(ctx, ev)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Reconcile() error = %v, want wrapped context.Canceled", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when context cancelled before work")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when context cancelled before work")
 	}
 	if len(pools.registered) != 0 {
 		t.Errorf("RegisterPool called %d times after ctx cancel, want 0", len(pools.registered))
@@ -432,12 +432,12 @@ func TestStoragePoolReconcileNFSBackendIsPermanentFailure(t *testing.T) {
 	sp.Spec.Type = storagepoolv1.PoolTypeBlock
 	ev := newStoragePoolEvent(t, controller.EventAdded, sp)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil (permanent failure reported via status)", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for a backend with no driver")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for a backend with no driver")
 	}
 	if len(pools.registered) != 0 {
 		t.Fatalf("RegisterPool called %d times, want 0 for unsupported backend", len(pools.registered))
@@ -469,12 +469,12 @@ func TestStoragePoolReconcileTeardownUnregistersAndRemovesFinalizer(t *testing.T
 
 	ev := newStoragePoolEvent(t, controller.EventModified, deletingStoragePool("pool-del"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false after teardown + finalizer removal")
 	}
 	if pools.unregisterCalls != 1 {
 		t.Fatalf("UnregisterPool called %d times, want 1", pools.unregisterCalls)
@@ -506,12 +506,12 @@ func TestStoragePoolReconcileTeardownAlreadyUnregisteredIsIdempotent(t *testing.
 
 	ev := newStoragePoolEvent(t, controller.EventModified, deletingStoragePool("pool-gone"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-unregistered pool", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when pool already gone")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when pool already gone")
 	}
 	if pools.unregisterCalls != 1 {
 		t.Fatalf("UnregisterPool called %d times, want 1", pools.unregisterCalls)
@@ -532,12 +532,12 @@ func TestStoragePoolReconcileTeardownPoolNotEmptyRequeuesKeepingFinalizer(t *tes
 
 	ev := newStoragePoolEvent(t, controller.EventModified, deletingStoragePool("pool-busy"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, pool.ErrPoolNotEmpty) {
 		t.Fatalf("Reconcile() error = %v, want wrapped pool.ErrPoolNotEmpty", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on a real teardown conflict")
 	}
 	if reporter.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", reporter.removeFinalizerCalls)

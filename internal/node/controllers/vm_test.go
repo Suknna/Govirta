@@ -213,12 +213,12 @@ func TestVMReconcileAllReadyCreatesAndStarts(t *testing.T) {
 	}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if requeue {
-		t.Fatalf("requeue = true, want false on successful create+start")
+	if result.Requeue {
+		t.Fatalf("result.Requeue = true, want false on successful create+start")
 	}
 	if runner.createCalls != 1 {
 		t.Fatalf("createCalls = %d, want 1", runner.createCalls)
@@ -257,12 +257,12 @@ func TestVMReconcileVolumeNotReadyRequeuesWithoutCreate(t *testing.T) {
 	}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !requeue {
-		t.Fatalf("requeue = false, want true when a volume dependency is not ready")
+	if !result.Requeue {
+		t.Fatalf("result.Requeue = false, want true when a volume dependency is not ready")
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0 (must not create before dependencies ready)", runner.createCalls)
@@ -279,12 +279,12 @@ func TestVMReconcileNICNotReadyRequeuesWithoutCreate(t *testing.T) {
 	}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !requeue {
-		t.Fatalf("requeue = false, want true when a NIC dependency is not ready")
+	if !result.Requeue {
+		t.Fatalf("result.Requeue = false, want true when a NIC dependency is not ready")
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0", runner.createCalls)
@@ -299,12 +299,12 @@ func TestVMReconcileMissingDependencyRequeues(t *testing.T) {
 	}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !requeue {
-		t.Fatalf("requeue = false, want true when a dependency object is missing")
+	if !result.Requeue {
+		t.Fatalf("result.Requeue = false, want true when a dependency object is missing")
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0", runner.createCalls)
@@ -318,12 +318,12 @@ func TestVMReconcileAlreadyRunningReReportsWithoutCreate(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if requeue {
-		t.Fatalf("requeue = true, want false for an already-running guest")
+	if result.Requeue {
+		t.Fatalf("result.Requeue = true, want false for an already-running guest")
 	}
 	if runner.createCalls != 0 || runner.startCalls != 0 {
 		t.Fatalf("create=%d start=%d, want 0/0 for an existing guest", runner.createCalls, runner.startCalls)
@@ -342,12 +342,12 @@ func TestVMReconcileAlreadyStartingRequeuesToTrackTerminalPhase(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !requeue {
-		t.Fatalf("requeue = false, want true for a guest in a transient (Starting) phase")
+	if !result.Requeue {
+		t.Fatalf("result.Requeue = false, want true for a guest in a transient (Starting) phase")
 	}
 	if runner.createCalls != 0 || runner.startCalls != 0 {
 		t.Fatalf("create=%d start=%d, want 0/0 for an existing guest", runner.createCalls, runner.startCalls)
@@ -365,12 +365,12 @@ func TestVMReconcileCreateFailureRequeues(t *testing.T) {
 	}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
 	if err == nil {
 		t.Fatalf("Reconcile: expected error on create failure")
 	}
-	if !requeue {
-		t.Fatalf("requeue = false, want true on transient create failure")
+	if !result.Requeue {
+		t.Fatalf("result.Requeue = false, want true on transient create failure")
 	}
 	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseFailed {
 		t.Fatalf("patched phase = %q, want failed", phase)
@@ -390,12 +390,12 @@ func TestVMReconcileUnsupportedArchIsPermanentFailure(t *testing.T) {
 
 	obj := validVMObject()
 	obj.Spec.Arch = "riscv64"
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if requeue {
-		t.Fatalf("requeue = true, want false for a permanent arch config error")
+	if result.Requeue {
+		t.Fatalf("result.Requeue = true, want false for a permanent arch config error")
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0 for unsupported arch", runner.createCalls)
@@ -410,12 +410,12 @@ func TestVMReconcileStatusTransientErrorRequeues(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
 	if err == nil {
 		t.Fatalf("Reconcile: expected error on transient status failure")
 	}
-	if !requeue {
-		t.Fatalf("requeue = false, want true on transient status error")
+	if !result.Requeue {
+		t.Fatalf("result.Requeue = false, want true on transient status error")
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0 when status probe failed transiently", runner.createCalls)
@@ -427,12 +427,12 @@ func TestVMReconcileDeletedIsNoOp(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventDeleted, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventDeleted, validVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if requeue {
-		t.Fatalf("requeue = true, want false for DELETED no-op")
+	if result.Requeue {
+		t.Fatalf("result.Requeue = true, want false for DELETED no-op")
 	}
 	if runner.createCalls != 0 || runner.startCalls != 0 {
 		t.Fatalf("create=%d start=%d, want 0/0 for DELETED", runner.createCalls, runner.startCalls)
@@ -447,12 +447,12 @@ func TestVMReconcileContextCancelledPropagates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	requeue, err := c.Reconcile(ctx, vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(ctx, vmEvent(t, controller.EventAdded, validVMObject()))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
-	if requeue {
-		t.Fatalf("requeue = true, want false on cancelled context")
+	if result.Requeue {
+		t.Fatalf("result.Requeue = true, want false on cancelled context")
 	}
 }
 
@@ -476,12 +476,12 @@ func TestVMReconcileTeardownRunningKillsAndRequeuesKeepingFinalizer(t *testing.T
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil while teardown in progress", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true while awaiting process exit")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true while awaiting process exit")
 	}
 	if runner.killCalls != 1 {
 		t.Fatalf("Kill called %d times, want 1 for a running guest", runner.killCalls)
@@ -505,12 +505,12 @@ func TestVMReconcileTeardownStartingKillsAndRequeues(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil while teardown in progress", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true while awaiting process exit")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true while awaiting process exit")
 	}
 	if runner.killCalls != 1 {
 		t.Fatalf("Kill called %d times, want 1 for a starting guest", runner.killCalls)
@@ -531,12 +531,12 @@ func TestVMReconcileTeardownStoppingRequeuesWithoutKillOrDelete(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil while teardown in progress", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true while awaiting terminal state")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true while awaiting terminal state")
 	}
 	if runner.killCalls != 0 {
 		t.Fatalf("Kill called %d times, want 0 when kill already in flight", runner.killCalls)
@@ -558,12 +558,12 @@ func TestVMReconcileTeardownStoppedDeletesAndRemovesFinalizer(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false after delete + finalizer removal")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false after delete + finalizer removal")
 	}
 	if runner.killCalls != 0 {
 		t.Fatalf("Kill called %d times, want 0 for an already-dead guest", runner.killCalls)
@@ -590,12 +590,12 @@ func TestVMReconcileTeardownFailedDeletesAndRemovesFinalizer(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false after delete + finalizer removal")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false after delete + finalizer removal")
 	}
 	if runner.deleteCalls != 1 {
 		t.Fatalf("Delete called %d times, want 1 for a failed (terminal) guest", runner.deleteCalls)
@@ -613,12 +613,12 @@ func TestVMReconcileTeardownAlreadyGoneRemovesFinalizer(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-gone guest", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when guest already gone")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when guest already gone")
 	}
 	if runner.killCalls != 0 || runner.deleteCalls != 0 {
 		t.Fatalf("kill=%d delete=%d, want 0/0 when state already gone", runner.killCalls, runner.deleteCalls)
@@ -636,12 +636,12 @@ func TestVMReconcileTeardownDeleteNotFoundIsIdempotent(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for idempotent delete-not-found", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false on idempotent delete")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false on idempotent delete")
 	}
 	if runner.deleteCalls != 1 {
 		t.Fatalf("Delete called %d times, want 1", runner.deleteCalls)
@@ -660,12 +660,12 @@ func TestVMReconcileTeardownKillFailureRequeuesKeepingFinalizer(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err == nil || !errors.Is(err, killErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, killErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on kill failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on kill failure")
 	}
 	if dep.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when kill fails (finalizer kept)", dep.removeFinalizerCalls)
@@ -680,12 +680,12 @@ func TestVMReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing.T) 
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err == nil || !errors.Is(err, deleteErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, deleteErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on delete failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on delete failure")
 	}
 	if dep.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when delete fails (finalizer kept)", dep.removeFinalizerCalls)
@@ -701,12 +701,12 @@ func TestVMReconcileTeardownStatusErrorRequeuesKeepingFinalizer(t *testing.T) {
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
 	if err == nil || !errors.Is(err, statusErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, statusErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on transient status error during teardown")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on transient status error during teardown")
 	}
 	if runner.killCalls != 0 || runner.deleteCalls != 0 {
 		t.Fatalf("kill=%d delete=%d, want 0/0 when status could not be read", runner.killCalls, runner.deleteCalls)

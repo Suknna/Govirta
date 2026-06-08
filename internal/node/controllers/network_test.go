@@ -165,12 +165,12 @@ func TestNetworkReconcileAddedReady(t *testing.T) {
 	n := validNetwork("net-a")
 	ev := newNetworkEvent(t, controller.EventAdded, n)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 
 	// RegisterNetwork + EnsureNetwork + GetNetworkStatus each called once.
@@ -315,15 +315,15 @@ func TestNetworkReconcileEnsureFailureRequeues(t *testing.T) {
 
 	ev := newNetworkEvent(t, controller.EventAdded, validNetwork("net-fail"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil {
 		t.Fatalf("Reconcile() error = nil, want non-nil on ensure failure")
 	}
 	if !errors.Is(err, ensureErr) {
 		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, ensureErr)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on ensure failure")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on ensure failure")
 	}
 
 	// Registered before ensure; status never read after ensure failed.
@@ -355,12 +355,12 @@ func TestNetworkReconcileAlreadyRegisteredIsIdempotent(t *testing.T) {
 
 	ev := newNetworkEvent(t, controller.EventModified, validNetwork("net-idem"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-registered network", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	// An already-registered network must still be ensured and reported ready.
 	if networks.ensureCalls != 1 {
@@ -388,8 +388,8 @@ func TestNetworkReconcileRepeatedReconcileIsIdempotent(t *testing.T) {
 	}
 	// Second pass: the service now reports the network already exists.
 	networks.registerErr = networker.ErrAlreadyExists
-	if requeue, err := c.Reconcile(context.Background(), ev); err != nil || requeue {
-		t.Fatalf("second Reconcile() = (requeue=%v, err=%v), want (false, nil)", requeue, err)
+	if result, err := c.Reconcile(context.Background(), ev); err != nil || result.Requeue {
+		t.Fatalf("second Reconcile() = (result.Requeue=%v, err=%v), want (false, nil)", result.Requeue, err)
 	}
 
 	if len(networks.registered) != 2 {
@@ -421,12 +421,12 @@ func TestNetworkReconcileInvalidSpecIsPermanentFailure(t *testing.T) {
 	n.Spec.Subnet = "not-a-cidr"
 	ev := newNetworkEvent(t, controller.EventAdded, n)
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for permanent parse failure", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false for permanent parse failure")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false for permanent parse failure")
 	}
 	if len(networks.registered) != 0 {
 		t.Fatalf("RegisterNetwork called %d times, want 0 on parse failure", len(networks.registered))
@@ -446,12 +446,12 @@ func TestNetworkReconcileDeletedIsNoOp(t *testing.T) {
 
 	ev := newNetworkEvent(t, controller.EventDeleted, validNetwork("net-del"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
 	if len(networks.registered) != 0 {
 		t.Errorf("RegisterNetwork called %d times on DELETED, want 0", len(networks.registered))
@@ -474,12 +474,12 @@ func TestNetworkReconcileContextCancelledPropagates(t *testing.T) {
 
 	ev := newNetworkEvent(t, controller.EventAdded, validNetwork("net-ctx"))
 
-	requeue, err := c.Reconcile(ctx, ev)
+	result, err := c.Reconcile(ctx, ev)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Reconcile() error = %v, want wrapped context.Canceled", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when context cancelled before work")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when context cancelled before work")
 	}
 	if len(networks.registered) != 0 {
 		t.Errorf("RegisterNetwork called %d times after ctx cancel, want 0", len(networks.registered))
@@ -509,12 +509,12 @@ func TestNetworkReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 
 	ev := newNetworkEvent(t, controller.EventModified, deletingNetwork("net-del"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil on successful teardown", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false after teardown + finalizer removal")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false after teardown + finalizer removal")
 	}
 	if networks.deleteCalls != 1 {
 		t.Fatalf("DeleteNetwork called %d times, want 1", networks.deleteCalls)
@@ -549,12 +549,12 @@ func TestNetworkReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 
 	ev := newNetworkEvent(t, controller.EventModified, deletingNetwork("net-gone"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil for already-deleted network", err)
 	}
-	if requeue {
-		t.Fatalf("Reconcile() requeue = true, want false when network already gone")
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false when network already gone")
 	}
 	if networks.deleteCalls != 1 {
 		t.Fatalf("DeleteNetwork called %d times, want 1", networks.deleteCalls)
@@ -574,12 +574,12 @@ func TestNetworkReconcileTeardownConflictRequeuesKeepingFinalizer(t *testing.T) 
 
 	ev := newNetworkEvent(t, controller.EventModified, deletingNetwork("net-busy"))
 
-	requeue, err := c.Reconcile(context.Background(), ev)
+	result, err := c.Reconcile(context.Background(), ev)
 	if err == nil || !errors.Is(err, networker.ErrConflict) {
 		t.Fatalf("Reconcile() error = %v, want wrapped networker.ErrConflict", err)
 	}
-	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on a real teardown conflict")
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = false, want true on a real teardown conflict")
 	}
 	if reporter.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", reporter.removeFinalizerCalls)

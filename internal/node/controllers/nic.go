@@ -102,9 +102,9 @@ func (c *NICController) Kind() string {
 //     IP) → permanent config failure: patch failed and do NOT requeue;
 //   - RegisterNIC (non-idempotent) / EnsureNIC / GetNICStatus fails → transient:
 //     patch failed and requeue with a wrapped error.
-func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("nic controller: context done before reconcile: %w", err)
+		return controller.Done(), fmt.Errorf("nic controller: context done before reconcile: %w", err)
 	}
 
 	logger := zerolog.Ctx(ctx)
@@ -114,12 +114,12 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 			Str("kind", c.Kind()).
 			Str("key", ev.Key).
 			Msg("nic deleted; delete is a no-op in this slice")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	var obj nicv1.NIC
 	if err := json.Unmarshal(ev.Object, &obj); err != nil {
-		return false, fmt.Errorf("nic controller: decode object %q: %w", ev.Key, err)
+		return controller.Done(), fmt.Errorf("nic controller: decode object %q: %w", ev.Key, err)
 	}
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this NIC
@@ -128,12 +128,12 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	// failure keeps the finalizer (object stays "deleting") and requeues.
 	if isDeleting(obj.ObjectMeta) {
 		if err := c.teardown(ctx, obj); err != nil {
-			return true, fmt.Errorf("nic controller: teardown %q: %w", obj.Name, err)
+			return controller.Requeue(), fmt.Errorf("nic controller: teardown %q: %w", obj.Name, err)
 		}
 		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), obj.Name); err != nil {
-			return true, fmt.Errorf("nic controller: remove finalizer %q: %w", obj.Name, err)
+			return controller.Requeue(), fmt.Errorf("nic controller: remove finalizer %q: %w", obj.Name, err)
 		}
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	// Gate: the referenced Network must be live Ready before any NIC work. A
@@ -141,49 +141,49 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 	// patching failed.
 	ready, err := c.networkReady(ctx, obj.Spec.NetworkRef)
 	if err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 	if !ready {
 		logger.Info().
 			Str("key", ev.Key).
 			Str("networkRef", obj.Spec.NetworkRef).
 			Msg("nic referenced network not ready; requeueing")
-		return true, nil
+		return controller.Requeue(), nil
 	}
 
 	def, err := c.buildNICDefinition(obj)
 	if err != nil {
 		// A spec that does not parse is a permanent failure: requeue cannot fix it.
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return false, fmt.Errorf("nic controller: parse spec %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Done(), fmt.Errorf("nic controller: parse spec %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("nic spec parsing failed permanently (config error); not requeuing")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	if err := c.nics.RegisterNIC(def); err != nil && !errors.Is(err, networker.ErrAlreadyExists) {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("nic controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("nic controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("nic controller: register %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("nic controller: register %q: %w", obj.Name, err)
 	}
 
 	networkName := netpool.NetworkName(obj.Spec.NetworkRef)
 	vmID := netpool.VMID(obj.Spec.VMRef)
 	if _, err := c.nics.EnsureNIC(ctx, networkName, vmID); err != nil {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("nic controller: ensure %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("nic controller: ensure %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("nic controller: ensure %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("nic controller: ensure %q: %w", obj.Name, err)
 	}
 
 	// Authoritative read: report from the live aggregated status, never from the
 	// definition we just registered (netpool 的“总以实况为准”约定).
 	if _, err := c.nics.GetNICStatus(ctx, networkName, vmID); err != nil {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("nic controller: read status for %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("nic controller: read status for %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("nic controller: read status for %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("nic controller: read status for %q: %w", obj.Name, err)
 	}
 
 	// The derived TapName is the authoritative host TAP name reported up. A
@@ -194,7 +194,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 		TapName: string(def.TapName),
 	}
 	if err := c.patchStatus(ctx, obj.Name, obj.Status, status); err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 
 	logger.Info().
@@ -203,7 +203,7 @@ func (c *NICController) Reconcile(ctx context.Context, ev controller.Event) (boo
 		Str("vmRef", obj.Spec.VMRef).
 		Str("tapName", string(def.TapName)).
 		Msg("nic ready")
-	return false, nil
+	return controller.Done(), nil
 }
 
 // networkReady reads the referenced Network and reports whether its observed

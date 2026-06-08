@@ -91,9 +91,9 @@ func (c *NetworkController) Kind() string {
 // core rejects as invalid is a permanent failure: it is reported failed and not
 // requeued. A register (non-idempotent) / ensure / status-read failure is
 // transient: it is reported failed and requeued.
-func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) (bool, error) {
+func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("network controller: context done before reconcile: %w", err)
+		return controller.Done(), fmt.Errorf("network controller: context done before reconcile: %w", err)
 	}
 
 	logger := zerolog.Ctx(ctx)
@@ -103,12 +103,12 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 			Str("kind", c.Kind()).
 			Str("key", ev.Key).
 			Msg("network deleted; delete is a no-op in this slice")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	var obj networkv1.Network
 	if err := json.Unmarshal(ev.Object, &obj); err != nil {
-		return false, fmt.Errorf("network controller: decode object %q: %w", ev.Key, err)
+		return controller.Done(), fmt.Errorf("network controller: decode object %q: %w", ev.Key, err)
 	}
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this
@@ -117,22 +117,22 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 	// requeues.
 	if isDeleting(obj.ObjectMeta) {
 		if err := c.teardown(ctx, obj); err != nil {
-			return true, fmt.Errorf("network controller: teardown %q: %w", obj.Name, err)
+			return controller.Requeue(), fmt.Errorf("network controller: teardown %q: %w", obj.Name, err)
 		}
 		if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), obj.Name); err != nil {
-			return true, fmt.Errorf("network controller: remove finalizer %q: %w", obj.Name, err)
+			return controller.Requeue(), fmt.Errorf("network controller: remove finalizer %q: %w", obj.Name, err)
 		}
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	def, err := buildNetworkDefinition(obj)
 	if err != nil {
 		// A spec that does not parse is a permanent failure: requeue cannot fix it.
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return false, fmt.Errorf("network controller: parse spec %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Done(), fmt.Errorf("network controller: parse spec %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		logger.Error().Err(err).Str("key", ev.Key).Msg("network spec parsing failed permanently (config error); not requeuing")
-		return false, nil
+		return controller.Done(), nil
 	}
 
 	if err := c.networks.RegisterNetwork(def); err != nil && !errors.Is(err, networker.ErrAlreadyExists) {
@@ -140,21 +140,24 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 		// other registration failure is transient.
 		permanent := errors.Is(err, networker.ErrInvalidRequest)
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return !permanent, fmt.Errorf("network controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			if permanent {
+				return controller.Done(), fmt.Errorf("network controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			return controller.Requeue(), fmt.Errorf("network controller: register %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
 		if permanent {
 			logger.Error().Err(err).Str("key", ev.Key).Msg("network definition rejected permanently (config error); not requeuing")
-			return false, nil
+			return controller.Done(), nil
 		}
-		return true, fmt.Errorf("network controller: register %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("network controller: register %q: %w", obj.Name, err)
 	}
 
 	name := netpool.NetworkName(obj.Name)
 	if _, err := c.networks.EnsureNetwork(ctx, name); err != nil {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("network controller: ensure %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("network controller: ensure %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("network controller: ensure %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("network controller: ensure %q: %w", obj.Name, err)
 	}
 
 	// Authoritative read: report from the live aggregated status, never from the
@@ -162,9 +165,9 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 	status, err := c.networks.GetNetworkStatus(ctx, name)
 	if err != nil {
 		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return true, fmt.Errorf("network controller: read status for %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			return controller.Requeue(), fmt.Errorf("network controller: read status for %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return true, fmt.Errorf("network controller: read status for %q: %w", obj.Name, err)
+		return controller.Requeue(), fmt.Errorf("network controller: read status for %q: %w", obj.Name, err)
 	}
 
 	phase, requeue := mapNetworkPhase(status.DHCP.State)
@@ -173,7 +176,7 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 		apiStatus.Message = fmt.Sprintf("dhcp server in unexpected state %q after ensure", status.DHCP.State)
 	}
 	if err := c.patchStatus(ctx, obj.Name, obj.Status, apiStatus); err != nil {
-		return true, err
+		return controller.Requeue(), err
 	}
 
 	logger.Info().
@@ -183,7 +186,10 @@ func (c *NetworkController) Reconcile(ctx context.Context, ev controller.Event) 
 		Str("phase", string(phase)).
 		Bool("requeue", requeue).
 		Msg("network reconciled")
-	return requeue, nil
+	if requeue {
+		return controller.Requeue(), nil
+	}
+	return controller.Done(), nil
 }
 
 // teardown deletes the live network host primitives via the network service.

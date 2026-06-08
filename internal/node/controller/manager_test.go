@@ -72,7 +72,7 @@ func newFakeController(kind string, requeueOnce ...string) *fakeController {
 
 func (f *fakeController) Kind() string { return f.kind }
 
-func (f *fakeController) Reconcile(ctx context.Context, ev Event) (bool, error) {
+func (f *fakeController) Reconcile(ctx context.Context, ev Event) (ReconcileResult, error) {
 	f.mu.Lock()
 	f.seen = append(f.seen, ev.Key)
 	var requeue bool
@@ -86,7 +86,10 @@ func (f *fakeController) Reconcile(ctx context.Context, ev Event) (bool, error) 
 	case f.reconciled <- ev:
 	case <-ctx.Done():
 	}
-	return requeue, nil
+	if requeue {
+		return Requeue(), nil
+	}
+	return Done(), nil
 }
 
 func (f *fakeController) seenKeys() []string {

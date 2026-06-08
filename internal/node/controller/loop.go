@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -106,19 +107,21 @@ func consume(ctx context.Context, ch <-chan Event, q *Queue, startRV string) str
 }
 
 // reconcileLoop pulls Events from q and reconciles them until q is shut down and
-// drained (Get reports ok=false). A reconcile that requeues or errors re-Adds the
-// same Event for another attempt — the thinnest retry, with no backoff. The error
-// is not swallowed: it is re-enqueued for retry AND logged at error level (with
-// kind/key/requeue context) so a controller failing transiently in a tight retry
-// loop is observable rather than spinning silently. After shutdown, a requeue's
-// Add is dropped by the closed Queue, so the loop always terminates.
+// drained (Get reports ok=false). A reconcile result can request immediate or
+// delayed requeue. A reconcile error is not swallowed: it is re-enqueued for retry
+// and logged at error level (with kind/key/requeue context) so a controller
+// failing transiently is observable rather than spinning silently. After shutdown,
+// a requeue's Add is dropped by the closed Queue, so the loop always terminates.
 func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
 	for {
 		ev, ok := q.Get()
 		if !ok {
 			return
 		}
-		requeue, err := c.Reconcile(ctx, ev)
+		result, err := c.Reconcile(ctx, ev)
+		if err != nil && !result.ShouldRequeue() {
+			result = Requeue()
+		}
 		if err != nil {
 			// A reconcile error must not be silently swallowed (项目铁律: 不吞错误).
 			// It is acted on by re-enqueuing below, but it is also recorded here —
@@ -132,11 +135,31 @@ func reconcileLoop(ctx context.Context, c Controller, q *Queue) {
 				Err(err).
 				Str("kind", c.Kind()).
 				Str("key", ev.Key).
-				Bool("requeue", requeue).
+				Bool("requeue", result.ShouldRequeue()).
+				Dur("requeue_after", result.RequeueAfter).
 				Msg("controller reconcile failed")
 		}
-		if requeue || err != nil {
+		switch {
+		case result.RequeueAfter > 0:
+			scheduleRequeue(ctx, q, ev, result.RequeueAfter)
+		case result.Requeue:
 			q.Add(ev)
 		}
 	}
+}
+
+// scheduleRequeue re-adds ev after delay unless ctx is cancelled first. The
+// goroutine is owned by the controller run context, and Queue.Add drops the event
+// if the queue has already been shut down.
+func scheduleRequeue(ctx context.Context, q *Queue, ev Event, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			q.Add(ev)
+		}
+	}()
 }

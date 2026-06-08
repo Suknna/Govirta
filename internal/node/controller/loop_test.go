@@ -50,6 +50,162 @@ func TestLoop_RequeueReprocessesKey(t *testing.T) {
 	}
 }
 
+func TestLoop_DelayedRequeueWaitsBeforeRetry(t *testing.T) {
+	q := New()
+	q.Add(Event{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)})
+	ctrl := &scriptedController{
+		kind:       "VM",
+		reconciled: make(chan Event, 4),
+		results: []ReconcileResult{
+			RequeueAfter(30 * time.Millisecond),
+			Done(),
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		reconcileLoop(ctx, ctrl, q)
+		close(done)
+	}()
+
+	select {
+	case <-ctrl.reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first reconcile")
+	}
+
+	select {
+	case <-ctrl.reconciled:
+		t.Fatal("delayed requeue reconciled immediately")
+	case <-time.After(5 * time.Millisecond):
+	}
+
+	select {
+	case <-ctrl.reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delayed reconcile")
+	}
+
+	q.Shutdown()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile loop did not stop after queue shutdown")
+	}
+}
+
+func TestLoop_CancelBeforeDelayedRequeuePreventsRetry(t *testing.T) {
+	q := New()
+	q.Add(Event{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)})
+	ctrl := &scriptedController{
+		kind:       "VM",
+		reconciled: make(chan Event, 4),
+		results: []ReconcileResult{
+			RequeueAfter(30 * time.Millisecond),
+			Done(),
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		reconcileLoop(ctx, ctrl, q)
+		close(done)
+	}()
+
+	select {
+	case <-ctrl.reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first reconcile")
+	}
+	cancel()
+	q.Shutdown()
+
+	select {
+	case <-ctrl.reconciled:
+		t.Fatal("delayed requeue reconciled after cancellation")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile loop did not stop after cancellation")
+	}
+}
+
+func TestLoop_ErrorWithEmptyResultDefaultsToImmediateRetry(t *testing.T) {
+	q := New()
+	q.Add(Event{Type: EventAdded, Key: "vm-a", Object: []byte(`{}`)})
+	wantErr := errors.New("boom")
+	ctrl := &scriptedController{
+		kind:       "VM",
+		reconciled: make(chan Event, 4),
+		results: []ReconcileResult{
+			Done(),
+			Done(),
+		},
+		errs: []error{
+			wantErr,
+			nil,
+		},
+	}
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		reconcileLoop(ctx, ctrl, q)
+		close(done)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ctrl.reconciled:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for reconcile %d", i+1)
+		}
+	}
+
+	q.Shutdown()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile loop did not stop after queue shutdown")
+	}
+}
+
+type scriptedController struct {
+	kind       string
+	results    []ReconcileResult
+	errs       []error
+	reconciled chan Event
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *scriptedController) Kind() string { return c.kind }
+
+func (c *scriptedController) Reconcile(ctx context.Context, ev Event) (ReconcileResult, error) {
+	c.mu.Lock()
+	call := c.calls
+	c.calls++
+	c.mu.Unlock()
+
+	select {
+	case c.reconciled <- ev:
+	case <-ctx.Done():
+	}
+
+	result := Done()
+	if call < len(c.results) {
+		result = c.results[call]
+	}
+	var err error
+	if call < len(c.errs) {
+		err = c.errs[call]
+	}
+	return result, err
+}
+
 // resumeSource records the startRevision handed to each Watch call and, on the
 // first connection only, delivers preset events then closes the channel to force
 // a reconnect. Later connections hold open until ctx is cancelled. This lets a
@@ -186,12 +342,12 @@ type errController struct {
 
 func (c *errController) Kind() string { return c.kind }
 
-func (c *errController) Reconcile(ctx context.Context, ev Event) (bool, error) {
+func (c *errController) Reconcile(ctx context.Context, ev Event) (ReconcileResult, error) {
 	select {
 	case c.reconciled <- struct{}{}:
 	case <-ctx.Done():
 	}
-	return false, c.err
+	return Done(), c.err
 }
 
 // TestLoop_ReconcileErrorIsLogged proves the reconcile loop does not silently
