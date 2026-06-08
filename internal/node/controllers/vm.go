@@ -85,16 +85,17 @@ func (c *VMController) Kind() string {
 
 // Reconcile drives one VM event toward its desired state.
 //
-// DELETED is a no-op in this slice. For ADDED/MODIFIED it decodes the object,
-// gates on its Volume and NIC dependencies being live Ready (a missing or
-// not-ready dependency requeues without reporting failure — it is a wait, not an
-// error), then ensures the guest process exists and reports its live phase.
+// DELETED is a no-op because the apiserver sends deletion intent as a normal
+// object carrying deletionTimestamp/finalizers. For ADDED/MODIFIED it decodes the
+// event key, refreshes the current VM object from the master before any side
+// effect, gates on Volume/NIC readiness, and reconciles the process against the
+// latest spec.powerState and live vmm phase.
 //
 // requeue semantics:
-//   - dependency not ready / not found → requeue=true, no failure patch (waiting)
-//   - dependency read transport error  → requeue=true, no failure patch (transient)
-//   - unsupported arch / bad spec       → permanent failure, no requeue
-//   - vmm.Create / Start / Status error → failure patch + requeue (transient)
+//   - dependency not ready / not found → delayed requeue, no failure patch (waiting)
+//   - dependency read transport error  → delayed requeue, no failure patch (transient)
+//   - unsupported arch / bad spec      → permanent failure, no requeue
+//   - vmm Start/Stop/Kill/Status error → structured failure/progress patch + delayed requeue
 func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
 		return controller.Done(), fmt.Errorf("vm controller: context done before reconcile: %w", err)
@@ -114,6 +115,18 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (cont
 	if err := json.Unmarshal(ev.Object, &obj); err != nil {
 		return controller.Done(), fmt.Errorf("vm controller: decode object %q: %w", ev.Key, err)
 	}
+	current, exists, err := c.currentVM(ctx, obj.Name)
+	if err != nil {
+		return controller.RequeueAfter(vmPowerRequeueDelay), err
+	}
+	if !exists {
+		logger.Info().
+			Str("kind", c.Kind()).
+			Str("key", ev.Key).
+			Msg("vm no longer exists; stale event ignored")
+		return controller.Done(), nil
+	}
+	obj = current
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this guest
 	// gone. Unlike the other controllers, VM teardown is multi-step (stop-then-
@@ -594,18 +607,32 @@ func (c *VMController) reportFailure(ctx context.Context, name string, desiredPo
 // stale status would repeatedly PATCH an already-current status and recreate the
 // feedback loop Knife 1 fixed.
 func (c *VMController) patchVMStatusIfChanged(ctx context.Context, name string, desired vmv1.VMStatus) error {
-	raw, err := c.client.Get(ctx, c.Kind(), name)
+	current, exists, err := c.currentVM(ctx, name)
 	if err != nil {
-		return fmt.Errorf("vm controller: get fresh VM %q before status patch: %w", name, err)
+		return err
 	}
-	var current vmv1.VM
-	if err := json.Unmarshal(raw, &current); err != nil {
-		return fmt.Errorf("vm controller: decode fresh VM %q before status patch: %w", name, err)
+	if !exists {
+		return fmt.Errorf("vm controller: get fresh VM %q before status patch: %w", name, client.ErrNotFound)
 	}
 	if current.Status == desired {
 		return nil
 	}
 	return c.patchStatus(ctx, name, desired)
+}
+
+func (c *VMController) currentVM(ctx context.Context, name string) (vmv1.VM, bool, error) {
+	raw, err := c.client.Get(ctx, c.Kind(), name)
+	if err != nil {
+		if errors.Is(err, client.ErrNotFound) {
+			return vmv1.VM{}, false, nil
+		}
+		return vmv1.VM{}, false, fmt.Errorf("vm controller: get current VM %q: %w", name, err)
+	}
+	var current vmv1.VM
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return vmv1.VM{}, false, fmt.Errorf("vm controller: decode current VM %q: %w", name, err)
+	}
+	return current, true, nil
 }
 
 // patchStatus marshals desired and PATCHes it to the master's /status
