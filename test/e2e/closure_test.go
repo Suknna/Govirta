@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,17 +35,19 @@ const (
 )
 
 // applyOrder is the dependency order the controllers gate on: pools first, then
-// image (needs file pool), volume (needs block pool + image), network, NIC
-// (needs network), VM (needs volume + NIC).
-var applyOrder = []string{
+// image (needs file pool), volume (needs block pool + image), network, and NIC
+// (needs network). The VM is applied separately so the test can drive explicit
+// powerState variants across one committed topology.
+var dependencyApplyOrder = []string{
 	"01-storagepool-block.json",
 	"02-storagepool-file.json",
 	"03-image.json",
 	"04-volume.json",
 	"05-network.json",
 	"06-nic.json",
-	"07-vm.json",
 }
+
+const vmManifestName = "07-vm.json"
 
 // TestDistributedSpineClosure drives the full lifecycle against the real
 // three-node topology: apply the spine in dependency order, wait for the VM to
@@ -70,19 +74,35 @@ func TestDistributedSpineClosure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 
-	// Forward segment: apply the spine and wait for the VM to reach Running.
-	applySpine(ctx, t, ctl, server, manifests)
-	waitVMRunning(ctx, t, ctl, server)
+	// Forward segment: apply dependencies first, define the VM while powered Off,
+	// then drive declared power intent through On, Shutdown, and Off updates.
+	applySpineDependencies(ctx, t, ctl, server, manifests)
+	waitObjectPhase(ctx, t, ctl, server, "NIC", nicName, "ready", 3*time.Minute)
+
+	tmpDir := t.TempDir()
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Off")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "On")
+	waitVMOnRunning(ctx, t, ctl, server)
+
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Shutdown")
+	waitVMShutdownRequestedOrOff(ctx, t, ctl, server, 2*time.Minute)
+
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Off")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	expectShutdownCreateRejected(ctx, t, ctl, server, manifests, tmpDir)
 
 	// Reverse segment: tear the spine down and prove the deletion lifecycle.
 	teardownSpine(ctx, t, ctl, server)
 }
 
-// applySpine applies every manifest in dependency order, failing the test on the
-// first apply that the master rejects.
-func applySpine(ctx context.Context, t *testing.T, ctl, server, manifests string) {
+// applySpineDependencies applies the non-VM spine manifests in dependency order,
+// failing the test on the first apply that the master rejects.
+func applySpineDependencies(ctx context.Context, t *testing.T, ctl, server, manifests string) {
 	t.Helper()
-	for _, name := range applyOrder {
+	for _, name := range dependencyApplyOrder {
 		path := filepath.Join(manifests, name)
 		out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
 		if err != nil {
@@ -92,25 +112,163 @@ func applySpine(ctx context.Context, t *testing.T, ctl, server, manifests string
 	}
 }
 
-// waitVMRunning polls the VM until it reports Running, failing the test if it
-// does not reach Running before the deadline.
-func waitVMRunning(ctx context.Context, t *testing.T, ctl, server string) {
+func applyVMVariant(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir, name, uid, powerState string) {
+	t.Helper()
+	path := writeVMManifestVariant(t, filepath.Join(manifests, vmManifestName), tmpDir, name, uid, powerState)
+	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
+	if err != nil {
+		t.Fatalf("apply VM %s powerState %s failed: %v\noutput:\n%s", name, powerState, err, out)
+	}
+	t.Logf("applied VM %s powerState %s: %s", name, powerState, strings.TrimSpace(out))
+}
+
+func expectShutdownCreateRejected(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir string) {
+	t.Helper()
+	path := writeVMManifestVariant(t, filepath.Join(manifests, vmManifestName), tmpDir, "vm-shutdown-create-rejected", "vm-shutdown-create-rejected-001", "Shutdown")
+	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
+	if err == nil {
+		t.Fatalf("create VM with powerState Shutdown must be rejected, but it was accepted:\n%s", out)
+	}
+	if !strings.Contains(out, "Shutdown is only valid for VM updates") && !strings.Contains(out, "powerState Shutdown") {
+		t.Fatalf("create VM Shutdown rejection should include admission error, got:\n%s", out)
+	}
+	t.Logf("create VM with powerState Shutdown correctly rejected: %s", strings.TrimSpace(out))
+}
+
+func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState string) string {
+	t.Helper()
+	body, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read VM manifest %q: %v", basePath, err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatalf("decode VM manifest %q: %v", basePath, err)
+	}
+	metadata := objectMap(t, manifest, "metadata")
+	metadata["name"] = name
+	metadata["uid"] = uid
+	spec := objectMap(t, manifest, "spec")
+	spec["powerState"] = powerState
+
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode VM manifest variant %s/%s: %v", name, powerState, err)
+	}
+	path := filepath.Join(tmpDir, fmt.Sprintf("%s-%s.json", name, powerState))
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write VM manifest variant %q: %v", path, err)
+	}
+	return path
+}
+
+func objectMap(t *testing.T, obj map[string]any, key string) map[string]any {
+	t.Helper()
+	child, ok := obj[key].(map[string]any)
+	if !ok {
+		t.Fatalf("VM manifest field %q must be a JSON object", key)
+	}
+	return child
+}
+
+func waitObjectPhase(ctx context.Context, t *testing.T, ctl, server, kind, name, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("context ended before %s/%s reached phase %s: %v\nlast get:\n%s", kind, name, want, err, last)
+		}
+		out, err := runCtl(ctx, ctl, "get", "--server", server, kind, name)
+		last = out
+		if err == nil && strings.Contains(out, "phase: "+want) {
+			t.Logf("%s/%s reached phase %s:\n%s", kind, name, want, out)
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("%s/%s did not reach phase %s before deadline\nlast get:\n%s", kind, name, want, last)
+}
+
+func waitVMOnRunning(ctx context.Context, t *testing.T, ctl, server string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Minute)
 	var last string
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
-			t.Fatalf("context ended before VM reached Running: %v\nlast get:\n%s", err, last)
+			t.Fatalf("context ended before VM reached Running/On: %v\nlast get:\n%s", err, last)
 		}
 		out, err := runCtl(ctx, ctl, "get", "--server", server, "VM", vmName)
 		last = out
-		if err == nil && strings.Contains(out, "phase: running") {
-			t.Logf("VM %s reached Running:\n%s", vmName, out)
+		status := decodeVMStatus(t, out)
+		if err == nil && status.Phase == "running" && status.ObservedPowerState == "On" && status.PowerTransition == "None" {
+			t.Logf("VM %s reached Running/On/None:\n%s", vmName, out)
 			return
 		}
 		time.Sleep(3 * time.Second)
 	}
-	t.Fatalf("VM %s did not reach Running before deadline\nlast get:\n%s", vmName, last)
+	t.Fatalf("VM %s did not reach Running/On/None before deadline\nlast get:\n%s", vmName, last)
+}
+
+func waitVMOffConverged(ctx context.Context, t *testing.T, ctl, server string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("context ended before VM reached Off/None: %v\nlast get:\n%s", err, last)
+		}
+		out, err := runCtl(ctx, ctl, "get", "--server", server, "VM", vmName)
+		last = out
+		status := decodeVMStatus(t, out)
+		if err == nil && status.ObservedPowerState == "Off" && status.PowerTransition == "None" {
+			t.Logf("VM %s reached Off/None:\n%s", vmName, out)
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("VM %s did not reach Off/None before deadline\nlast get:\n%s", vmName, last)
+}
+
+func waitVMShutdownRequestedOrOff(ctx context.Context, t *testing.T, ctl, server string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("context ended before VM reached shutdown request or Off/None: %v\nlast get:\n%s", err, last)
+		}
+		out, err := runCtl(ctx, ctl, "get", "--server", server, "VM", vmName)
+		last = out
+		status := decodeVMStatus(t, out)
+		if err == nil {
+			shutdownRequested := status.ObservedPowerState == "On" && status.PowerTransition == "ShutdownRequested"
+			alreadyOff := status.ObservedPowerState == "Off" && status.PowerTransition == "None"
+			if shutdownRequested || alreadyOff {
+				t.Logf("VM %s reached shutdown convergence checkpoint:\n%s", vmName, out)
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("VM %s did not reach ShutdownRequested or Off/None before deadline\nlast get:\n%s", vmName, last)
+}
+
+type vmStatusSnapshot struct {
+	Phase              string `json:"phase"`
+	ObservedPowerState string `json:"observedPowerState"`
+	PowerTransition    string `json:"powerTransition"`
+}
+
+func decodeVMStatus(t *testing.T, out string) vmStatusSnapshot {
+	t.Helper()
+	var obj struct {
+		Status vmStatusSnapshot `json:"status"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out)).Decode(&obj); err != nil {
+		return vmStatusSnapshot{}
+	}
+	return obj.Status
 }
 
 // teardownSpine deletes the spine in reverse dependency order and proves the
