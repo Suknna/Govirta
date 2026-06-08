@@ -137,60 +137,56 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (cont
 		return controller.Done(), nil
 	}
 
-	// Idempotency / liveness loop: if the guest already exists, never re-create.
-	// Re-report its live phase so the master tracks the running guest (存活循环).
-	if existing, err := c.vmm.Status(ctx, obj.UID); err == nil {
-		phase, known := mapVMPhase(existing.Phase)
-		if !known {
-			logger.Warn().
-				Str("key", ev.Key).
-				Str("uuid", obj.UID).
-				Str("vmm_phase", string(existing.Phase)).
-				Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
+	live, err := c.vmm.Status(ctx, obj.UID)
+	if err == nil {
+		return c.reconcileExistingVM(ctx, obj, live)
+	}
+	if !errors.Is(err, vmm.ErrNotFound) {
+		// A real status error (not "not yet created") is transient.
+		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: status %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		if err := c.patchStatus(ctx, obj.Name, obj.Status, vmv1.VMStatus{Phase: phase}); err != nil {
-			return controller.Requeue(), err
+		return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: status %q: %w", obj.Name, err)
+	}
+
+	return c.reconcileMissingVM(ctx, ev.Key, obj)
+}
+
+func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj vmv1.VM) (controller.ReconcileResult, error) {
+	if obj.Spec.PowerState == vmv1.PowerStateShutdown {
+		err := fmt.Errorf("%w: powerState Shutdown is only valid for an existing VM", vmv1.ErrInvalidSpec)
+		desired := vmv1.VMStatus{
+			Phase:              vmv1.VMPhaseFailed,
+			ObservedPowerState: vmv1.ObservedPowerStateOff,
+			PowerTransition:    vmv1.PowerTransitionShutdownRequested,
+			Message:            err.Error(),
 		}
-		// Transient phases (Starting/Stopping) settle on their own; requeue so
-		// the master tracks the guest to a terminal phase instead of freezing at
-		// the in-flight value until an unrelated watch event arrives (M-1).
-		requeue := isTransientPhase(existing.Phase)
-		logger.Info().
-			Str("key", ev.Key).
-			Str("uuid", obj.UID).
-			Str("phase", string(existing.Phase)).
-			Bool("requeue", requeue).
-			Msg("vm already exists; re-reported live phase")
-		if requeue {
-			return controller.Requeue(), nil
+		if perr := c.patchVMStatusIfChanged(ctx, obj.Name, desired); perr != nil {
+			return controller.Done(), fmt.Errorf("vm controller: report invalid shutdown create %q: %w", obj.Name, perr)
 		}
 		return controller.Done(), nil
-	} else if !errors.Is(err, vmm.ErrNotFound) {
-		// A real status error (not "not yet created") is transient.
-		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return controller.Requeue(), fmt.Errorf("vm controller: status %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
-		}
-		return controller.Requeue(), fmt.Errorf("vm controller: status %q: %w", obj.Name, err)
 	}
 
 	// Gate on dependencies and collect the disk paths + tap names they expose.
 	diskPaths, tapNames, ready, err := c.gatherDependencies(ctx, obj)
 	if err != nil {
 		// Dependency read transport error: transient, wait and retry.
-		return controller.Requeue(), fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
+		return controller.RequeueAfter(vmDependencyRequeueDelay), fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
 	}
 	if !ready {
-		logger.Info().Str("key", ev.Key).Msg("vm dependencies not ready; requeuing")
-		return controller.Requeue(), nil
+		logger := zerolog.Ctx(ctx)
+		logger.Info().Str("key", key).Msg("vm dependencies not ready; delayed requeue")
+		return controller.RequeueAfter(vmDependencyRequeueDelay), nil
 	}
 
 	builder, err := c.buildVM(obj, diskPaths, tapNames)
 	if err != nil {
 		// Bad spec (e.g. unsupported arch) is permanent: requeue cannot fix it.
-		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
 			return controller.Done(), fmt.Errorf("vm controller: build %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		logger.Error().Err(err).Str("key", ev.Key).Msg("vm spec rejected permanently (config error); not requeuing")
+		logger := zerolog.Ctx(ctx)
+		logger.Error().Err(err).Str("key", key).Msg("vm spec rejected permanently (config error); not requeuing")
 		return controller.Done(), nil
 	}
 
@@ -205,47 +201,160 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (cont
 			TapNames:  tapNames,
 		},
 	}
-	if _, err := c.vmm.Create(ctx, create); err != nil && !errors.Is(err, vmm.ErrAlreadyExists) {
-		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return controller.Requeue(), fmt.Errorf("vm controller: create %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+	created, err := c.vmm.Create(ctx, create)
+	if err != nil && !errors.Is(err, vmm.ErrAlreadyExists) {
+		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: create %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
-		return controller.Requeue(), fmt.Errorf("vm controller: create %q: %w", obj.Name, err)
+		return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: create %q: %w", obj.Name, err)
+	}
+	if errors.Is(err, vmm.ErrAlreadyExists) {
+		created = vmm.VM{Phase: vmm.PhaseDefined}
+	}
+
+	if obj.Spec.PowerState == vmv1.PowerStateOff {
+		desired, known := vmPowerStatus(obj.Spec.PowerState, created.Phase, "")
+		c.logUnknownPhase(ctx, key, obj.UID, created.Phase, known)
+		if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
+			return controller.RequeueAfter(vmPowerRequeueDelay), err
+		}
+		return controller.Done(), nil
 	}
 
 	started, err := c.vmm.Start(ctx, obj.UID)
 	if err != nil {
-		if perr := c.reportFailure(ctx, obj.Name, obj.Status, err); perr != nil {
-			return controller.Requeue(), fmt.Errorf("vm controller: start %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+		desired := vmv1.VMStatus{
+			Phase:              vmv1.VMPhaseFailed,
+			ObservedPowerState: vmv1.ObservedPowerStateOff,
+			PowerTransition:    vmv1.PowerTransitionStarting,
+			Message:            err.Error(),
 		}
-		return controller.Requeue(), fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
+		if perr := c.patchVMStatusIfChanged(ctx, obj.Name, desired); perr != nil {
+			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: start %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+		}
+		return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
 	}
 
-	startedPhase, known := mapVMPhase(started.Phase)
-	if !known {
-		logger.Warn().
-			Str("key", ev.Key).
-			Str("uuid", obj.UID).
-			Str("vmm_phase", string(started.Phase)).
-			Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
-	}
-	if err := c.patchStatus(ctx, obj.Name, obj.Status, vmv1.VMStatus{Phase: startedPhase}); err != nil {
-		return controller.Requeue(), err
+	desired, known := vmPowerStatus(obj.Spec.PowerState, started.Phase, "")
+	c.logUnknownPhase(ctx, key, obj.UID, started.Phase, known)
+	if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
+		return controller.RequeueAfter(vmPowerRequeueDelay), err
 	}
 
-	// A freshly started guest is typically Starting/Running; if it is still in a
-	// transient phase, requeue to track it to terminal (same liveness rule as the
-	// already-exists path above, M-1).
-	requeue := isTransientPhase(started.Phase)
+	obs := observePower(started.Phase, obj.Spec.PowerState)
+	requeue := powerNeedsDelayedRequeue(obs) || isTransientPhase(started.Phase)
+	logger := zerolog.Ctx(ctx)
 	logger.Info().
-		Str("key", ev.Key).
+		Str("key", key).
 		Str("uuid", obj.UID).
 		Str("phase", string(started.Phase)).
 		Bool("requeue", requeue).
+		Dur("requeue_after", vmPowerRequeueDelay).
 		Msg("vm reconciled")
 	if requeue {
-		return controller.Requeue(), nil
+		return controller.RequeueAfter(vmPowerRequeueDelay), nil
 	}
 	return controller.Done(), nil
+}
+
+func (c *VMController) reconcileExistingVM(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
+	switch obj.Spec.PowerState {
+	case vmv1.PowerStateOn:
+		return c.reconcileExistingVMOn(ctx, obj, live)
+	case vmv1.PowerStateShutdown:
+		return c.reconcileExistingVMShutdown(ctx, obj, live)
+	case vmv1.PowerStateOff:
+		return c.reconcileExistingVMOff(ctx, obj, live)
+	default:
+		err := fmt.Errorf("%w: powerState %q must be one of On, Shutdown, Off", vmv1.ErrInvalidSpec, obj.Spec.PowerState)
+		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+			return controller.Done(), fmt.Errorf("vm controller: report invalid powerState %q: %w", obj.Name, errors.Join(err, perr))
+		}
+		return controller.Done(), nil
+	}
+}
+
+func (c *VMController) reconcileExistingVMOn(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
+	if live.Phase == vmm.PhaseDefined || live.Phase == vmm.PhaseStopped || live.Phase == vmm.PhaseFailed {
+		started, err := c.vmm.Start(ctx, obj.UID)
+		if err != nil {
+			desired := vmv1.VMStatus{
+				Phase:              vmv1.VMPhaseFailed,
+				ObservedPowerState: vmv1.ObservedPowerStateOff,
+				PowerTransition:    vmv1.PowerTransitionStarting,
+				Message:            err.Error(),
+			}
+			if perr := c.patchVMStatusIfChanged(ctx, obj.Name, desired); perr != nil {
+				return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: start %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
+		}
+		return c.patchLivePowerStatus(ctx, obj, started)
+	}
+	return c.patchLivePowerStatus(ctx, obj, live)
+}
+
+func (c *VMController) reconcileExistingVMShutdown(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
+	obs := observePower(live.Phase, obj.Spec.PowerState)
+	if obs.Observed == vmv1.ObservedPowerStateOn {
+		desired := vmStatus(obs, "shutdown requested via ACPI; waiting for guest to power off")
+		if err := c.vmm.Stop(ctx, obj.UID); err != nil {
+			desired.Message = "shutdown request failed: " + err.Error()
+			if perr := c.patchVMStatusIfChanged(ctx, obj.Name, desired); perr != nil {
+				return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: stop %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: stop %q: %w", obj.Name, err)
+		}
+		if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
+			return controller.RequeueAfter(vmPowerRequeueDelay), err
+		}
+		return controller.RequeueAfter(vmPowerRequeueDelay), nil
+	}
+	return c.patchLivePowerStatus(ctx, obj, live)
+}
+
+func (c *VMController) reconcileExistingVMOff(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
+	obs := observePower(live.Phase, obj.Spec.PowerState)
+	if obs.Observed == vmv1.ObservedPowerStateOn {
+		desired := vmStatus(obs, "force power off requested")
+		if err := c.vmm.Kill(ctx, obj.UID); err != nil {
+			desired.Message = "force power off failed: " + err.Error()
+			if perr := c.patchVMStatusIfChanged(ctx, obj.Name, desired); perr != nil {
+				return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: kill %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: kill %q: %w", obj.Name, err)
+		}
+		if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
+			return controller.RequeueAfter(vmPowerRequeueDelay), err
+		}
+		return controller.RequeueAfter(vmPowerRequeueDelay), nil
+	}
+	return c.patchLivePowerStatus(ctx, obj, live)
+}
+
+func (c *VMController) patchLivePowerStatus(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
+	desired, known := vmPowerStatus(obj.Spec.PowerState, live.Phase, "")
+	c.logUnknownPhase(ctx, obj.Name, obj.UID, live.Phase, known)
+	if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
+		return controller.RequeueAfter(vmPowerRequeueDelay), err
+	}
+	obs := observePower(live.Phase, obj.Spec.PowerState)
+	if powerNeedsDelayedRequeue(obs) || isTransientPhase(live.Phase) {
+		return controller.RequeueAfter(vmTransientRequeueDelay), nil
+	}
+	return controller.Done(), nil
+}
+
+func (c *VMController) logUnknownPhase(ctx context.Context, key, uuid string, phase vmm.Phase, known bool) {
+	if known {
+		return
+	}
+	logger := zerolog.Ctx(ctx)
+	logger.Warn().
+		Str("key", key).
+		Str("uuid", uuid).
+		Str("vmm_phase", string(phase)).
+		Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
 }
 
 // gatherDependencies reads every referenced Volume and NIC object's live status.
@@ -458,25 +567,45 @@ func (c *VMController) teardown(ctx context.Context, obj vmv1.VM) (bool, error) 
 	}
 }
 
-// reportFailure patches a failed status carrying cause's message, skipping the
-// PATCH when the observed status already matches (no-op guard).
-func (c *VMController) reportFailure(ctx context.Context, name string, observed vmv1.VMStatus, cause error) error {
-	return c.patchStatus(ctx, name, observed, vmv1.VMStatus{
-		Phase:   vmv1.VMPhaseFailed,
-		Message: cause.Error(),
-	})
+// reportFailure patches a failed status carrying cause's message and complete
+// structured power fields, skipping the PATCH when the fresh master-side VM
+// status already matches.
+func (c *VMController) reportFailure(ctx context.Context, name string, desiredPower vmv1.PowerState, cause error) error {
+	desired := vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseFailed,
+		ObservedPowerState: vmv1.ObservedPowerStateOff,
+		PowerTransition:    vmv1.PowerTransitionNone,
+		Message:            cause.Error(),
+	}
+	if desiredPower == vmv1.PowerStateOn {
+		desired.PowerTransition = vmv1.PowerTransitionStarting
+	}
+	return c.patchVMStatusIfChanged(ctx, name, desired)
+}
+
+// patchVMStatusIfChanged reads the current VM object before comparing status.
+// Delayed self-requeues reuse the old watch Event.Object; comparing against that
+// stale status would repeatedly PATCH an already-current status and recreate the
+// feedback loop Knife 1 fixed.
+func (c *VMController) patchVMStatusIfChanged(ctx context.Context, name string, desired vmv1.VMStatus) error {
+	raw, err := c.client.Get(ctx, c.Kind(), name)
+	if err != nil {
+		return fmt.Errorf("vm controller: get fresh VM %q before status patch: %w", name, err)
+	}
+	var current vmv1.VM
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return fmt.Errorf("vm controller: decode fresh VM %q before status patch: %w", name, err)
+	}
+	if current.Status == desired {
+		return nil
+	}
+	return c.patchStatus(ctx, name, desired)
 }
 
 // patchStatus marshals desired and PATCHes it to the master's /status
-// sub-resource, but only when it differs from observed (the status carried by the
-// watched object). Skipping an identical PATCH breaks the status→MODIFIED→watch→
-// reconcile→PATCH feedback loop that would otherwise spin every reconcile (level-
-// triggered idempotence). The Status structs are comparable (scalar fields only),
-// so == is a sound equality test.
-func (c *VMController) patchStatus(ctx context.Context, name string, observed, desired vmv1.VMStatus) error {
-	if observed == desired {
-		return nil
-	}
+// sub-resource. Callers must use patchVMStatusIfChanged for normal VM status
+// writes so the no-op guard compares against a fresh master object.
+func (c *VMController) patchStatus(ctx context.Context, name string, desired vmv1.VMStatus) error {
 	body, err := json.Marshal(desired)
 	if err != nil {
 		return fmt.Errorf("vm controller: marshal status for %q: %w", name, err)

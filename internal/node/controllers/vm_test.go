@@ -107,6 +107,7 @@ type fakeVMDepReader struct {
 
 	volumes map[string]volumev1.Volume
 	nics    map[string]nicv1.NIC
+	vms     map[string]vmv1.VM
 	getErr  map[string]error
 
 	patched []vmv1.VMStatus
@@ -120,10 +121,17 @@ type fakeVMDepReader struct {
 func (f *fakeVMDepReader) Get(ctx context.Context, kind, name string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ensureVM(name)
 	if err := f.getErr[name]; err != nil {
 		return nil, err
 	}
 	switch kind {
+	case string(metav1.KindVM):
+		vm, ok := f.vms[name]
+		if !ok {
+			return nil, client.ErrNotFound
+		}
+		return json.Marshal(vm)
 	case string(metav1.KindVolume):
 		vol, ok := f.volumes[name]
 		if !ok {
@@ -144,12 +152,29 @@ func (f *fakeVMDepReader) Get(ctx context.Context, kind, name string) ([]byte, e
 func (f *fakeVMDepReader) PatchStatus(ctx context.Context, kind, name string, status []byte) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ensureVM(name)
 	var s vmv1.VMStatus
 	if err := json.Unmarshal(status, &s); err != nil {
 		return nil, err
 	}
 	f.patched = append(f.patched, s)
+	if kind == string(metav1.KindVM) {
+		vm := f.vms[name]
+		vm.Status = s
+		f.vms[name] = vm
+	}
 	return status, nil
+}
+
+func (f *fakeVMDepReader) ensureVM(name string) {
+	if f.vms == nil {
+		f.vms = make(map[string]vmv1.VM)
+	}
+	if _, ok := f.vms[name]; ok || name != "vm-a" {
+		return
+	}
+	vm := validVMObject()
+	f.vms[vm.Name] = vm
 }
 
 // RemoveFinalizer records the teardown finalizer removal so a test can assert
@@ -172,6 +197,12 @@ func (f *fakeVMDepReader) lastPatch(t *testing.T) vmv1.VMStatus {
 		t.Fatalf("no status was patched")
 	}
 	return f.patched[len(f.patched)-1]
+}
+
+func (f *fakeVMDepReader) patchCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.patched)
 }
 
 func readyVolume(name, path string) volumev1.Volume {
@@ -211,6 +242,14 @@ func validVMObject() vmv1.VM {
 			NICRefs:    []string{"nic-a"},
 			PowerState: vmv1.PowerStateOn,
 		},
+	}
+}
+
+func readyVMDepReader(vm vmv1.VM) *fakeVMDepReader {
+	return &fakeVMDepReader{
+		volumes: map[string]volumev1.Volume{"vol-a": readyVolume("vol-a", "/var/lib/govirta/vol-a.qcow2")},
+		nics:    map[string]nicv1.NIC{"nic-a": readyNIC("nic-a", "gvabc1234.0")},
+		vms:     map[string]vmv1.VM{vm.Name: vm},
 	}
 }
 
@@ -256,6 +295,54 @@ func TestVMReconcileAllReadyCreatesAndStarts(t *testing.T) {
 	}
 }
 
+func TestVMReconcilePowerOffCreateDefinesWithoutStart(t *testing.T) {
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.createCalls != 1 {
+		t.Fatalf("Create called %d times, want 1", runner.createCalls)
+	}
+	if runner.startCalls != 0 {
+		t.Fatalf("Start called %d times, want 0 for PowerStateOff create", runner.startCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseDefined || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Defined/Off/None", status)
+	}
+}
+
+func TestVMReconcilePowerOnCreateStarts(t *testing.T) {
+	obj := validVMObject()
+	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound, startPhase: vmm.PhaseRunning}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.createCalls != 1 || runner.startCalls != 1 {
+		t.Fatalf("create=%d start=%d, want 1/1", runner.createCalls, runner.startCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseRunning || status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Running/On/None", status)
+	}
+}
+
 func TestVMReconcileVolumeNotReadyRequeuesWithoutCreate(t *testing.T) {
 	pending := readyVolume("vol-a", "/p")
 	pending.Status.Phase = volumev1.VolumePhasePending
@@ -270,8 +357,8 @@ func TestVMReconcileVolumeNotReadyRequeuesWithoutCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !result.Requeue {
-		t.Fatalf("result.Requeue = false, want true when a volume dependency is not ready")
+	if result.RequeueAfter != vmDependencyRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s when a volume dependency is not ready", result.RequeueAfter, vmDependencyRequeueDelay)
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0 (must not create before dependencies ready)", runner.createCalls)
@@ -292,8 +379,8 @@ func TestVMReconcileNICNotReadyRequeuesWithoutCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !result.Requeue {
-		t.Fatalf("result.Requeue = false, want true when a NIC dependency is not ready")
+	if result.RequeueAfter != vmDependencyRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s when a NIC dependency is not ready", result.RequeueAfter, vmDependencyRequeueDelay)
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0", runner.createCalls)
@@ -312,8 +399,8 @@ func TestVMReconcileMissingDependencyRequeues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !result.Requeue {
-		t.Fatalf("result.Requeue = false, want true when a dependency object is missing")
+	if result.RequeueAfter != vmDependencyRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s when a dependency object is missing", result.RequeueAfter, vmDependencyRequeueDelay)
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0", runner.createCalls)
@@ -355,14 +442,214 @@ func TestVMReconcileAlreadyStartingRequeuesToTrackTerminalPhase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if !result.Requeue {
-		t.Fatalf("result.Requeue = false, want true for a guest in a transient (Starting) phase")
+	if result.RequeueAfter != vmTransientRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s for a guest in a transient (Starting) phase", result.RequeueAfter, vmTransientRequeueDelay)
 	}
 	if runner.createCalls != 0 || runner.startCalls != 0 {
 		t.Fatalf("create=%d start=%d, want 0/0 for an existing guest", runner.createCalls, runner.startCalls)
 	}
 	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseStarting {
 		t.Fatalf("re-reported phase = %q, want starting", phase)
+	}
+}
+
+func TestVMReconcilePowerOnExistingDefinedStoppedFailedStarts(t *testing.T) {
+	for _, phase := range []vmm.Phase{vmm.PhaseDefined, vmm.PhaseStopped, vmm.PhaseFailed} {
+		t.Run(string(phase), func(t *testing.T) {
+			obj := validVMObject()
+			runner := &fakeVMRunner{statusPhase: phase, startPhase: vmm.PhaseRunning}
+			dep := readyVMDepReader(obj)
+			c := NewVMController(runner, dep, cpu.ModelHost)
+
+			result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want nil", err)
+			}
+			if result.Requeue || result.RequeueAfter != 0 {
+				t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+			}
+			if runner.startCalls != 1 {
+				t.Fatalf("Start called %d times, want 1", runner.startCalls)
+			}
+			status := dep.lastPatch(t)
+			if status.Phase != vmv1.VMPhaseRunning || status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionNone {
+				t.Fatalf("patched status = %+v, want Running/On/None", status)
+			}
+		})
+	}
+}
+
+func TestVMReconcileShutdownRunningRequestsStopWithDelayedRequeue(t *testing.T) {
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmPowerRequeueDelay)
+	}
+	if runner.stopCalls != 1 {
+		t.Fatalf("Stop called %d times, want 1", runner.stopCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionShutdownRequested {
+		t.Fatalf("patched status = %+v, want On/ShutdownRequested", status)
+	}
+}
+
+func TestVMReconcileShutdownStoppedIsConvergedNoOp(t *testing.T) {
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.stopCalls != 0 || runner.killCalls != 0 || runner.startCalls != 0 {
+		t.Fatalf("start=%d stop=%d kill=%d, want 0/0/0", runner.startCalls, runner.stopCalls, runner.killCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseStopped || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Stopped/Off/None", status)
+	}
+}
+
+func TestVMReconcilePowerOffRunningKillsWithDelayedRequeue(t *testing.T) {
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmPowerRequeueDelay)
+	}
+	if runner.killCalls != 1 {
+		t.Fatalf("Kill called %d times, want 1", runner.killCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionPoweringOff {
+		t.Fatalf("patched status = %+v, want On/PoweringOff", status)
+	}
+}
+
+func TestVMReconcileStopFailurePatchesStructuredStatusAndDelayedError(t *testing.T) {
+	stopErr := errors.New("acpi failed")
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning, stopErr: stopErr}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err == nil || !errors.Is(err, stopErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, stopErr)
+	}
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmPowerRequeueDelay)
+	}
+	status := dep.lastPatch(t)
+	if status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionShutdownRequested || status.Message == "" {
+		t.Fatalf("patched status = %+v, want On/ShutdownRequested with message", status)
+	}
+	if runner.killCalls != 0 {
+		t.Fatalf("Kill called %d times, want 0 on Stop failure", runner.killCalls)
+	}
+}
+
+func TestVMReconcileKillFailurePatchesStructuredStatusAndDelayedError(t *testing.T) {
+	killErr := errors.New("kill failed")
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning, killErr: killErr}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err == nil || !errors.Is(err, killErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, killErr)
+	}
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmPowerRequeueDelay)
+	}
+	status := dep.lastPatch(t)
+	if status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionPoweringOff || status.Message == "" {
+		t.Fatalf("patched status = %+v, want On/PoweringOff with message", status)
+	}
+}
+
+func TestVMReconcileStatusNoOpUsesFreshVMStatus(t *testing.T) {
+	obj := validVMObject()
+	current := obj
+	current.Status = vmv1.VMStatus{Phase: vmv1.VMPhaseRunning, ObservedPowerState: vmv1.ObservedPowerStateOn, PowerTransition: vmv1.PowerTransitionNone}
+	stale := obj
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
+	dep := readyVMDepReader(current)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, stale))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if got := dep.patchCount(); got != 0 {
+		t.Fatalf("PatchStatus called %d times, want 0 because fresh VM status already matches", got)
+	}
+}
+
+func TestVMReconcilePowerErrorStatusIncludesPowerFields(t *testing.T) {
+	startErr := errors.New("start failed")
+	obj := validVMObject()
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, startErr: startErr}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err == nil || !errors.Is(err, startErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, startErr)
+	}
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmPowerRequeueDelay)
+	}
+	status := dep.lastPatch(t)
+	if status.ObservedPowerState == "" || status.PowerTransition == "" {
+		t.Fatalf("patched status = %+v, want non-empty power fields", status)
+	}
+}
+
+func TestVMReconcileUnknownPhaseStillWritesStructuredPowerStatus(t *testing.T) {
+	obj := validVMObject()
+	runner := &fakeVMRunner{statusPhase: vmm.Phase("drifted")}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.RequeueAfter != vmTransientRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s while desired On observes Off", result.RequeueAfter, vmTransientRequeueDelay)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseFailed || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionStarting {
+		t.Fatalf("patched status = %+v, want Failed/Off/Starting", status)
 	}
 }
 
@@ -378,8 +665,8 @@ func TestVMReconcileCreateFailureRequeues(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Reconcile: expected error on create failure")
 	}
-	if !result.Requeue {
-		t.Fatalf("result.Requeue = false, want true on transient create failure")
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s on transient create failure", result.RequeueAfter, vmPowerRequeueDelay)
 	}
 	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseFailed {
 		t.Fatalf("patched phase = %q, want failed", phase)
@@ -423,8 +710,8 @@ func TestVMReconcileStatusTransientErrorRequeues(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Reconcile: expected error on transient status failure")
 	}
-	if !result.Requeue {
-		t.Fatalf("result.Requeue = false, want true on transient status error")
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s on transient status error", result.RequeueAfter, vmPowerRequeueDelay)
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0 when status probe failed transiently", runner.createCalls)
