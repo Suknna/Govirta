@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -266,6 +267,78 @@ func TestDeleteEndpointAntiSpoofingLeavesNonGovirtaRules(t *testing.T) {
 		}
 	}
 	t.Fatalf("non-Govirta rule was deleted")
+}
+
+// TestDeleteEndpointAntiSpoofingReclaimsEmptyDedicatedChain proves the teardown
+// half of 上下一致: EnsureEndpointAntiSpoofing creates a dedicated gv-as-<tap>
+// base chain, so deleting the last guard in it must reclaim the now-empty chain
+// rather than leave an orphan (the live e2e leak this fix addresses). A second
+// delete is idempotent (chain already gone).
+func TestDeleteEndpointAntiSpoofingReclaimsEmptyDedicatedChain(t *testing.T) {
+	fh := &fakeHandle{}
+	manager := NewManagerWithHandle(fh)
+	ref, err := manager.EnsureEndpointAntiSpoofing(context.Background(), taskEndpointAntiSpoofingSpec())
+	if err != nil {
+		t.Fatalf("EnsureEndpointAntiSpoofing error = %v", err)
+	}
+	chainName := string(ref.Ref.ChainName)
+
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), ref.Ref); err != nil {
+		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
+	}
+
+	// The dedicated chain must be gone from observed state.
+	for _, chain := range fh.chains {
+		if chain != nil && chain.Name == chainName {
+			t.Fatalf("dedicated chain %q still present after delete; chains=%+v", chainName, fh.chains)
+		}
+	}
+	// DelChain must have been issued for the emptied chain.
+	sawDelChain := false
+	for _, call := range fh.calls {
+		if call == fmt.Sprintf("DelChain:bridge:%s:%s", fh.tables[0].Name, chainName) {
+			sawDelChain = true
+		}
+	}
+	if !sawDelChain {
+		t.Fatalf("DelChain not issued for emptied dedicated chain %q; calls=%v", chainName, fh.calls)
+	}
+
+	// Idempotent: a re-driven delete with the chain already gone must not error.
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), ref.Ref); err != nil {
+		t.Fatalf("second DeleteEndpointAntiSpoofing (chain already gone) error = %v, want nil", err)
+	}
+}
+
+// TestDeleteEndpointAntiSpoofingKeepsChainHoldingNonGovirtaRule proves the chain
+// reclaim is conservative: if the dedicated chain still carries any rule (here a
+// non-Govirta rule), the chain is NOT removed, honoring the iron rule that the
+// firewall layer never deletes a chain that still holds rules.
+func TestDeleteEndpointAntiSpoofingKeepsChainHoldingNonGovirtaRule(t *testing.T) {
+	fh := &fakeHandle{}
+	manager := NewManagerWithHandle(fh)
+	ref, err := manager.EnsureEndpointAntiSpoofing(context.Background(), taskEndpointAntiSpoofingSpec())
+	if err != nil {
+		t.Fatalf("EnsureEndpointAntiSpoofing error = %v", err)
+	}
+	chainName := string(ref.Ref.ChainName)
+	// A foreign rule shares the dedicated chain; the chain must survive delete.
+	nonGovirta := &nftables.Rule{Table: fh.tables[0], Chain: fh.chains[0], Handle: 99, UserData: []byte("owner=other")}
+	fh.rules = append(fh.rules, nonGovirta)
+
+	if err := manager.DeleteEndpointAntiSpoofing(context.Background(), ref.Ref); err != nil {
+		t.Fatalf("DeleteEndpointAntiSpoofing error = %v", err)
+	}
+
+	found := false
+	for _, chain := range fh.chains {
+		if chain != nil && chain.Name == chainName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dedicated chain %q removed while it still held a non-Govirta rule", chainName)
+	}
 }
 
 func TestEnsureEndpointAntiSpoofingCanceledContextRecordsNoHandleCalls(t *testing.T) {

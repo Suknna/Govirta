@@ -156,7 +156,9 @@ func deleteObservedForwardGroup(h handle, ref firewall.RuleRef) error {
 	// CIDR identity is stable, so a group delete stays correct under either.
 	selected := groups[ref.GroupKey]
 	if len(selected) == 0 {
-		return nil
+		// Group already gone: still reclaim the now-empty dedicated chain so a
+		// retried delete (rules deleted on a prior pass) leaves no empty chain.
+		return deleteChainIfEmpty(h, ref.Family, ref.TableName, ref.ChainName)
 	}
 
 	table := &nftables.Table{Family: nftFamily(ref.Family), Name: string(ref.TableName)}
@@ -181,7 +183,8 @@ func deleteObservedForwardGroup(h handle, ref firewall.RuleRef) error {
 			}
 		}
 	}
-	return nil
+	// Rules confirmed gone: reclaim the dedicated chain if now empty.
+	return deleteChainIfEmpty(h, ref.Family, ref.TableName, ref.ChainName)
 }
 
 // matchingForwardDetails selects observed forward-accept rules whose guest CIDR

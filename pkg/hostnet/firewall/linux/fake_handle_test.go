@@ -39,6 +39,15 @@ func (f *fakeHandle) AddChain(chain *nftables.Chain) *nftables.Chain {
 
 func (f *fakeHandle) DelChain(chain *nftables.Chain) {
 	f.record(fmt.Sprintf("DelChain:%s:%s:%s", nftFamilyName(chain.Table.Family), chain.Table.Name, chain.Name))
+	// Faithfully model the real kernel: a deleted chain disappears from
+	// subsequent listings. Mirror DelRule's immediate-removal convention so a
+	// test that asserts a reclaimed chain is gone observes real semantics.
+	for i, existing := range f.chains {
+		if existing != nil && sameTable(existing.Table, chain.Table) && existing.Name == chain.Name {
+			f.chains = append(f.chains[:i], f.chains[i+1:]...)
+			return
+		}
+	}
 }
 
 func (f *fakeHandle) AddRule(rule *nftables.Rule) *nftables.Rule {

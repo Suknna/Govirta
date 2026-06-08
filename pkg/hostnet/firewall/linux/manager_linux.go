@@ -112,7 +112,9 @@ func deleteObservedEndpointGroup(h handle, ref firewall.RuleRef) error {
 	// identity is stable, so a group delete stays correct under either.
 	selected := groups[firewall.InterfaceName(ref.GroupKey)]
 	if len(selected) == 0 {
-		return nil
+		// Group already gone: still reclaim the now-empty dedicated chain so a
+		// retried delete (rules deleted on a prior pass) leaves no empty chain.
+		return deleteChainIfEmpty(h, ref.Family, ref.TableName, ref.ChainName)
 	}
 
 	table := &nftables.Table{Family: nftFamily(ref.Family), Name: string(ref.TableName)}
@@ -143,7 +145,8 @@ func deleteObservedEndpointGroup(h handle, ref firewall.RuleRef) error {
 			}
 		}
 	}
-	return nil
+	// Rules confirmed gone: reclaim the dedicated chain if now empty.
+	return deleteChainIfEmpty(h, ref.Family, ref.TableName, ref.ChainName)
 }
 
 func (m *Manager) ListRules(ctx context.Context, filter firewall.RuleFilter) ([]firewall.RuleInfo, error) {
@@ -160,7 +163,9 @@ func (m *Manager) ListRules(ctx context.Context, filter firewall.RuleFilter) ([]
 func deleteObservedRule(h handle, ref firewall.RuleRef) error {
 	if _, err := getObservedRule(h, firewall.RuleQuery{Ref: ref}); err != nil {
 		if errors.Is(err, firewallerr.ErrNotFound) {
-			return nil
+			// Rule already gone: still reclaim the now-empty dedicated chain so a
+			// retried delete (rule deleted on a prior pass) leaves no empty chain.
+			return deleteChainIfEmpty(h, ref.Family, ref.TableName, ref.ChainName)
 		}
 		return err
 	}
@@ -176,9 +181,56 @@ func deleteObservedRule(h handle, ref firewall.RuleRef) error {
 
 	if _, err := getObservedRule(h, firewall.RuleQuery{Ref: ref}); err != nil {
 		if errors.Is(err, firewallerr.ErrNotFound) {
-			return nil
+			// Rule confirmed gone: reclaim the dedicated chain if now empty.
+			return deleteChainIfEmpty(h, ref.Family, ref.TableName, ref.ChainName)
 		}
 		return err
 	}
 	return fmt.Errorf("%w: deleted firewall rule still observed", firewallerr.ErrConflict)
+}
+
+// deleteChainIfEmpty removes a Govirta-owned per-resource base chain once its
+// last rule is gone, so a torn-down network/NIC leaves no empty
+// gv-masq-/gv-fwd-/gv-as- chain behind (上下一致: Ensure* creates the dedicated
+// chain, Delete* must reclaim it). It is deliberately conservative and
+// idempotent:
+//
+//   - chain absent → nothing to do (idempotent on a re-driven delete).
+//   - chain still holds ANY rule → left untouched. This guards the project iron
+//     rule that the firewall layer never removes a chain that still carries
+//     rules; only a verified-empty dedicated chain is reclaimed, so an
+//     out-of-band or not-yet-deleted rule always prevents chain removal.
+//
+// It must be called only for the per-resource base chains the firewall layer
+// itself creates, never for shared/built-in chains.
+func deleteChainIfEmpty(h handle, family firewall.TableFamily, tableName firewall.TableName, chainName firewall.ChainName) error {
+	chains, err := h.GetChains()
+	if err != nil {
+		return err
+	}
+	var target *nftables.Chain
+	for _, chain := range chains {
+		if chain != nil && chain.Table != nil &&
+			chain.Table.Family == nftFamily(family) && chain.Table.Name == string(tableName) &&
+			chain.Name == string(chainName) {
+			target = chain
+			break
+		}
+	}
+	if target == nil {
+		// Chain already gone: nothing to reclaim (idempotent).
+		return nil
+	}
+
+	rules, err := h.GetRules(target.Table, target)
+	if err != nil {
+		return err
+	}
+	if len(rules) > 0 {
+		// Chain still carries rules: never remove a non-empty chain.
+		return nil
+	}
+
+	h.DelChain(target)
+	return h.Flush()
 }
