@@ -31,13 +31,17 @@ var errUnsupportedArch = errors.New("vm controller: unsupported arch")
 
 // VMRunner is the narrow slice of the VM process manager the controller needs:
 // create a daemonized QEMU from a configured builder, start it, read its live
-// phase, and on teardown gracefully stop a running guest then delete its
-// persisted state. *vmm.VMMService satisfies it (积木式 + 可测).
+// phase, and on teardown forcibly kill a running guest then delete its
+// persisted state. Deletion is a destroy intent (ESXi-aligned), so teardown
+// uses forced termination (QMP quit + SIGKILL fallback), not graceful ACPI
+// powerdown — a minimal guest (e.g. CirrOS) ignores ACPI and would otherwise
+// never converge. Graceful guest shutdown is a separate powerState=Off concern.
+// *vmm.VMMService satisfies it (积木式 + 可测).
 type VMRunner interface {
 	Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error)
 	Start(ctx context.Context, uuid string) (vmm.VM, error)
 	Status(ctx context.Context, uuid string) (vmm.VM, error)
-	Stop(ctx context.Context, uuid string) error
+	Kill(ctx context.Context, uuid string) error
 	Delete(ctx context.Context, uuid string) error
 }
 
@@ -396,17 +400,21 @@ func isTransientPhase(p vmm.Phase) bool {
 //
 //   - vmm.ErrNotFound from Status → the state file is already gone: torn down
 //     (done=true). A re-driven teardown lands here and drops the finalizer.
-//   - PhaseRunning / PhaseStarting → still alive: issue a graceful QMP powerdown
-//     (vmm.Stop) and report done=false so the reconcile requeues to await exit.
-//     The finalizer is kept until the process actually leaves.
-//   - PhaseStopping → powerdown already in flight: do nothing, done=false, requeue
-//     to await the terminal state.
+//   - PhaseRunning / PhaseStarting → still alive: forcibly kill the guest
+//     (vmm.Kill = QMP quit + SIGKILL fallback) and report done=false so the
+//     reconcile requeues to await exit. Forced termination does not depend on
+//     guest cooperation, so it converges even for a guest that ignores ACPI
+//     powerdown (e.g. CirrOS); a graceful ACPI stop would loop forever here.
+//     The finalizer is kept until the process actually leaves. Kill is
+//     idempotent, so a requeue that re-issues it on a still-dying guest is safe.
+//   - PhaseStopping → termination already in flight: do nothing, done=false,
+//     requeue to await the terminal state.
 //   - PhaseStopped / PhaseFailed / PhaseDefined → the process is dead: vmm.Delete
 //     removes the persisted runtime state. Deleting an already-gone VM
 //     (vmm.ErrNotFound) is an idempotent success. done=true on a clean delete so
 //     the finalizer is dropped.
 //
-// Any unexpected error (Status / Stop / Delete) is returned so the reconcile
+// Any unexpected error (Status / Kill / Delete) is returned so the reconcile
 // requeues with the finalizer kept; teardown never drops a finalizer on a guest
 // it could not confirm gone.
 func (c *VMController) teardown(ctx context.Context, obj vmv1.VM) (bool, error) {
@@ -421,15 +429,17 @@ func (c *VMController) teardown(ctx context.Context, obj vmv1.VM) (bool, error) 
 
 	switch v.Phase {
 	case vmm.PhaseRunning, vmm.PhaseStarting:
-		// Alive: gracefully power down, then requeue to await process exit. The
-		// finalizer is kept (done=false) until a later pass observes a terminal
-		// phase and reaches Delete.
-		if err := c.vmm.Stop(ctx, obj.UID); err != nil {
-			return false, fmt.Errorf("vm controller: stop %q for teardown: %w", obj.Name, err)
+		// Alive: forcibly kill the guest, then requeue to await process exit.
+		// Kill (QMP quit + SIGKILL fallback) does not depend on guest ACPI
+		// cooperation, so teardown converges even when the guest ignores a
+		// graceful powerdown. The finalizer is kept (done=false) until a later
+		// pass observes a terminal phase and reaches Delete.
+		if err := c.vmm.Kill(ctx, obj.UID); err != nil {
+			return false, fmt.Errorf("vm controller: kill %q for teardown: %w", obj.Name, err)
 		}
 		return false, nil
 	case vmm.PhaseStopping:
-		// Powerdown already in flight: requeue to await the terminal state.
+		// Termination already in flight: requeue to await the terminal state.
 		return false, nil
 	default:
 		// PhaseStopped / PhaseFailed / PhaseDefined: process is dead, remove the

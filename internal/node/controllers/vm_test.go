@@ -31,12 +31,12 @@ type fakeVMRunner struct {
 	startErr   error
 	startPhase vmm.Phase
 
-	stopErr   error
+	killErr   error
 	deleteErr error
 
 	createCalls int
 	startCalls  int
-	stopCalls   int
+	killCalls   int
 	deleteCalls int
 	lastCreate  vmm.CreateRequest
 }
@@ -71,13 +71,13 @@ func (f *fakeVMRunner) Status(ctx context.Context, uuid string) (vmm.VM, error) 
 	return vmm.VM{UUID: uuid, Phase: f.statusPhase}, nil
 }
 
-// Stop records the graceful-powerdown call the teardown state machine issues for
+// Kill records the forced-destroy call the teardown state machine issues for
 // a live guest and returns a canned error. Faithful to *vmm.VMMService.
-func (f *fakeVMRunner) Stop(ctx context.Context, uuid string) error {
+func (f *fakeVMRunner) Kill(ctx context.Context, uuid string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.stopCalls++
-	return f.stopErr
+	f.killCalls++
+	return f.killErr
 }
 
 // Delete records the runtime-state removal the teardown state machine issues once
@@ -463,12 +463,14 @@ func deletingVMObject() vmv1.VM {
 	return vm
 }
 
-// TestVMReconcileTeardownRunningStopsAndRequeuesKeepingFinalizer proves the
-// multi-step teardown's first leg: a live (Running) guest is gracefully powered
-// down (vmm.Stop) and the reconcile requeues WITHOUT dropping the finalizer, so
-// the object stays "deleting" until a later pass observes the process gone.
-// vmm.Delete must not run on a running guest (it would return ErrConflict).
-func TestVMReconcileTeardownRunningStopsAndRequeuesKeepingFinalizer(t *testing.T) {
+// TestVMReconcileTeardownRunningKillsAndRequeuesKeepingFinalizer proves the
+// multi-step teardown's first leg: a live (Running) guest is forcibly destroyed
+// (vmm.Kill — QMP quit + SIGKILL fallback, not ACPI-graceful, since delete means
+// destroy and minimal guests like CirrOS ignore ACPI powerdown) and the reconcile
+// requeues WITHOUT dropping the finalizer, so the object stays "deleting" until a
+// later pass observes the process gone. vmm.Delete must not run on a running
+// guest (it would return ErrConflict).
+func TestVMReconcileTeardownRunningKillsAndRequeuesKeepingFinalizer(t *testing.T) {
 	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseRunning}
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -480,8 +482,8 @@ func TestVMReconcileTeardownRunningStopsAndRequeuesKeepingFinalizer(t *testing.T
 	if !requeue {
 		t.Fatalf("Reconcile() requeue = false, want true while awaiting process exit")
 	}
-	if runner.stopCalls != 1 {
-		t.Fatalf("Stop called %d times, want 1 for a running guest", runner.stopCalls)
+	if runner.killCalls != 1 {
+		t.Fatalf("Kill called %d times, want 1 for a running guest", runner.killCalls)
 	}
 	if runner.deleteCalls != 0 {
 		t.Fatalf("Delete called %d times, want 0 for a still-running guest (would ErrConflict)", runner.deleteCalls)
@@ -494,10 +496,10 @@ func TestVMReconcileTeardownRunningStopsAndRequeuesKeepingFinalizer(t *testing.T
 	}
 }
 
-// TestVMReconcileTeardownStartingStopsAndRequeues proves a guest still coming up
-// (Starting) is also gracefully stopped and requeued without dropping the
+// TestVMReconcileTeardownStartingKillsAndRequeues proves a guest still coming up
+// (Starting) is also forcibly killed and requeued without dropping the
 // finalizer — the same first-leg behavior as Running.
-func TestVMReconcileTeardownStartingStopsAndRequeues(t *testing.T) {
+func TestVMReconcileTeardownStartingKillsAndRequeues(t *testing.T) {
 	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStarting}
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -509,8 +511,8 @@ func TestVMReconcileTeardownStartingStopsAndRequeues(t *testing.T) {
 	if !requeue {
 		t.Fatalf("Reconcile() requeue = false, want true while awaiting process exit")
 	}
-	if runner.stopCalls != 1 {
-		t.Fatalf("Stop called %d times, want 1 for a starting guest", runner.stopCalls)
+	if runner.killCalls != 1 {
+		t.Fatalf("Kill called %d times, want 1 for a starting guest", runner.killCalls)
 	}
 	if runner.deleteCalls != 0 {
 		t.Fatalf("Delete called %d times, want 0 for a not-yet-terminal guest", runner.deleteCalls)
@@ -520,10 +522,10 @@ func TestVMReconcileTeardownStartingStopsAndRequeues(t *testing.T) {
 	}
 }
 
-// TestVMReconcileTeardownStoppingRequeuesWithoutStopOrDelete proves a powerdown
-// already in flight (Stopping) is left alone: no second Stop, no Delete, and the
+// TestVMReconcileTeardownStoppingRequeuesWithoutKillOrDelete proves a kill
+// already in flight (Stopping) is left alone: no second Kill, no Delete, and the
 // finalizer is kept while the reconcile requeues to await the terminal state.
-func TestVMReconcileTeardownStoppingRequeuesWithoutStopOrDelete(t *testing.T) {
+func TestVMReconcileTeardownStoppingRequeuesWithoutKillOrDelete(t *testing.T) {
 	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStopping}
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -535,8 +537,8 @@ func TestVMReconcileTeardownStoppingRequeuesWithoutStopOrDelete(t *testing.T) {
 	if !requeue {
 		t.Fatalf("Reconcile() requeue = false, want true while awaiting terminal state")
 	}
-	if runner.stopCalls != 0 {
-		t.Fatalf("Stop called %d times, want 0 when powerdown already in flight", runner.stopCalls)
+	if runner.killCalls != 0 {
+		t.Fatalf("Kill called %d times, want 0 when kill already in flight", runner.killCalls)
 	}
 	if runner.deleteCalls != 0 {
 		t.Fatalf("Delete called %d times, want 0 while still stopping", runner.deleteCalls)
@@ -562,8 +564,8 @@ func TestVMReconcileTeardownStoppedDeletesAndRemovesFinalizer(t *testing.T) {
 	if requeue {
 		t.Fatalf("Reconcile() requeue = true, want false after delete + finalizer removal")
 	}
-	if runner.stopCalls != 0 {
-		t.Fatalf("Stop called %d times, want 0 for an already-dead guest", runner.stopCalls)
+	if runner.killCalls != 0 {
+		t.Fatalf("Kill called %d times, want 0 for an already-dead guest", runner.killCalls)
 	}
 	if runner.deleteCalls != 1 {
 		t.Fatalf("Delete called %d times, want 1 for a stopped guest", runner.deleteCalls)
@@ -617,8 +619,8 @@ func TestVMReconcileTeardownAlreadyGoneRemovesFinalizer(t *testing.T) {
 	if requeue {
 		t.Fatalf("Reconcile() requeue = true, want false when guest already gone")
 	}
-	if runner.stopCalls != 0 || runner.deleteCalls != 0 {
-		t.Fatalf("stop=%d delete=%d, want 0/0 when state already gone", runner.stopCalls, runner.deleteCalls)
+	if runner.killCalls != 0 || runner.deleteCalls != 0 {
+		t.Fatalf("kill=%d delete=%d, want 0/0 when state already gone", runner.killCalls, runner.deleteCalls)
 	}
 	if dep.removeFinalizerCalls != 1 {
 		t.Fatalf("RemoveFinalizer called %d times, want 1 (already gone is torn down)", dep.removeFinalizerCalls)
@@ -648,24 +650,24 @@ func TestVMReconcileTeardownDeleteNotFoundIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestVMReconcileTeardownStopFailureRequeuesKeepingFinalizer proves a Stop failure
+// TestVMReconcileTeardownKillFailureRequeuesKeepingFinalizer proves a Kill failure
 // keeps the finalizer and requeues: the guest could not be confirmed gone, so the
 // object stays "deleting".
-func TestVMReconcileTeardownStopFailureRequeuesKeepingFinalizer(t *testing.T) {
-	stopErr := errors.New("qmp powerdown failed")
-	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseRunning, stopErr: stopErr}
+func TestVMReconcileTeardownKillFailureRequeuesKeepingFinalizer(t *testing.T) {
+	killErr := errors.New("qmp quit + sigkill failed")
+	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseRunning, killErr: killErr}
 	dep := &fakeVMDepReader{}
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
 	requeue, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, deletingVMObject()))
-	if err == nil || !errors.Is(err, stopErr) {
-		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, stopErr)
+	if err == nil || !errors.Is(err, killErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, killErr)
 	}
 	if !requeue {
-		t.Fatalf("Reconcile() requeue = false, want true on stop failure")
+		t.Fatalf("Reconcile() requeue = false, want true on kill failure")
 	}
 	if dep.removeFinalizerCalls != 0 {
-		t.Fatalf("RemoveFinalizer called %d times, want 0 when stop fails (finalizer kept)", dep.removeFinalizerCalls)
+		t.Fatalf("RemoveFinalizer called %d times, want 0 when kill fails (finalizer kept)", dep.removeFinalizerCalls)
 	}
 }
 
@@ -705,8 +707,8 @@ func TestVMReconcileTeardownStatusErrorRequeuesKeepingFinalizer(t *testing.T) {
 	if !requeue {
 		t.Fatalf("Reconcile() requeue = false, want true on transient status error during teardown")
 	}
-	if runner.stopCalls != 0 || runner.deleteCalls != 0 {
-		t.Fatalf("stop=%d delete=%d, want 0/0 when status could not be read", runner.stopCalls, runner.deleteCalls)
+	if runner.killCalls != 0 || runner.deleteCalls != 0 {
+		t.Fatalf("kill=%d delete=%d, want 0/0 when status could not be read", runner.killCalls, runner.deleteCalls)
 	}
 	if dep.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when status read fails (finalizer kept)", dep.removeFinalizerCalls)
