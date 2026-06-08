@@ -211,8 +211,13 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 						MemoryMiB:  512,
 						VolumeRefs: []string{"vol-root"},
 						NICRefs:    []string{"nic0"},
+						PowerState: vmv1.PowerStateOn,
 					},
-					Status: vmv1.VMStatus{Phase: vmv1.VMPhaseRunning},
+					Status: vmv1.VMStatus{
+						Phase:              vmv1.VMPhaseRunning,
+						ObservedPowerState: vmv1.ObservedPowerStateOn,
+						PowerTransition:    vmv1.PowerTransitionNone,
+					},
 				}
 			}(),
 			verify: func(t *testing.T, b []byte) {
@@ -223,10 +228,10 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 				if out.Kind != metav1.KindVM || out.Name != "vm1" {
 					t.Fatalf("identity mismatch: %+v", out)
 				}
-				if out.Spec.VCPUs != 2 || len(out.Spec.VolumeRefs) != 1 || len(out.Spec.NICRefs) != 1 {
+				if out.Spec.VCPUs != 2 || len(out.Spec.VolumeRefs) != 1 || len(out.Spec.NICRefs) != 1 || out.Spec.PowerState != vmv1.PowerStateOn {
 					t.Fatalf("spec mismatch: %+v", out.Spec)
 				}
-				if out.Status.Phase != vmv1.VMPhaseRunning {
+				if out.Status.Phase != vmv1.VMPhaseRunning || out.Status.ObservedPowerState != vmv1.ObservedPowerStateOn || out.Status.PowerTransition != vmv1.PowerTransitionNone {
 					t.Fatalf("status mismatch: %+v", out.Status)
 				}
 			},

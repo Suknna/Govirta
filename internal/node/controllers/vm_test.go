@@ -200,6 +200,7 @@ func validVMObject() vmv1.VM {
 			MemoryMiB:  2048,
 			VolumeRefs: []string{"vol-a"},
 			NICRefs:    []string{"nic-a"},
+			PowerState: vmv1.PowerStateOn,
 		},
 	}
 }

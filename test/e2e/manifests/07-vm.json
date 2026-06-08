@@ -7,6 +7,7 @@
     "vcpus": 1,
     "memoryMiB": 256,
     "volumeRefs": ["vol-e2e-root"],
-    "nicRefs": ["nic-e2e"]
+    "nicRefs": ["nic-e2e"],
+    "powerState": "On"
   }
 }
