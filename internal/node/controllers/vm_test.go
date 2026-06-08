@@ -121,7 +121,6 @@ type fakeVMDepReader struct {
 func (f *fakeVMDepReader) Get(ctx context.Context, kind, name string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ensureVM(name)
 	if err := f.getErr[name]; err != nil {
 		return nil, err
 	}
@@ -152,29 +151,23 @@ func (f *fakeVMDepReader) Get(ctx context.Context, kind, name string) ([]byte, e
 func (f *fakeVMDepReader) PatchStatus(ctx context.Context, kind, name string, status []byte) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ensureVM(name)
 	var s vmv1.VMStatus
 	if err := json.Unmarshal(status, &s); err != nil {
 		return nil, err
 	}
 	f.patched = append(f.patched, s)
 	if kind == string(metav1.KindVM) {
+		if f.vms == nil {
+			return nil, client.ErrNotFound
+		}
+		if _, ok := f.vms[name]; !ok {
+			return nil, client.ErrNotFound
+		}
 		vm := f.vms[name]
 		vm.Status = s
 		f.vms[name] = vm
 	}
 	return status, nil
-}
-
-func (f *fakeVMDepReader) ensureVM(name string) {
-	if f.vms == nil {
-		f.vms = make(map[string]vmv1.VM)
-	}
-	if _, ok := f.vms[name]; ok || name != "vm-a" {
-		return
-	}
-	vm := validVMObject()
-	f.vms[vm.Name] = vm
 }
 
 // RemoveFinalizer records the teardown finalizer removal so a test can assert
@@ -254,14 +247,12 @@ func readyVMDepReader(vm vmv1.VM) *fakeVMDepReader {
 }
 
 func TestVMReconcileAllReadyCreatesAndStarts(t *testing.T) {
+	obj := validVMObject()
 	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound, startPhase: vmm.PhaseRunning}
-	dep := &fakeVMDepReader{
-		volumes: map[string]volumev1.Volume{"vol-a": readyVolume("vol-a", "/var/lib/govirta/vol-a.qcow2")},
-		nics:    map[string]nicv1.NIC{"nic-a": readyNIC("nic-a", "gvabc1234.0")},
-	}
+	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
@@ -410,11 +401,12 @@ func TestVMReconcileMissingDependencyRequeues(t *testing.T) {
 func TestVMReconcileAlreadyRunningReReportsWithoutCreate(t *testing.T) {
 	// Status returns nil error → guest already exists; controller must re-report
 	// its live phase and never create/start again (存活循环 + 进程解耦).
+	obj := validVMObject()
 	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseRunning}
-	dep := &fakeVMDepReader{}
+	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
@@ -424,8 +416,9 @@ func TestVMReconcileAlreadyRunningReReportsWithoutCreate(t *testing.T) {
 	if runner.createCalls != 0 || runner.startCalls != 0 {
 		t.Fatalf("create=%d start=%d, want 0/0 for an existing guest", runner.createCalls, runner.startCalls)
 	}
-	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseRunning {
-		t.Fatalf("re-reported phase = %q, want running", phase)
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseRunning || status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("re-reported status = %+v, want Running/On/None", status)
 	}
 }
 
@@ -434,11 +427,12 @@ func TestVMReconcileAlreadyStartingRequeuesToTrackTerminalPhase(t *testing.T) {
 	// controller self-drives tracking it to a terminal phase, instead of freezing
 	// the master at Starting until an unrelated watch event arrives (M-1). It
 	// still must not create/start again (存活循环 + 进程解耦).
+	obj := validVMObject()
 	runner := &fakeVMRunner{statusErr: nil, statusPhase: vmm.PhaseStarting}
-	dep := &fakeVMDepReader{}
+	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
-	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, validVMObject()))
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
@@ -614,6 +608,24 @@ func TestVMReconcileStatusNoOpUsesFreshVMStatus(t *testing.T) {
 	}
 }
 
+func TestVMReconcileFreshVMGetFailureReturnsError(t *testing.T) {
+	obj := validVMObject()
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
+	dep := &fakeVMDepReader{}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err == nil || !errors.Is(err, client.ErrNotFound) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, client.ErrNotFound)
+	}
+	if result.RequeueAfter != vmPowerRequeueDelay {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmPowerRequeueDelay)
+	}
+	if got := dep.patchCount(); got != 0 {
+		t.Fatalf("PatchStatus called %d times, want 0 when fresh VM GET fails", got)
+	}
+}
+
 func TestVMReconcilePowerErrorStatusIncludesPowerFields(t *testing.T) {
 	startErr := errors.New("start failed")
 	obj := validVMObject()
@@ -644,8 +656,8 @@ func TestVMReconcileUnknownPhaseStillWritesStructuredPowerStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if result.RequeueAfter != vmTransientRequeueDelay {
-		t.Fatalf("Reconcile() RequeueAfter = %s, want %s while desired On observes Off", result.RequeueAfter, vmTransientRequeueDelay)
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue for unknown phase", result)
 	}
 	status := dep.lastPatch(t)
 	if status.Phase != vmv1.VMPhaseFailed || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionStarting {
@@ -655,10 +667,7 @@ func TestVMReconcileUnknownPhaseStillWritesStructuredPowerStatus(t *testing.T) {
 
 func TestVMReconcileCreateFailureRequeues(t *testing.T) {
 	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound, createErr: errors.New("spawn failed")}
-	dep := &fakeVMDepReader{
-		volumes: map[string]volumev1.Volume{"vol-a": readyVolume("vol-a", "/p")},
-		nics:    map[string]nicv1.NIC{"nic-a": readyNIC("nic-a", "tap0")},
-	}
+	dep := readyVMDepReader(validVMObject())
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
 	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, validVMObject()))
@@ -678,10 +687,7 @@ func TestVMReconcileCreateFailureRequeues(t *testing.T) {
 
 func TestVMReconcileUnsupportedArchIsPermanentFailure(t *testing.T) {
 	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
-	dep := &fakeVMDepReader{
-		volumes: map[string]volumev1.Volume{"vol-a": readyVolume("vol-a", "/p")},
-		nics:    map[string]nicv1.NIC{"nic-a": readyNIC("nic-a", "tap0")},
-	}
+	dep := readyVMDepReader(validVMObject())
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
 	obj := validVMObject()

@@ -240,6 +240,9 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 	if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
 		return controller.RequeueAfter(vmPowerRequeueDelay), err
 	}
+	if !known {
+		return controller.Done(), nil
+	}
 
 	obs := observePower(started.Phase, obj.Spec.PowerState)
 	requeue := powerNeedsDelayedRequeue(obs) || isTransientPhase(started.Phase)
@@ -337,6 +340,9 @@ func (c *VMController) patchLivePowerStatus(ctx context.Context, obj vmv1.VM, li
 	c.logUnknownPhase(ctx, obj.Name, obj.UID, live.Phase, known)
 	if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
 		return controller.RequeueAfter(vmPowerRequeueDelay), err
+	}
+	if !known {
+		return controller.Done(), nil
 	}
 	obs := observePower(live.Phase, obj.Spec.PowerState)
 	if powerNeedsDelayedRequeue(obs) || isTransientPhase(live.Phase) {
