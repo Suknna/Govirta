@@ -220,6 +220,30 @@ func TestManager_WatchErrorCancelsOtherControllers(t *testing.T) {
 	}
 }
 
+func TestManager_ContextCancelDuringWatchReturnsContextCanceled(t *testing.T) {
+	mgr := NewManager(&cancelingWatchSource{}, []Controller{newFakeController("VM")})
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- mgr.Run(ctx) }()
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+type cancelingWatchSource struct{}
+
+func (s *cancelingWatchSource) Watch(ctx context.Context, kind string, startRevision string) (<-chan Event, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 type mixedFailureSource struct {
 	failingKind string
 	event       Event

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -77,6 +78,9 @@ func (m *Manager) feed(ctx context.Context, kind string, q *Queue) error {
 
 		ch, err := m.source.Watch(ctx, kind, lastRV)
 		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
 			return fmt.Errorf("watch kind %q: %w", kind, err)
 		}
 
