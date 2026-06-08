@@ -129,9 +129,9 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (cont
 	obj = current
 
 	// Teardown branch: a deletion-stamped object means apiserver wants this guest
-	// gone. Unlike the other controllers, VM teardown is multi-step (stop-then-
+	// gone. Unlike the other controllers, VM teardown is multi-step (kill-then-
 	// delete): vmm.Delete refuses a running VM (ErrConflict), so a live guest must
-	// first be gracefully powered down and the reconcile requeued until the
+	// first be forcibly terminated and the reconcile requeued until the
 	// process exits. teardown returns done=true only once the guest is fully gone;
 	// done=false means "teardown in progress" → requeue WITHOUT dropping the
 	// finalizer so the object stays "deleting" until the next pass observes the
