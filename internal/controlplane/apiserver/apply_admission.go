@@ -52,26 +52,31 @@ func (s *Server) applyVM(ctx context.Context, key string, vm *vmv1.VM) (store.Ra
 			return store.RawObject{}, err
 		}
 	case ApplyOperationUpdate:
-		if err := preserveVMNodeBinding(existingRaw, vm); err != nil {
-			return store.RawObject{}, badRequest(err)
+		if aerr := preserveVMUpdateMetadata(existingRaw, vm); aerr != nil {
+			return store.RawObject{}, aerr
 		}
 	}
 
 	return s.put(ctx, key, *vm)
 }
 
-func preserveVMNodeBinding(existingRaw []byte, vm *vmv1.VM) error {
+func preserveVMUpdateMetadata(existingRaw []byte, vm *vmv1.VM) *apiError {
 	var existing vmv1.VM
 	if err := json.Unmarshal(existingRaw, &existing); err != nil {
-		return fmt.Errorf("apiserver: decode existing VM %q: %w", vm.Name, err)
+		return internalErr(fmt.Errorf("apiserver: decode existing VM %q: %w", vm.Name, err))
 	}
 
 	if vm.NodeName == "" {
 		vm.NodeName = existing.NodeName
-		return nil
+	} else if existing.NodeName != "" && vm.NodeName != existing.NodeName {
+		return badRequest(fmt.Errorf("%w: nodeName is immutable for VM update: existing %q vs requested %q", vmv1.ErrInvalidSpec, existing.NodeName, vm.NodeName))
 	}
-	if existing.NodeName != "" && vm.NodeName != existing.NodeName {
-		return fmt.Errorf("%w: nodeName is immutable for VM update: existing %q vs requested %q", vmv1.ErrInvalidSpec, existing.NodeName, vm.NodeName)
+
+	vm.ResourceVersion = existing.ResourceVersion
+	vm.DeletionTimestamp = existing.DeletionTimestamp
+	if len(existing.Finalizers) > 0 {
+		vm.Finalizers = append(vm.Finalizers[:0], existing.Finalizers...)
 	}
+
 	return nil
 }

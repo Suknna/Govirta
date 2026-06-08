@@ -508,6 +508,70 @@ func TestApplyVMUpdateRejectsDifferentNodeName(t *testing.T) {
 	}
 }
 
+func TestApplyVMUpdatePreservesServerOwnedMetadata(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedVM(t, st, obj.Name)
+	created.ResourceVersion = "stored-rv"
+	created.DeletionTimestamp = "2026-06-08T12:00:00Z"
+	created.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown, metav1.Finalizer("example.com/other")}
+	data, err := json.Marshal(created)
+	if err != nil {
+		t.Fatalf("marshal stored VM: %v", err)
+	}
+	if _, err := st.Put(context.Background(), storeKey(metav1.KindVM, obj.Name), data, ""); err != nil {
+		t.Fatalf("overwrite stored VM: %v", err)
+	}
+
+	update := validVM()
+	update.Spec.PowerState = vmv1.PowerStateShutdown
+	update.Finalizers = nil
+	update.DeletionTimestamp = ""
+	update.ResourceVersion = ""
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.ResourceVersion != created.ResourceVersion {
+		t.Fatalf("stored resourceVersion = %q, want preserved %q", stored.ResourceVersion, created.ResourceVersion)
+	}
+	if stored.DeletionTimestamp != created.DeletionTimestamp {
+		t.Fatalf("stored deletionTimestamp = %q, want preserved %q", stored.DeletionTimestamp, created.DeletionTimestamp)
+	}
+	if len(stored.Finalizers) != len(created.Finalizers) {
+		t.Fatalf("stored finalizers = %v, want preserved %v", stored.Finalizers, created.Finalizers)
+	}
+	for i := range created.Finalizers {
+		if stored.Finalizers[i] != created.Finalizers[i] {
+			t.Fatalf("stored finalizers = %v, want preserved %v", stored.Finalizers, created.Finalizers)
+		}
+	}
+	if stored.Spec.PowerState != vmv1.PowerStateShutdown {
+		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateShutdown)
+	}
+}
+
+func TestApplyVMUpdateCorruptExistingReturnsInternalError(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if _, err := st.Put(context.Background(), storeKey(metav1.KindVM, obj.Name), []byte("{"), ""); err != nil {
+		t.Fatalf("seed corrupt VM: %v", err)
+	}
+
+	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("update status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func storedVM(t *testing.T, st store.Store, name string) vmv1.VM {
 	t.Helper()
 	raw, err := st.Get(context.Background(), storeKey(metav1.KindVM, name))
