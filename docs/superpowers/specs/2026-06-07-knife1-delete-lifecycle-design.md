@@ -127,6 +127,7 @@ finalizers 清空那一刻（由 §7 的 finalizer 端点触发）：
 | --- | --- | --- | --- |
 | StoragePool | Volume | `spec.poolRef` | Pool **对象名** |
 | StoragePool | Volume | `spec.imageFilePoolRef` | Pool **对象名**（root volume 的镜像文件池） |
+| StoragePool | Image | `spec.filePoolRef` | Pool **对象名**（镜像本身所在的文件池） |
 | Network | NIC | `spec.networkRef` | Network **对象名** |
 | Image | Volume | `spec.imageRef` | Image **对象名** |
 | Volume | VM | `spec.volumeRefs[]` | Volume **对象名** |
@@ -136,7 +137,7 @@ finalizers 清空那一刻（由 §7 的 finalizer 端点触发）：
 **陷阱（spec 必须明示，否则扫不中）**：
 - `VM.spec.volumeRefs[]` / `nicRefs[]` 用的是**对象名**（被删 Volume/NIC 的 `metadata.name`）。
 - 但 `Volume.spec.vmRef` / `NIC.spec.vmRef` 用的是 **VM uid**（不是 name）——本刀不靠它做引用扫描（删 VM 无下游），但实现时不可混淆 name/uid。
-- 删 Pool 要扫 Volume 的**两个**字段（`poolRef` 块池 + `imageFilePoolRef` 镜像文件池），任一命中即被引用。
+- 删 Pool 要扫 Volume 的**两个**字段（`poolRef` 块池 + `imageFilePoolRef` 镜像文件池）**以及** Image 的 `filePoolRef`（镜像本身所在的文件池），任一命中即被引用。漏扫 Image.filePoolRef 会放行一个只装镜像、无卷引用的 file 池，留下悬挂的 `Image.filePoolRef` → 孤儿镜像。
 
 ### 实现
 
@@ -144,6 +145,7 @@ finalizers 清空那一刻（由 §7 的 finalizer 端点触发）：
 referenceGuard(ctx, kind, name):
   switch kind:
     Pool    → List(Volume)，任一 vol.poolRef==name || vol.imageFilePoolRef==name → 被引用
+              List(Image)，任一 img.filePoolRef==name → 被引用
     Network → List(NIC)，任一 nic.networkRef==name → 被引用
     Image   → List(Volume)，任一 vol.imageRef==name → 被引用
     Volume  → List(VM)，任一 vm.volumeRefs 含 name → 被引用

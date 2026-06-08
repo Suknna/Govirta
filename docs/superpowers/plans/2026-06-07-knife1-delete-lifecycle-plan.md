@@ -297,7 +297,7 @@ Goal: `referenceGuard(ctx, kind, name) (referencedBy string, referenced bool, er
 ```go
 // referenceGuard 报告 kind/name 是否被任一下游对象引用，返回首个引用者的 "Kind/Name"。
 // 引用图（标识符均为对象 name）：
-//   Pool    ← Volume.poolRef | Volume.imageFilePoolRef
+//   Pool    ← Volume.poolRef | Volume.imageFilePoolRef | Image.filePoolRef
 //   Network ← NIC.networkRef
 //   Image   ← Volume.imageRef
 //   Volume  ← VM.volumeRefs[]
