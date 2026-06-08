@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/suknna/govirta/internal/controlplane/store"
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
@@ -354,4 +355,168 @@ func TestApplyVMScheduleInjectsNodeTeardownFinalizer(t *testing.T) {
 	if len(stored.Finalizers) != len(want) || stored.Finalizers[0] != want[0] {
 		t.Fatalf("stored finalizers = %v, want %v (lost across bindVM schedule + put)", stored.Finalizers, want)
 	}
+}
+
+func TestApplyVMCreateRejectsShutdownPowerState(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	obj.Spec.PowerState = vmv1.PowerStateShutdown
+
+	rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+	if _, err := st.Get(context.Background(), storeKey(metav1.KindVM, obj.Name)); err == nil {
+		t.Fatalf("rejected VM must not be stored")
+	}
+}
+
+func TestApplyVMCreateAcceptsOnAndOffPowerStates(t *testing.T) {
+	for _, powerState := range []vmv1.PowerState{vmv1.PowerStateOn, vmv1.PowerStateOff} {
+		t.Run(string(powerState), func(t *testing.T) {
+			srv, st := newTestServer(t)
+			obj := validVM()
+			obj.Name = "vm-" + string(powerState)
+			obj.UID = "uid-" + string(powerState)
+			obj.Spec.PowerState = powerState
+
+			rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+			}
+
+			stored := storedVM(t, st, obj.Name)
+			if stored.Spec.PowerState != powerState {
+				t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, powerState)
+			}
+		})
+	}
+}
+
+func TestApplyVMUpdateAllowsShutdownPowerState(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	update := validVM()
+	update.Spec.PowerState = vmv1.PowerStateShutdown
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.Spec.PowerState != vmv1.PowerStateShutdown {
+		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateShutdown)
+	}
+}
+
+func TestApplyVMUpdatePreservesExistingNodeNameWhenOmitted(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedVM(t, st, obj.Name)
+	if created.NodeName == "" {
+		t.Fatalf("fixture failed: created VM was not scheduled")
+	}
+
+	update := validVM()
+	update.NodeName = ""
+	update.Spec.PowerState = vmv1.PowerStateShutdown
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.NodeName != created.NodeName {
+		t.Fatalf("stored nodeName = %q, want preserved %q", stored.NodeName, created.NodeName)
+	}
+	if stored.Spec.PowerState != vmv1.PowerStateShutdown {
+		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateShutdown)
+	}
+
+	var resp vmv1.VM
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response VM: %v", err)
+	}
+	if resp.NodeName != created.NodeName {
+		t.Fatalf("response nodeName = %q, want preserved %q", resp.NodeName, created.NodeName)
+	}
+}
+
+func TestApplyVMUpdateAllowsExplicitSameNodeName(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedVM(t, st, obj.Name)
+
+	update := validVM()
+	update.NodeName = created.NodeName
+	update.Spec.PowerState = vmv1.PowerStateShutdown
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.NodeName != created.NodeName {
+		t.Fatalf("stored nodeName = %q, want %q", stored.NodeName, created.NodeName)
+	}
+}
+
+func TestApplyVMUpdateRejectsDifferentNodeName(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedVM(t, st, obj.Name)
+
+	update := validVM()
+	update.NodeName = "node-2"
+	update.Spec.PowerState = vmv1.PowerStateShutdown
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.NodeName != created.NodeName {
+		t.Fatalf("stored nodeName = %q, want unchanged %q", stored.NodeName, created.NodeName)
+	}
+	if stored.Spec.PowerState != created.Spec.PowerState {
+		t.Fatalf("stored powerState = %q, want unchanged %q", stored.Spec.PowerState, created.Spec.PowerState)
+	}
+}
+
+func storedVM(t *testing.T, st store.Store, name string) vmv1.VM {
+	t.Helper()
+	raw, err := st.Get(context.Background(), storeKey(metav1.KindVM, name))
+	if err != nil {
+		t.Fatalf("get stored VM %s: %v", name, err)
+	}
+	var stored vmv1.VM
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored VM %s: %v", name, err)
+	}
+	return stored
 }

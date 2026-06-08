@@ -198,16 +198,8 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		if err := requireName(name, obj.Name); err != nil {
 			return nil, badRequest(err)
 		}
-		// Admission-time placement: a VM with no explicit node binding is scheduled
-		// onto one of the configured candidate nodes, and the chosen node is written
-		// back before the object is persisted. The binding lives in ObjectMeta.NodeName
-		// (not VMSpec — confirmed by the apis layer), which the node watch filters on.
-		// A VM that already names a node is left as-is so a caller can pin placement.
 		injectFinalizer(&obj.ObjectMeta)
-		if err := s.bindVM(ctx, &obj); err != nil {
-			return nil, err
-		}
-		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
+		raw, aerr := s.applyVM(ctx, storeKey(kind, obj.Name), &obj)
 		if aerr != nil {
 			return nil, aerr
 		}
