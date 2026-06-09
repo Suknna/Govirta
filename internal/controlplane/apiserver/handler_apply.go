@@ -34,18 +34,6 @@ import (
 // resource collection does not exist).
 var ErrUnknownKind = errors.New("apiserver: unknown resource kind")
 
-// ErrNameMismatch is returned when the {name} path segment disagrees with the
-// submitted object's metadata.name. The URL identity and the body identity must
-// agree so a write cannot silently land under a key the caller did not address.
-var ErrNameMismatch = errors.New("apiserver: path name does not match metadata.name")
-
-// ErrNetworkAdmission is returned when a Network spec passes its own apis-layer
-// Validate() (every field is individually well-formed) but is not internally
-// self-consistent: a negative lease, an inverted DHCP range, or a gateway/DHCP
-// address outside the declared subnet. This cross-field check is the apiserver's
-// admission responsibility and is deliberately not pushed down into apis/node.
-var ErrNetworkAdmission = errors.New("apiserver: network admission failed")
-
 // The Server struct, NewServer constructor, and Handler() router live in
 // server.go alongside the Run(ctx) lifecycle; this file holds the apply pipeline
 // that Server.Apply dispatches into. All methods thread ctx from the inbound
