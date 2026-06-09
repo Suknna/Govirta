@@ -116,6 +116,48 @@ func TestApplyVolumeRootMissingImageRefRejected(t *testing.T) {
 	}
 }
 
+func TestApplyNICRejectsDeletingNetworkReference(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	network := validNetwork()
+	if rec := doApply(t, srv, metav1.KindNetwork, network.Name, network); rec.Code != http.StatusCreated {
+		t.Fatalf("seed network apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	stored := storedRaw(t, st, metav1.KindNetwork, network.Name)
+	network.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	network.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	data, err := json.Marshal(network)
+	if err != nil {
+		t.Fatalf("marshal deleting Network: %v", err)
+	}
+	if _, err := st.Put(context.Background(), storeKey(metav1.KindNetwork, network.Name), data, stored.ResourceVersion); err != nil {
+		t.Fatalf("stamp deleting Network: %v", err)
+	}
+	seedOwnerVMRef(t, st, "uid-vm-a")
+
+	nic := validNIC()
+	rec := doApplyWithoutReferenceSeeds(t, srv, metav1.KindNIC, nic.Name, nic)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+}
+
+func TestApplyVMRejectsMissingVolumeReference(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	vm := validVM()
+	rec := doApplyWithoutReferenceSeeds(t, srv, metav1.KindVM, vm.Name, vm)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+}
+
 func TestApplyNICEmptyMACGetsAllocated(t *testing.T) {
 	srv, st := newTestServer(t)
 

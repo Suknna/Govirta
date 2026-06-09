@@ -10,6 +10,7 @@ func PreApplyChain(st StoreReader) Chain {
 		ApplyOperationValidator{},
 		VMPowerStateValidator{},
 		FieldPolicyValidator{},
+		ReferenceValidator{Store: st},
 	)
 }
 

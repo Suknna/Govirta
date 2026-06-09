@@ -48,6 +48,12 @@ func newTestServer(t *testing.T) (*Server, *fake.Store) {
 // returns the recorded response. Body is the marshalled obj.
 func doApply(t *testing.T, srv *Server, kind metav1.Kind, name string, obj any) *httptest.ResponseRecorder {
 	t.Helper()
+	seedApplyReferences(t, srv.store, obj)
+	return doApplyWithoutReferenceSeeds(t, srv, kind, name, obj)
+}
+
+func doApplyWithoutReferenceSeeds(t *testing.T, srv *Server, kind metav1.Kind, name string, obj any) *httptest.ResponseRecorder {
+	t.Helper()
 	data, err := json.Marshal(obj)
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
@@ -56,6 +62,120 @@ func doApply(t *testing.T, srv *Server, kind metav1.Kind, name string, obj any) 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func seedApplyReferences(t *testing.T, st store.Store, obj any) {
+	t.Helper()
+	switch o := obj.(type) {
+	case imagev1.Image:
+		seedStoragePoolRef(t, st, o.Spec.FilePoolRef, storagepoolv1.PoolTypeFile)
+	case volumev1.Volume:
+		seedStoragePoolRef(t, st, o.Spec.PoolRef, storagepoolv1.PoolTypeBlock)
+		seedOwnerVMRef(t, st, o.Spec.VMRef)
+		if o.Spec.ImageRef != "" {
+			seedImageRef(t, st, o.Spec.ImageRef, o.Spec.ImageFilePoolRef)
+		}
+		if o.Spec.ImageFilePoolRef != "" {
+			seedStoragePoolRef(t, st, o.Spec.ImageFilePoolRef, storagepoolv1.PoolTypeFile)
+		}
+	case nicv1.NIC:
+		seedNetworkRef(t, st, o.Spec.NetworkRef)
+		seedOwnerVMRef(t, st, o.Spec.VMRef)
+	case vmv1.VM:
+		for _, name := range o.Spec.VolumeRefs {
+			seedVolumeRef(t, st, name, o.UID)
+		}
+		for _, name := range o.Spec.NICRefs {
+			seedNICRef(t, st, name, o.UID)
+		}
+	}
+}
+
+func seedStoragePoolRef(t *testing.T, st store.Store, name string, poolType storagepoolv1.PoolType) {
+	t.Helper()
+	if name == "" {
+		return
+	}
+	pool := validStoragePool()
+	pool.Name = name
+	pool.UID = "uid-" + name
+	pool.Spec.Type = poolType
+	if poolType == storagepoolv1.PoolTypeBlock {
+		pool.Spec.Backend = storagepoolv1.BackendLocalBlock
+	}
+	pool.Spec.StorageRoot = "/var/lib/govirta/" + name
+	seedStoreObject(t, st, metav1.KindStoragePool, name, pool)
+}
+
+func seedImageRef(t *testing.T, st store.Store, name, filePoolRef string) {
+	t.Helper()
+	if name == "" {
+		return
+	}
+	image := validImage()
+	image.Name = name
+	image.UID = "uid-" + name
+	image.Spec.FilePoolRef = filePoolRef
+	seedStoreObject(t, st, metav1.KindImage, name, image)
+}
+
+func seedNetworkRef(t *testing.T, st store.Store, name string) {
+	t.Helper()
+	if name == "" {
+		return
+	}
+	network := validNetwork()
+	network.Name = name
+	network.UID = "uid-" + name
+	seedStoreObject(t, st, metav1.KindNetwork, name, network)
+}
+
+func seedOwnerVMRef(t *testing.T, st store.Store, uid string) {
+	t.Helper()
+	if uid == "" {
+		return
+	}
+	vm := validVM()
+	vm.Name = "owner-" + uid
+	vm.UID = uid
+	vm.Spec.VolumeRefs = []string{"owner-volume-" + uid}
+	vm.Spec.NICRefs = []string{"owner-nic-" + uid}
+	seedStoreObject(t, st, metav1.KindVM, vm.Name, vm)
+}
+
+func seedVolumeRef(t *testing.T, st store.Store, name, vmUID string) {
+	t.Helper()
+	if name == "" {
+		return
+	}
+	volume := validVolume()
+	volume.Name = name
+	volume.UID = "uid-" + name
+	volume.Spec.VMRef = vmUID
+	seedStoreObject(t, st, metav1.KindVolume, name, volume)
+}
+
+func seedNICRef(t *testing.T, st store.Store, name, vmUID string) {
+	t.Helper()
+	if name == "" {
+		return
+	}
+	nic := validNIC()
+	nic.Name = name
+	nic.UID = "uid-" + name
+	nic.Spec.VMRef = vmUID
+	seedStoreObject(t, st, metav1.KindNIC, name, nic)
+}
+
+func seedStoreObject(t *testing.T, st store.Store, kind metav1.Kind, name string, obj any) {
+	t.Helper()
+	data, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal seed %s/%s: %v", kind, name, err)
+	}
+	if _, err := st.Put(context.Background(), storeKey(kind, name), data, ""); err != nil {
+		t.Fatalf("seed %s/%s: %v", kind, name, err)
+	}
 }
 
 // decodeError extracts the {"error": "..."} envelope from a recorded response.

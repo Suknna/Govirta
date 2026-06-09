@@ -31,6 +31,7 @@ func runTestServer(t *testing.T) (string, func()) {
 		t.Fatalf("new pool: %v", err)
 	}
 	alloc := mac.NewAllocator(pool, st)
+	seedApplyReferences(t, st, validVM())
 	// A real node candidate so the apply VM branch binds rather than 503s, and a
 	// noop scheduler so the chosen node is deterministic (the first candidate).
 	srv := NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")

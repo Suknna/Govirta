@@ -185,11 +185,11 @@ func TestDeleteRepeatedIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestDeleteStampedThenReferencedReturns409 covers the state3 re-scan: after an
-// object is stamped (deletion in progress), a new object references it, and a
-// subsequent DELETE must catch that fresh reference and return 409 — proving the
-// guard runs on the already-deleting path, not only on first delete.
-func TestDeleteStampedThenReferencedReturns409(t *testing.T) {
+// TestApplyCannotReferenceStampedObject covers the apply-side guard that closes
+// the former delete window: after an object is stamped, a new object cannot start
+// referencing it, so no fresh downstream reference can appear before finalizers
+// drain.
+func TestApplyCannotReferenceStampedObject(t *testing.T) {
 	srv, _ := newTestServer(t)
 
 	vol := validVolume()
@@ -202,20 +202,17 @@ func TestDeleteStampedThenReferencedReturns409(t *testing.T) {
 		t.Fatalf("first delete = %d, want 202; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// A new VM now references the deleting Volume — the time window between stamp
-	// and real delete that state3's re-scan exists to defend.
+	// A new VM now tries to reference the deleting Volume. Apply admission must
+	// reject it before it can create the former stamp-to-finalize window.
 	vm := validVM()
-	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {
-		t.Fatalf("seed vm apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	if rec := doApplyWithoutReferenceSeeds(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusConflict {
+		t.Fatalf("vm apply = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
 	rec := doDelete(t, srv, metav1.KindVolume, vol.Name)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (state3 re-scan must catch the new reference); body=%s",
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (failed apply must not create a fresh reference); body=%s",
 			rec.Code, rec.Body.String())
-	}
-	if want := refIdentity(metav1.KindVM, vm.Name); !strings.Contains(decodeError(t, rec), want) {
-		t.Fatalf("error does not name the referencing object %q; body=%s", want, rec.Body.String())
 	}
 }
 
