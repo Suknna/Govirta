@@ -13,6 +13,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -114,6 +115,12 @@ func decodeStatus(kind metav1.Kind, raw []byte) (statusValidator, error) {
 		return s, nil
 	case metav1.KindVM:
 		var s vmv1.VMStatus
+		if err := decodeStrictStatus(raw, &s); err != nil {
+			return nil, fmt.Errorf("decode %s status: %w", kind, err)
+		}
+		return s, nil
+	case metav1.KindSnapshot:
+		var s snapshotv1.SnapshotStatus
 		if err := decodeStrictStatus(raw, &s); err != nil {
 			return nil, fmt.Errorf("decode %s status: %w", kind, err)
 		}

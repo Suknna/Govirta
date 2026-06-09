@@ -7,6 +7,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -126,6 +127,16 @@ func TestObjectHelpersAcceptFullResourceObjects(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "snapshot-a",
+			kind: metav1.KindSnapshot,
+			obj: snapshotv1.Snapshot{
+				TypeMeta:   typeMeta(metav1.KindSnapshot),
+				ObjectMeta: objectMeta("snapshot-a"),
+				Spec:       snapshotv1.SnapshotSpec{VMRef: "vm-a"},
+				Status:     snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseReady},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -176,6 +187,7 @@ func TestStatusAcceptsBareStatusObjects(t *testing.T) {
 		{name: "network", obj: networkv1.NetworkStatus{Phase: networkv1.NetworkPhaseReady}},
 		{name: "nic", obj: nicv1.NICStatus{Phase: nicv1.NICPhaseReady}},
 		{name: "vm", obj: vmv1.VMStatus{Phase: vmv1.VMPhaseRunning, ObservedPowerState: vmv1.ObservedPowerStateOn, PowerTransition: vmv1.PowerTransitionNone}},
+		{name: "snapshot", obj: snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseReady}},
 	}
 
 	for _, tt := range tests {
@@ -256,6 +268,56 @@ func TestStatusAcceptsBareStatusPointers(t *testing.T) {
 	}
 	if err := validator.Validate(); err != nil {
 		t.Fatalf("Status().Validate() error = %v, want nil", err)
+	}
+}
+
+func TestObjectHelpersAcceptSnapshotPointer(t *testing.T) {
+	obj := snapshotv1.Snapshot{
+		TypeMeta:   typeMeta(metav1.KindSnapshot),
+		ObjectMeta: objectMeta("snapshot-pointer"),
+		Spec:       snapshotv1.SnapshotSpec{VMRef: "vm-a"},
+		Status:     snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseReady},
+	}
+
+	meta, err := Metadata(&obj)
+	if err != nil {
+		t.Fatalf("Metadata() error = %v, want nil", err)
+	}
+	if meta.Name != "snapshot-pointer" {
+		t.Fatalf("Metadata().Name = %q, want snapshot-pointer", meta.Name)
+	}
+
+	tm, err := TypeMeta(&obj)
+	if err != nil {
+		t.Fatalf("TypeMeta() error = %v, want nil", err)
+	}
+	if tm.Kind != metav1.KindSnapshot {
+		t.Fatalf("TypeMeta().Kind = %q, want %q", tm.Kind, metav1.KindSnapshot)
+	}
+
+	spec, err := Spec(&obj)
+	if err != nil {
+		t.Fatalf("Spec() error = %v, want nil", err)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("Spec().Validate() error = %v, want nil", err)
+	}
+
+	status, err := Status(&obj)
+	if err != nil {
+		t.Fatalf("Status() error = %v, want nil", err)
+	}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Status().Validate() error = %v, want nil", err)
+	}
+
+	bareStatus := snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseReady}
+	validator, err := Status(&bareStatus)
+	if err != nil {
+		t.Fatalf("Status(&SnapshotStatus) error = %v, want nil", err)
+	}
+	if err := validator.Validate(); err != nil {
+		t.Fatalf("Status(&SnapshotStatus).Validate() error = %v, want nil", err)
 	}
 }
 

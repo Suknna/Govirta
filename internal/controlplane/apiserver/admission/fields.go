@@ -9,6 +9,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -96,9 +97,29 @@ func (v FieldPolicyValidator) Validate(ctx context.Context, req Request) error {
 			return Reject(v.Name(), ReasonInternal, fmt.Errorf("new object type %T is not StoragePool", req.NewObject))
 		}
 		return v.validateStoragePool(oldPool, newPool)
+	case metav1.KindSnapshot:
+		oldSnap, ok := oldObj.(snapshotv1.Snapshot)
+		if !ok {
+			return Reject(v.Name(), ReasonInternal, fmt.Errorf("old object type %T is not Snapshot", req.OldObject))
+		}
+		newSnap, ok := newObj.(snapshotv1.Snapshot)
+		if !ok {
+			return Reject(v.Name(), ReasonInternal, fmt.Errorf("new object type %T is not Snapshot", req.NewObject))
+		}
+		return v.validateSnapshot(oldSnap, newSnap)
 	default:
 		return Reject(v.Name(), ReasonInternal, fmt.Errorf("unsupported kind %q", req.Kind))
 	}
+}
+
+// validateSnapshot enforces that a Snapshot's spec is fully immutable after
+// creation. SnapshotSpec holds a single comparable string field (vmRef), so a
+// struct == comparison is a sound whole-spec immutability check.
+func (v FieldPolicyValidator) validateSnapshot(oldSnap, newSnap snapshotv1.Snapshot) error {
+	if oldSnap.Spec != newSnap.Spec {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("%w: snapshot spec is immutable", snapshotv1.ErrInvalidSpec))
+	}
+	return nil
 }
 
 func (v FieldPolicyValidator) validateVM(oldVM, newVM vmv1.VM) error {

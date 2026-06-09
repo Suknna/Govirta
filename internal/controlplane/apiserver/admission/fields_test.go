@@ -140,6 +140,25 @@ func TestFieldPolicyRejectsStoragePoolSpecChange(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonConflict)
 }
 
+func TestFieldPolicyRejectsSnapshotSpecChange(t *testing.T) {
+	old := validAdmissionSnapshot()
+	obj := old
+	obj.Spec.VMRef = "other-vm"
+
+	err := validateFieldPolicyUpdate(metav1.KindSnapshot, old.Name, old, obj)
+	assertAdmissionReason(t, err, ReasonConflict)
+}
+
+func TestFieldPolicyAllowsSnapshotUnchangedSpec(t *testing.T) {
+	old := validAdmissionSnapshot()
+	obj := old
+
+	err := validateFieldPolicyUpdate(metav1.KindSnapshot, old.Name, old, obj)
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
 func validateFieldPolicyUpdate(kind metav1.Kind, name string, oldObj, newObj any) error {
 	return FieldPolicyValidator{}.Validate(context.Background(), Request{
 		Operation: OperationUpdate,

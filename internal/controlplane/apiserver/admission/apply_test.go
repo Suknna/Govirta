@@ -8,6 +8,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 )
 
@@ -167,5 +168,13 @@ func validAdmissionNIC() nicv1.NIC {
 			VMRef:      "uid-vm-a",
 			IP:         "192.168.100.50",
 		},
+	}
+}
+
+func validAdmissionSnapshot() snapshotv1.Snapshot {
+	return snapshotv1.Snapshot{
+		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindSnapshot},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", UID: "uid-snap-a"},
+		Spec:       snapshotv1.SnapshotSpec{VMRef: "vm-a"},
 	}
 }

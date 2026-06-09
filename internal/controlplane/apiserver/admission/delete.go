@@ -22,19 +22,20 @@ import (
 //	Network     <- NIC.networkRef
 //	Volume      <- VM.volumeRefs[]
 //	NIC         <- VM.nicRefs[]
-//	VM          <- (nothing)
+//	VM          <- Snapshot.spec.vmRef (by name)
 //
-// A VM has no reverse edge: it is the apex of the ownership tree. VM.volumeRefs /
-// VM.nicRefs make Volume/NIC prerequisites of the VM (so they cannot be deleted
-// while the VM names them), but the Volume.vmRef / NIC.vmRef backpointers are
-// ownership, not a dependency the VM has — they must NOT block deleting the VM.
-// Reverse teardown deletes the VM first (its object disappears once its finalizer
-// drains), which removes the volumeRefs/nicRefs edges and unblocks the owned
-// Volume/NIC. Blocking VM deletion on those backpointers would deadlock teardown:
-// the Volume cannot go (VM still names it) and the VM cannot go (Volume points
-// back), so nothing is ever removed. The vmRef backpointer is enforced only on
-// the apply side (ReferenceValidator rejects attaching a Volume/NIC to a
-// deleting VM); delete protection deliberately ignores it.
+// A VM's only reverse delete edge is Snapshot.spec.vmRef: a Snapshot names its
+// target VM by NAME, so the VM cannot be deleted while a Snapshot still points at
+// it. VM.volumeRefs / VM.nicRefs make Volume/NIC prerequisites of the VM (so they
+// cannot be deleted while the VM names them), but the Volume.vmRef / NIC.vmRef
+// backpointers are ownership, not a dependency the VM has — they must NOT block
+// deleting the VM. Reverse teardown deletes the VM first (its object disappears
+// once its finalizer drains), which removes the volumeRefs/nicRefs edges and
+// unblocks the owned Volume/NIC. Blocking VM deletion on those backpointers would
+// deadlock teardown: the Volume cannot go (VM still names it) and the VM cannot go
+// (Volume points back), so nothing is ever removed. The vmRef backpointer is
+// enforced only on the apply side (ReferenceValidator rejects attaching a
+// Volume/NIC to a deleting VM); delete protection deliberately ignores it.
 //
 // Each scan decodes a minimal projection (metadata.name plus the spec ref fields
 // it needs), never a whole typed object. A store list or projection decode
@@ -94,6 +95,17 @@ type vmDeleteRefProjection struct {
 	Spec struct {
 		VolumeRefs []string `json:"volumeRefs"`
 		NICRefs    []string `json:"nicRefs"`
+	} `json:"spec"`
+}
+
+// snapshotDeleteRefProjection decodes a Snapshot's vmRef, which names the target
+// VM (by NAME, not the uid backpointer Volume/NIC use).
+type snapshotDeleteRefProjection struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec struct {
+		VMRef string `json:"vmRef"`
 	} `json:"spec"`
 }
 
@@ -208,12 +220,27 @@ func (v ReverseReferenceValidator) Validate(ctx context.Context, req Request) er
 		return nil
 
 	case metav1.KindVM:
-		// A VM has no reverse delete edge: it is the apex of the ownership tree.
-		// Volume.vmRef / NIC.vmRef are ownership backpointers, not dependencies the
-		// VM has, so they must not block deleting the VM (see the type doc for why
-		// blocking here deadlocks reverse teardown). The apply-side
-		// ReferenceValidator still prevents attaching a new Volume/NIC to a
-		// deleting VM, which is where that backpointer is enforced.
+		// A VM is referenced by Snapshot.spec.vmRef (by VM NAME). Knife 3 made VM
+		// the apex with no reverse edge; Snapshot is the first legitimate VM
+		// downstream reference (see knife4 spec §4.3). Volume.vmRef / NIC.vmRef are
+		// ownership backpointers (uids), not dependencies the VM has, so they must
+		// not block deleting the VM (see the type doc for why blocking on them
+		// deadlocks reverse teardown). The apply-side ReferenceValidator still
+		// prevents attaching a new Volume/NIC to a deleting VM, which is where that
+		// backpointer is enforced.
+		snaps, err := v.list(ctx, metav1.KindSnapshot, req.Kind)
+		if err != nil {
+			return err
+		}
+		for _, raw := range snaps {
+			var proj snapshotDeleteRefProjection
+			if derr := json.Unmarshal(raw.Value, &proj); derr != nil {
+				return v.decodeReject(metav1.KindSnapshot, raw.Key, derr)
+			}
+			if proj.Spec.VMRef == req.Name {
+				return v.reject(req.Kind, req.Name, metav1.KindSnapshot, proj.Metadata.Name)
+			}
+		}
 		return nil
 
 	default:

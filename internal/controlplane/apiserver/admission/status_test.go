@@ -11,6 +11,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -89,6 +90,7 @@ func TestStatusTypeValidatorAcceptsAllKnownStatuses(t *testing.T) {
 		{name: "network", kind: metav1.KindNetwork, status: networkv1.NetworkStatus{Phase: networkv1.NetworkPhaseReady}},
 		{name: "nic", kind: metav1.KindNIC, status: nicv1.NICStatus{Phase: nicv1.NICPhaseReady}},
 		{name: "vm", kind: metav1.KindVM, status: vmv1.VMStatus{Phase: vmv1.VMPhaseRunning, ObservedPowerState: vmv1.ObservedPowerStateOn, PowerTransition: vmv1.PowerTransitionNone}},
+		{name: "snapshot", kind: metav1.KindSnapshot, status: snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseReady}},
 	}
 
 	for _, tt := range tests {
@@ -116,6 +118,17 @@ func TestStatusTypeValidatorRejectsInvalidPhase(t *testing.T) {
 		Operation: OperationStatusPatch,
 		Kind:      metav1.KindStoragePool,
 		Name:      "pool-a",
+		NewRaw:    body,
+	})
+	assertAdmissionReason(t, err, ReasonBadRequest)
+}
+
+func TestStatusTypeValidatorRejectsInvalidSnapshotPhase(t *testing.T) {
+	body := []byte(`{"phase":"unknown"}`)
+	err := StatusTypeValidator{}.Validate(context.Background(), Request{
+		Operation: OperationStatusPatch,
+		Kind:      metav1.KindSnapshot,
+		Name:      "snap-a",
 		NewRaw:    body,
 	})
 	assertAdmissionReason(t, err, ReasonBadRequest)

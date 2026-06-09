@@ -133,6 +133,59 @@ func TestReferenceValidatorAllowsReadyReferenceGraph(t *testing.T) {
 	}
 }
 
+// TestReferenceValidatorRejectsMissingSnapshotVMRef proves a Snapshot names its
+// target VM by NAME and that the VM must already exist: an absent VM is a 400,
+// unlike Volume/NIC's forward-uid vmRef which tolerates an absent VM.
+func TestReferenceValidatorRejectsMissingSnapshotVMRef(t *testing.T) {
+	st := newReferenceTestStore(t)
+
+	obj := validAdmissionSnapshot()
+	err := ReferenceValidator{Store: st}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindSnapshot,
+		Name:      obj.Name,
+		NewObject: obj,
+	})
+	assertAdmissionReason(t, err, ReasonBadRequest)
+}
+
+// TestReferenceValidatorRejectsDeletingSnapshotVMRef proves a Snapshot cannot be
+// created against a VM that is already deletion-marked, closing the
+// stamp-to-finalize window from the apply side.
+func TestReferenceValidatorRejectsDeletingSnapshotVMRef(t *testing.T) {
+	st := newReferenceTestStore(t)
+	deletingVM := validAdmissionVM()
+	deletingVM.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	seedReferenceObject(t, st, deletingVM)
+
+	obj := validAdmissionSnapshot()
+	err := ReferenceValidator{Store: st}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindSnapshot,
+		Name:      obj.Name,
+		NewObject: obj,
+	})
+	assertAdmissionReason(t, err, ReasonConflict)
+}
+
+// TestReferenceValidatorAllowsSnapshotReadyVMRef proves a Snapshot is admitted
+// when its target VM exists and is not deleting.
+func TestReferenceValidatorAllowsSnapshotReadyVMRef(t *testing.T) {
+	st := newReferenceTestStore(t)
+	seedReferenceObject(t, st, validAdmissionVM())
+
+	obj := validAdmissionSnapshot()
+	err := ReferenceValidator{Store: st}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindSnapshot,
+		Name:      obj.Name,
+		NewObject: obj,
+	})
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil (target VM exists and is not deleting)", err)
+	}
+}
+
 func newReferenceTestStore(t *testing.T) *fake.Store {
 	t.Helper()
 	st := fake.New()

@@ -7,6 +7,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -38,6 +39,8 @@ func Metadata(obj any) (metav1.ObjectMeta, error) {
 		return o.ObjectMeta, nil
 	case vmv1.VM:
 		return o.ObjectMeta, nil
+	case snapshotv1.Snapshot:
+		return o.ObjectMeta, nil
 	default:
 		return metav1.ObjectMeta{}, fmt.Errorf("unsupported object type %T", obj)
 	}
@@ -60,6 +63,8 @@ func TypeMeta(obj any) (metav1.TypeMeta, error) {
 	case nicv1.NIC:
 		return o.TypeMeta, nil
 	case vmv1.VM:
+		return o.TypeMeta, nil
+	case snapshotv1.Snapshot:
 		return o.TypeMeta, nil
 	default:
 		return metav1.TypeMeta{}, fmt.Errorf("unsupported object type %T", obj)
@@ -84,6 +89,8 @@ func Spec(obj any) (specValidator, error) {
 		return o.Spec, nil
 	case vmv1.VM:
 		return o.Spec, nil
+	case snapshotv1.Snapshot:
+		return o.Spec, nil
 	default:
 		return nil, fmt.Errorf("unsupported object type %T", obj)
 	}
@@ -107,6 +114,8 @@ func Status(obj any) (statusValidator, error) {
 		return o.Status, nil
 	case vmv1.VM:
 		return o.Status, nil
+	case snapshotv1.Snapshot:
+		return o.Status, nil
 	case storagepoolv1.StoragePoolStatus:
 		return o, nil
 	case imagev1.ImageStatus:
@@ -118,6 +127,8 @@ func Status(obj any) (statusValidator, error) {
 	case nicv1.NICStatus:
 		return o, nil
 	case vmv1.VMStatus:
+		return o, nil
+	case snapshotv1.SnapshotStatus:
 		return o, nil
 	default:
 		return nil, fmt.Errorf("unsupported object type %T", obj)
@@ -156,6 +167,11 @@ func normalizeObject(obj any) (any, error) {
 			return nil, fmt.Errorf("unsupported nil object type %T", obj)
 		}
 		return *o, nil
+	case *snapshotv1.Snapshot:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
 	case *storagepoolv1.StoragePoolStatus:
 		if o == nil {
 			return nil, fmt.Errorf("unsupported nil object type %T", obj)
@@ -182,6 +198,11 @@ func normalizeObject(obj any) (any, error) {
 		}
 		return *o, nil
 	case *vmv1.VMStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *snapshotv1.SnapshotStatus:
 		if o == nil {
 			return nil, fmt.Errorf("unsupported nil object type %T", obj)
 		}

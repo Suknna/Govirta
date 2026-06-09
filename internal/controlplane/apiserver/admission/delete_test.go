@@ -183,6 +183,47 @@ func TestDeleteReferenceValidatorDecodeErrorIsInternal(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonInternal)
 }
 
+// TestDeleteReferenceValidatorRejectsVMReferencedBySnapshot proves a VM is
+// reference-blocked while a Snapshot's spec.vmRef names it (by NAME). This is
+// the VM's only reverse-delete edge: Knife 3 made VM the apex, and Snapshot is
+// the first legitimate downstream reference.
+func TestDeleteReferenceValidatorRejectsVMReferencedBySnapshot(t *testing.T) {
+	st := newReferenceTestStore(t)
+	seedReferenceObject(t, st, validAdmissionSnapshot()) // vmRef: vm-a
+
+	err := ReverseReferenceValidator{Store: st}.Validate(
+		context.Background(), deleteRequest(metav1.KindVM, "vm-a", "uid-vm-a"))
+	assertAdmissionReason(t, err, ReasonConflict)
+	assertReferencedBy(t, err, "Snapshot/snap-a")
+}
+
+// TestDeleteReferenceValidatorAllowsVMWithoutSnapshot proves a VM may be deleted
+// when no Snapshot names it, even while a Volume and a NIC still carry its UID in
+// their vmRef ownership backpointer. Those backpointers are ownership, not a VM
+// dependency, so they must not block deleting the VM (blocking would deadlock
+// reverse teardown). Snapshot is the only edge that blocks a VM delete.
+func TestDeleteReferenceValidatorAllowsVMWithoutSnapshot(t *testing.T) {
+	st := newReferenceTestStore(t)
+	vol := dataAdmissionVolume("vol-owned")
+	vol.Spec.VMRef = "uid-vm-a"
+	seedReferenceObject(t, st, vol)
+	nic := admissionNIC("nic-owned")
+	nic.Spec.VMRef = "uid-vm-a"
+	seedReferenceObject(t, st, nic)
+	// A Snapshot that names a different VM must not block this VM's delete.
+	otherSnap := validAdmissionSnapshot()
+	otherSnap.Name = "snap-other"
+	otherSnap.UID = "uid-snap-other"
+	otherSnap.Spec.VMRef = "vm-elsewhere"
+	seedReferenceObject(t, st, otherSnap)
+
+	err := ReverseReferenceValidator{Store: st}.Validate(
+		context.Background(), deleteRequest(metav1.KindVM, "vm-a", "uid-vm-a"))
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil (no Snapshot names this VM)", err)
+	}
+}
+
 // assertReferencedBy checks that the admission error preserves the historical
 // "still referenced by <Kind>/<name>" message contract and names the referrer.
 func assertReferencedBy(t *testing.T, err error, refIdentity string) {

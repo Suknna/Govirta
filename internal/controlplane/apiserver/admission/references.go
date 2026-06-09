@@ -10,6 +10,7 @@ import (
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
@@ -82,6 +83,12 @@ func (v ReferenceValidator) Validate(ctx context.Context, req Request) error {
 			}
 		}
 		return nil
+	case snapshotv1.Snapshot:
+		// A Snapshot names its target VM by NAME (not the uid backpointer that
+		// Volume/NIC use). The VM must already exist and not be deleting, so a
+		// by-name upstream check is the correct rule: missing -> 400, deleting ->
+		// 409.
+		return v.requireByName(ctx, metav1.KindVM, o.Spec.VMRef)
 	default:
 		return nil
 	}
