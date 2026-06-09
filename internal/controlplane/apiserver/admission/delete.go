@@ -271,7 +271,7 @@ func (v ReverseReferenceValidator) decodeReject(listKind metav1.Kind, key string
 // "still referenced by <Kind>/<name>" contract callers (and tests) depend on to
 // learn what must be removed before the delete can proceed.
 func (v ReverseReferenceValidator) reject(targetKind metav1.Kind, targetName string, refKind metav1.Kind, refName string) error {
-	return Reject(targetName, ReasonConflict, fmt.Errorf("%s/%s still referenced by %s/%s", targetKind, targetName, refKind, refName))
+	return Reject(v.Name(), ReasonConflict, fmt.Errorf("%s/%s still referenced by %s/%s", targetKind, targetName, refKind, refName))
 }
 
 // targetUID resolves the deletion target's UID for the VM reverse-reference scan.

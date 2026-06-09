@@ -228,6 +228,42 @@ func TestDeleteReferenceValidatorDecodeErrorIsInternal(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonInternal)
 }
 
+// TestDeleteReferenceValidatorEmptyVMUIDIsReferenceClear proves the safety-
+// critical short-circuit: a VM with no UID can never be the target of any
+// vmRef, so even when Volume/NIC carry an empty vmRef the scan must not produce
+// a false match. Seeds a Volume and a NIC with empty vmRef and deletes a VM with
+// empty UID; the result must be reference-clear, never a spurious conflict.
+func TestDeleteReferenceValidatorEmptyVMUIDIsReferenceClear(t *testing.T) {
+	st := newReferenceTestStore(t)
+	vol := dataAdmissionVolume("vol-empty-vmref")
+	vol.Spec.VMRef = ""
+	seedReferenceObject(t, st, vol)
+	nic := admissionNIC("nic-empty-vmref")
+	nic.Spec.VMRef = ""
+	seedReferenceObject(t, st, nic)
+
+	err := ReverseReferenceValidator{Store: st}.Validate(
+		context.Background(), deleteRequest(metav1.KindVM, "vm-no-uid", ""))
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil (empty UID cannot match empty vmRef)", err)
+	}
+}
+
+// TestDeleteReferenceValidatorMissingTargetMetadataIsInternal proves the
+// targetUID total-failure path: when a VM delete request carries neither typed
+// OldObject metadata nor OldRaw bytes, the UID cannot be resolved and the scan
+// surfaces Internal (500) rather than silently treating the VM as unreferenced.
+func TestDeleteReferenceValidatorMissingTargetMetadataIsInternal(t *testing.T) {
+	st := newReferenceTestStore(t)
+
+	err := ReverseReferenceValidator{Store: st}.Validate(context.Background(), Request{
+		Operation: OperationDelete,
+		Kind:      metav1.KindVM,
+		Name:      "vm-a",
+	})
+	assertAdmissionReason(t, err, ReasonInternal)
+}
+
 // assertReferencedBy checks that the admission error preserves the historical
 // "still referenced by <Kind>/<name>" message contract and names the referrer.
 func assertReferencedBy(t *testing.T, err error, refIdentity string) {
