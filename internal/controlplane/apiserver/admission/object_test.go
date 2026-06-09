@@ -191,6 +191,86 @@ func TestStatusAcceptsBareStatusObjects(t *testing.T) {
 	}
 }
 
+func TestObjectHelpersAcceptPointerObjects(t *testing.T) {
+	obj := vmv1.VM{
+		TypeMeta:   typeMeta(metav1.KindVM),
+		ObjectMeta: objectMeta("vm-pointer"),
+		Spec: vmv1.VMSpec{
+			Arch:       "aarch64",
+			VCPUs:      2,
+			MemoryMiB:  1024,
+			VolumeRefs: []string{"volume-a"},
+			NICRefs:    []string{"nic-a"},
+			PowerState: vmv1.PowerStateOn,
+		},
+		Status: vmv1.VMStatus{
+			Phase:              vmv1.VMPhaseRunning,
+			ObservedPowerState: vmv1.ObservedPowerStateOn,
+			PowerTransition:    vmv1.PowerTransitionNone,
+		},
+	}
+
+	meta, err := Metadata(&obj)
+	if err != nil {
+		t.Fatalf("Metadata() error = %v, want nil", err)
+	}
+	if meta.Name != "vm-pointer" {
+		t.Fatalf("Metadata().Name = %q, want vm-pointer", meta.Name)
+	}
+
+	tm, err := TypeMeta(&obj)
+	if err != nil {
+		t.Fatalf("TypeMeta() error = %v, want nil", err)
+	}
+	if tm.Kind != metav1.KindVM {
+		t.Fatalf("TypeMeta().Kind = %q, want %q", tm.Kind, metav1.KindVM)
+	}
+
+	spec, err := Spec(&obj)
+	if err != nil {
+		t.Fatalf("Spec() error = %v, want nil", err)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("Spec().Validate() error = %v, want nil", err)
+	}
+
+	status, err := Status(&obj)
+	if err != nil {
+		t.Fatalf("Status() error = %v, want nil", err)
+	}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Status().Validate() error = %v, want nil", err)
+	}
+}
+
+func TestStatusAcceptsBareStatusPointers(t *testing.T) {
+	status := vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseRunning,
+		ObservedPowerState: vmv1.ObservedPowerStateOn,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	}
+
+	validator, err := Status(&status)
+	if err != nil {
+		t.Fatalf("Status() error = %v, want nil", err)
+	}
+	if err := validator.Validate(); err != nil {
+		t.Fatalf("Status().Validate() error = %v, want nil", err)
+	}
+}
+
+func TestObjectHelpersRejectNilPointers(t *testing.T) {
+	var vm *vmv1.VM
+	if _, err := Metadata(vm); err == nil {
+		t.Fatalf("Metadata(nil *VM) error = nil, want unsupported nil pointer error")
+	}
+
+	var status *vmv1.VMStatus
+	if _, err := Status(status); err == nil {
+		t.Fatalf("Status(nil *VMStatus) error = nil, want unsupported nil pointer error")
+	}
+}
+
 func TestObjectHelpersRejectUnknownObjectTypes(t *testing.T) {
 	unknown := struct{}{}
 	tests := []struct {

@@ -21,6 +21,10 @@ type statusValidator interface {
 }
 
 func Metadata(obj any) (metav1.ObjectMeta, error) {
+	obj, err := normalizeObject(obj)
+	if err != nil {
+		return metav1.ObjectMeta{}, err
+	}
 	switch o := obj.(type) {
 	case storagepoolv1.StoragePool:
 		return o.ObjectMeta, nil
@@ -40,6 +44,10 @@ func Metadata(obj any) (metav1.ObjectMeta, error) {
 }
 
 func TypeMeta(obj any) (metav1.TypeMeta, error) {
+	obj, err := normalizeObject(obj)
+	if err != nil {
+		return metav1.TypeMeta{}, err
+	}
 	switch o := obj.(type) {
 	case storagepoolv1.StoragePool:
 		return o.TypeMeta, nil
@@ -59,6 +67,10 @@ func TypeMeta(obj any) (metav1.TypeMeta, error) {
 }
 
 func Spec(obj any) (specValidator, error) {
+	obj, err := normalizeObject(obj)
+	if err != nil {
+		return nil, err
+	}
 	switch o := obj.(type) {
 	case storagepoolv1.StoragePool:
 		return o.Spec, nil
@@ -78,6 +90,10 @@ func Spec(obj any) (specValidator, error) {
 }
 
 func Status(obj any) (statusValidator, error) {
+	obj, err := normalizeObject(obj)
+	if err != nil {
+		return nil, err
+	}
 	switch o := obj.(type) {
 	case storagepoolv1.StoragePool:
 		return o.Status, nil
@@ -105,5 +121,72 @@ func Status(obj any) (statusValidator, error) {
 		return o, nil
 	default:
 		return nil, fmt.Errorf("unsupported object type %T", obj)
+	}
+}
+
+func normalizeObject(obj any) (any, error) {
+	switch o := obj.(type) {
+	case *storagepoolv1.StoragePool:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *imagev1.Image:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *volumev1.Volume:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *networkv1.Network:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *nicv1.NIC:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *vmv1.VM:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *storagepoolv1.StoragePoolStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *imagev1.ImageStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *volumev1.VolumeStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *networkv1.NetworkStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *nicv1.NICStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	case *vmv1.VMStatus:
+		if o == nil {
+			return nil, fmt.Errorf("unsupported nil object type %T", obj)
+		}
+		return *o, nil
+	default:
+		return obj, nil
 	}
 }
