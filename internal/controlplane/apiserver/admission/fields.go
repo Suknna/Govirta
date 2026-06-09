@@ -112,16 +112,6 @@ func (v FieldPolicyValidator) Validate(ctx context.Context, req Request) error {
 	}
 }
 
-// validateSnapshot enforces that a Snapshot's spec is fully immutable after
-// creation. SnapshotSpec holds a single comparable string field (vmRef), so a
-// struct == comparison is a sound whole-spec immutability check.
-func (v FieldPolicyValidator) validateSnapshot(oldSnap, newSnap snapshotv1.Snapshot) error {
-	if oldSnap.Spec != newSnap.Spec {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("%w: snapshot spec is immutable", snapshotv1.ErrInvalidSpec))
-	}
-	return nil
-}
-
 func (v FieldPolicyValidator) validateVM(oldVM, newVM vmv1.VM) error {
 	if oldVM.Spec.Arch != newVM.Spec.Arch {
 		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.arch is immutable for VM update: existing %q vs requested %q", oldVM.Spec.Arch, newVM.Spec.Arch))
@@ -248,6 +238,16 @@ func (v FieldPolicyValidator) validateStoragePool(oldPool, newPool storagepoolv1
 	}
 	if oldSpec.CapacityBytes != newSpec.CapacityBytes {
 		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.capacityBytes is immutable for StoragePool update: existing %d vs requested %d", oldSpec.CapacityBytes, newSpec.CapacityBytes))
+	}
+	return nil
+}
+
+// validateSnapshot enforces that a Snapshot's spec is fully immutable after
+// creation. SnapshotSpec holds a single comparable string field (vmRef), so a
+// struct == comparison is a sound whole-spec immutability check.
+func (v FieldPolicyValidator) validateSnapshot(oldSnap, newSnap snapshotv1.Snapshot) error {
+	if oldSnap.Spec != newSnap.Spec {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec is immutable for Snapshot update: existing %q vs requested %q", oldSnap.Spec.VMRef, newSnap.Spec.VMRef))
 	}
 	return nil
 }
