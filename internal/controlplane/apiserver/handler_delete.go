@@ -93,8 +93,9 @@ func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 	// 反向引用保护经 admission DeleteChain：被下游引用（作为前置依赖）则拒绝（409），强制
 	// 调用者先删依赖对象。本检查在"首次打戳"（状态2）和"重复删除/删除进行中"（状态3）两条
 	// 入口路径上同样运行——状态3 仍重扫是额外一层防护，拒绝在删除窗口内 out-of-band 冒出的
-	// 新引用。VM 是所有权树顶点、无反向依赖边，可直接删除（Volume.vmRef/NIC.vmRef 是归属
-	// 回指针，不是 VM 的删除前置依赖，仅在 apply 侧由 ReferenceValidator 约束）。
+	// 新引用。VM 现在有唯一的反向删除边 Snapshot.spec.vmRef（删 VM 前必须先删指向它的
+	// Snapshot），见 admission ReverseReferenceValidator；Volume.vmRef/NIC.vmRef 仍是归属
+	// 回指针、不阻塞删 VM，仅在 apply 侧由 ReferenceValidator 约束。
 	admissionReq := admission.Request{
 		Operation: admission.OperationDelete,
 		Kind:      kind,

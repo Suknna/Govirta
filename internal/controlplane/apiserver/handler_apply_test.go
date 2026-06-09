@@ -14,6 +14,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -30,6 +31,7 @@ func TestApplyValidObjectsPersist(t *testing.T) {
 		{"Volume", metav1.KindVolume, func() any { return validVolume() }},
 		{"Network", metav1.KindNetwork, func() any { return validNetwork() }},
 		{"VM", metav1.KindVM, func() any { return validVM() }},
+		{"Snapshot", metav1.KindSnapshot, func() any { return validSnapshot() }},
 	}
 
 	for _, tc := range cases {
@@ -49,6 +51,8 @@ func TestApplyValidObjectsPersist(t *testing.T) {
 			case networkv1.Network:
 				objName = v.Name
 			case vmv1.VM:
+				objName = v.Name
+			case snapshotv1.Snapshot:
 				objName = v.Name
 			default:
 				t.Fatalf("unexpected fixture type %T", v)
@@ -875,6 +879,108 @@ func TestApplyVMUpdateCorruptExistingReturnsInternalError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("update status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestApplySnapshotInjectsNodeNameFromTargetVM 验证：apply 一个 Snapshot 时，apiserver
+// 不接受用户提供的 nodeName，而是从 spec.vmRef 指向的目标 VM 派生 nodeName 并落盘——
+// 快照必须跑在持有该 VM qcow2 文件的节点上（确定性派生，单一真相源）。本测试 seed 一个
+// nodeName=node-1 的目标 VM，apply 指向它的 Snapshot，断言落盘 Snapshot.nodeName==node-1。
+func TestApplySnapshotInjectsNodeNameFromTargetVM(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validSnapshot()
+	if obj.NodeName != "" {
+		t.Fatalf("fixture precondition: Snapshot NodeName must be empty (server-derived)")
+	}
+
+	rec := doApply(t, srv, metav1.KindSnapshot, obj.Name, obj)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The seeded target VM (seedSnapshotVMRef) is bound to node-1.
+	target := storedVM(t, st, obj.Spec.VMRef)
+	if target.NodeName == "" {
+		t.Fatalf("fixture failed: seeded target VM has no nodeName")
+	}
+
+	stored := storedSnapshot(t, st, obj.Name)
+	if stored.NodeName != target.NodeName {
+		t.Fatalf("stored Snapshot nodeName = %q, want target VM nodeName %q", stored.NodeName, target.NodeName)
+	}
+
+	// The response body must reflect the derived nodeName too.
+	var resp snapshotv1.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response Snapshot: %v", err)
+	}
+	if resp.NodeName != target.NodeName {
+		t.Fatalf("response nodeName = %q, want %q", resp.NodeName, target.NodeName)
+	}
+}
+
+// TestApplySnapshotReResolvesNodeNameOnUpdate 验证 I1 修复：Snapshot 的 nodeName 在
+// create 和 update 两条路径上都重新解析。一次完全相同的 re-apply（Snapshot spec 不可变，
+// 任何 re-apply 都分类为 update）不携带 nodeName，若只在 create 注入，update 会落空
+// nodeName，node watch（?nodeName=）将停止路由它。本测试先 create 再 re-apply，断言
+// 落盘 nodeName 仍稳定等于目标 VM 的 nodeName。
+func TestApplySnapshotReResolvesNodeNameOnUpdate(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validSnapshot()
+	if rec := doApply(t, srv, metav1.KindSnapshot, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedSnapshot(t, st, obj.Name)
+	if created.NodeName == "" {
+		t.Fatalf("created Snapshot nodeName is empty")
+	}
+
+	// Re-apply the identical Snapshot (an update) carrying no nodeName.
+	update := validSnapshot()
+	if update.NodeName != "" {
+		t.Fatalf("fixture precondition: re-apply body must carry no nodeName")
+	}
+	rec := doApply(t, srv, metav1.KindSnapshot, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedSnapshot(t, st, obj.Name)
+	if stored.NodeName != created.NodeName {
+		t.Fatalf("stored nodeName = %q, want re-resolved %q (I1: nodeName must persist on update)", stored.NodeName, created.NodeName)
+	}
+}
+
+// TestApplySnapshotRejectsMissingVMReference 验证：apply 一个 vmRef 指向不存在 VM 的
+// Snapshot → 400（admission ReferenceValidator 拒绝），且不落盘。
+func TestApplySnapshotRejectsMissingVMReference(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validSnapshot()
+	rec := doApplyWithoutReferenceSeeds(t, srv, metav1.KindSnapshot, obj.Name, obj)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+	if _, err := st.Get(context.Background(), storeKey(metav1.KindSnapshot, obj.Name)); err == nil {
+		t.Fatalf("rejected Snapshot must not be stored")
+	}
+}
+
+func storedSnapshot(t *testing.T, st store.Store, name string) snapshotv1.Snapshot {
+	t.Helper()
+	raw, err := st.Get(context.Background(), storeKey(metav1.KindSnapshot, name))
+	if err != nil {
+		t.Fatalf("get stored Snapshot %s: %v", name, err)
+	}
+	var stored snapshotv1.Snapshot
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored Snapshot %s: %v", name, err)
+	}
+	return stored
 }
 
 func storedVM(t *testing.T, st store.Store, name string) vmv1.VM {

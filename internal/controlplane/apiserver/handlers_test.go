@@ -17,6 +17,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -88,7 +89,26 @@ func seedApplyReferences(t *testing.T, st store.Store, obj any) {
 		for _, name := range o.Spec.NICRefs {
 			seedNICRef(t, st, name, o.UID)
 		}
+	case snapshotv1.Snapshot:
+		seedSnapshotVMRef(t, st, o.Spec.VMRef, "node-1")
 	}
+}
+
+// seedSnapshotVMRef seeds the VM a Snapshot targets by name, already bound to
+// nodeName (a stored VM is always scheduled before it lands) so applySnapshot can
+// resolve a non-empty nodeName from it.
+func seedSnapshotVMRef(t *testing.T, st store.Store, name, nodeName string) {
+	t.Helper()
+	if name == "" {
+		return
+	}
+	vm := validVM()
+	vm.Name = name
+	vm.UID = "uid-" + name
+	vm.NodeName = nodeName
+	vm.Spec.VolumeRefs = []string{"snap-target-volume-" + name}
+	vm.Spec.NICRefs = []string{"snap-target-nic-" + name}
+	seedStoreObject(t, st, metav1.KindVM, name, vm)
 }
 
 func seedStoragePoolRef(t *testing.T, st store.Store, name string, poolType storagepoolv1.PoolType) {
@@ -282,5 +302,13 @@ func validVM() vmv1.VM {
 			NICRefs:    []string{"nic-a"},
 			PowerState: vmv1.PowerStateOn,
 		},
+	}
+}
+
+func validSnapshot() snapshotv1.Snapshot {
+	return snapshotv1.Snapshot{
+		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindSnapshot},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", UID: "uid-snap-a"},
+		Spec:       snapshotv1.SnapshotSpec{VMRef: "vm-a"},
 	}
 }

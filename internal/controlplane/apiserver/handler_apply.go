@@ -24,6 +24,7 @@ import (
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
+	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
@@ -173,6 +174,23 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		vm.ResourceVersion = raw.ResourceVersion
 		return marshalResponse(vm)
 
+	case metav1.KindSnapshot:
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
+		if aerr != nil {
+			return nil, aerr
+		}
+		snap := obj.(snapshotv1.Snapshot)
+		injectFinalizer(&snap.ObjectMeta)
+		if aerr := preserveUpdateObjectMeta(req, &snap.ObjectMeta); aerr != nil {
+			return nil, aerr
+		}
+		raw, aerr := s.applySnapshot(ctx, storeKey(kind, snap.Name), &snap, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		snap.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(snap)
+
 	default:
 		return nil, notFound(fmt.Errorf("%w: %q", ErrUnknownKind, kind))
 	}
@@ -266,6 +284,49 @@ func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC, req a
 		return store.RawObject{}, internalErr(err)
 	}
 	return raw, nil
+}
+
+// applySnapshot resolves the Snapshot's nodeName from its target VM (the snapshot
+// must run on the node that holds the VM's qcow2 files) and persists it. This is
+// the third admission mutation precedent after NIC MAC allocation and VM
+// scheduling: the user never supplies a Snapshot nodeName — it is a deterministic
+// derivation of the target VM's placement (single source of truth).
+//
+// nodeName is re-resolved on BOTH create and update. preserveUpdateObjectMeta
+// preserves resourceVersion/deletionTimestamp/finalizers but NOT nodeName, and
+// EnvelopeValidator does not treat nodeName as server-owned — so an identical
+// re-apply (Snapshot spec is fully immutable, so any re-apply classifies as
+// update) carrying no nodeName would otherwise persist an empty nodeName and the
+// node watch (?nodeName=) would stop routing it. Re-resolving on update keeps the
+// stored nodeName stable (a snapshot cannot migrate; the target VM's nodeName is
+// itself immutable post-bind). The vmRef VM is proven to exist by
+// ReferenceValidator on both create and update.
+func (s *Server) applySnapshot(ctx context.Context, key string, snap *snapshotv1.Snapshot, req admission.Request) (store.RawObject, *apiError) {
+	node, aerr := s.resolveVMNodeName(ctx, snap.Spec.VMRef)
+	if aerr != nil {
+		return store.RawObject{}, aerr
+	}
+	snap.NodeName = node
+	return s.putWithPostAdmission(ctx, key, *snap, req)
+}
+
+// resolveVMNodeName reads the VM named ref and returns its metadata.nodeName.
+// ReferenceValidator already proved the VM exists and is not deleting, so a
+// missing VM here is an internal inconsistency (500). An empty VM nodeName is
+// also internal: a stored VM is always scheduled (bindVM) before it lands.
+func (s *Server) resolveVMNodeName(ctx context.Context, vmName string) (string, *apiError) {
+	raw, err := s.store.Get(ctx, storeKey(metav1.KindVM, vmName))
+	if err != nil {
+		return "", internalErr(fmt.Errorf("apiserver: resolve snapshot target VM %q nodeName: %w", vmName, err))
+	}
+	var vm vmv1.VM
+	if err := json.Unmarshal(raw.Value, &vm); err != nil {
+		return "", internalErr(fmt.Errorf("apiserver: decode snapshot target VM %q: %w", vmName, err))
+	}
+	if vm.NodeName == "" {
+		return "", internalErr(fmt.Errorf("apiserver: snapshot target VM %q has no nodeName", vmName))
+	}
+	return vm.NodeName, nil
 }
 
 // bindVM places a VM onto a node when it carries no explicit binding, writing the
