@@ -19,6 +19,7 @@ import (
 	"net/netip"
 
 	"github.com/rs/zerolog"
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/mac"
 	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
@@ -356,11 +357,10 @@ func validateNetworkAdmission(spec networkv1.NetworkSpec) error {
 	return nil
 }
 
-// storeKey builds the store key /govirta/<kind>/<name>. This matches the prefix
-// the MAC allocator lists (/govirta/NIC/), so NIC writes are visible to occupancy
-// derivation.
+// storeKey delegates to the admission package's canonical key helper so the
+// HTTP write path and admission reference validators cannot drift apart.
 func storeKey(kind metav1.Kind, name string) string {
-	return fmt.Sprintf("/govirta/%s/%s", kind, name)
+	return admission.StoreKey(kind, name)
 }
 
 // marshalResponse serializes the stored object for the response, mapping a

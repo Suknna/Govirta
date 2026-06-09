@@ -29,6 +29,9 @@ func (c Chain) Validate(ctx context.Context, req Request) error {
 		return fmt.Errorf("admission: context done: %w", err)
 	}
 	for _, v := range c.validators {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("admission: context done before %s: %w", v.Name(), err)
+		}
 		if err := v.Validate(ctx, req); err != nil {
 			var admissionErr *Error
 			if errors.As(err, &admissionErr) {

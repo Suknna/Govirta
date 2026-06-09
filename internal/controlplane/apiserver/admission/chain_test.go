@@ -22,6 +22,20 @@ func (v recordingValidator) Validate(ctx context.Context, req Request) error {
 	return v.err
 }
 
+type cancelingValidator struct {
+	name   string
+	seen   *[]string
+	cancel context.CancelFunc
+}
+
+func (v cancelingValidator) Name() string { return v.name }
+
+func (v cancelingValidator) Validate(ctx context.Context, req Request) error {
+	*v.seen = append(*v.seen, v.name)
+	v.cancel()
+	return nil
+}
+
 func TestChainRunsValidatorsInOrder(t *testing.T) {
 	seen := []string{}
 	chain := NewChain(
@@ -97,6 +111,24 @@ func TestChainStopsWhenContextIsCanceled(t *testing.T) {
 	}
 	if len(seen) != 0 {
 		t.Fatalf("validators ran %v, want none", seen)
+	}
+}
+
+func TestChainStopsWhenContextIsCanceledBetweenValidators(t *testing.T) {
+	seen := []string{}
+	ctx, cancel := context.WithCancel(context.Background())
+	chain := NewChain(
+		cancelingValidator{name: "cancel", seen: &seen, cancel: cancel},
+		recordingValidator{name: "never", seen: &seen},
+	)
+
+	err := chain.Validate(ctx, Request{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Validate() error = %v, want context.Canceled", err)
+	}
+	want := []string{"cancel"}
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("validators ran %v, want %v", seen, want)
 	}
 }
 
