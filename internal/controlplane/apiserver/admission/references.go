@@ -43,7 +43,7 @@ func (v ReferenceValidator) Validate(ctx context.Context, req Request) error {
 		if err := v.requireByName(ctx, metav1.KindStoragePool, o.Spec.PoolRef); err != nil {
 			return err
 		}
-		if err := v.requireVMByUID(ctx, o.Spec.VMRef); err != nil {
+		if err := v.rejectDeletingVMByUID(ctx, o.Spec.VMRef); err != nil {
 			return err
 		}
 		if o.Spec.ImageRef != "" {
@@ -61,7 +61,7 @@ func (v ReferenceValidator) Validate(ctx context.Context, req Request) error {
 		if err := v.requireByName(ctx, metav1.KindNetwork, o.Spec.NetworkRef); err != nil {
 			return err
 		}
-		return v.requireVMByUID(ctx, o.Spec.VMRef)
+		return v.rejectDeletingVMByUID(ctx, o.Spec.VMRef)
 	case vmv1.VM:
 		for _, name := range o.Spec.VolumeRefs {
 			if err := v.requireByName(ctx, metav1.KindVolume, name); err != nil {
@@ -97,7 +97,7 @@ func (v ReferenceValidator) requireByName(ctx context.Context, kind metav1.Kind,
 	return nil
 }
 
-func (v ReferenceValidator) requireVMByUID(ctx context.Context, uid string) error {
+func (v ReferenceValidator) rejectDeletingVMByUID(ctx context.Context, uid string) error {
 	raws, err := v.Store.List(ctx, ListPrefix(metav1.KindVM))
 	if err != nil {
 		return Reject(v.Name(), ReasonInternal, fmt.Errorf("list referenced VMs: %w", err))
@@ -115,7 +115,7 @@ func (v ReferenceValidator) requireVMByUID(ctx context.Context, uid string) erro
 		}
 		return nil
 	}
-	return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("referenced VM uid %q does not exist", uid))
+	return nil
 }
 
 func decodeStoredMetadata(raw []byte) (metav1.ObjectMeta, error) {

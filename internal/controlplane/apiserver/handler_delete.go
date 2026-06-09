@@ -29,8 +29,8 @@ import (
 //     已拆净 live 资源（正是拆净才摘的最后一个 finalizer），此刻若因"又被引用"而拒绝真删，
 //     对象会变成僵尸：finalizers 已空、live 资源已拆、却永远卡在 etcd，引用它的新对象指向
 //     一个 live 资源已不存在的壳，比悬挂引用更糟。所以 finalizers 端点真删时不能也不会再做
-//     引用守卫。关闭该窗口的正确位置是 apply 准入侧：未来应在 apply 时拒绝新对象引用/复活
-//     任何带 deletionTimestamp 的删除中对象。这是超出本刀范围的独立 backlog，不在本端点解决。
+//     引用守卫。关闭该窗口的正确位置是 apply 准入侧：apply 的 ReferenceValidator 已拒绝任何
+//     引用带 deletionTimestamp 的删除中对象的新建/更新请求，使删除中对象不会获得新的下游引用。
 //   - 打戳走 CAS（store.Put 带读到的 ResourceVersion），防止与并发 apply/status
 //     写互相覆盖：若期间对象被改写，CAS 失败，让客户端重试而非盲目覆盖。
 

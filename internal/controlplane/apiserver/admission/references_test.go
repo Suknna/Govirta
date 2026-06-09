@@ -43,7 +43,13 @@ func TestReferenceValidatorRejectsDeletingNetworkRef(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonConflict)
 }
 
-func TestReferenceValidatorRejectsMissingVolumeVMUID(t *testing.T) {
+// TestReferenceValidatorAllowsAbsentVolumeVMUID covers the independent-resource
+// contract: a Volume may be created carrying a forward VM UID reference before
+// that VM exists, so an absent VM UID is allowed rather than rejected. This is
+// required because the VM spec mandates volumeRefs/nicRefs while Volume/NIC
+// mandate vmRef — the only non-deadlocking create order is Volume/NIC first,
+// then VM.
+func TestReferenceValidatorAllowsAbsentVolumeVMUID(t *testing.T) {
 	st := newReferenceTestStore(t)
 	seedReferenceObject(t, st, blockAdmissionStoragePool("block-pool"))
 	seedReferenceObject(t, st, validAdmissionStoragePool())
@@ -57,7 +63,32 @@ func TestReferenceValidatorRejectsMissingVolumeVMUID(t *testing.T) {
 		Name:      obj.Name,
 		NewObject: obj,
 	})
-	assertAdmissionReason(t, err, ReasonBadRequest)
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil (absent VM UID must be allowed)", err)
+	}
+}
+
+// TestReferenceValidatorRejectsDeletingVolumeVMUID covers the other half of the
+// forward-reference contract: if the referenced VM exists and is already
+// deletion-marked, a new Volume must not be allowed to reference it, closing the
+// stamp-to-finalize window.
+func TestReferenceValidatorRejectsDeletingVolumeVMUID(t *testing.T) {
+	st := newReferenceTestStore(t)
+	seedReferenceObject(t, st, blockAdmissionStoragePool("block-pool"))
+	seedReferenceObject(t, st, validAdmissionStoragePool())
+	seedReferenceObject(t, st, validAdmissionImage())
+	deletingVM := vmWithNameAndUID("vm-stored-by-name", "uid-vm-a")
+	deletingVM.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	seedReferenceObject(t, st, deletingVM)
+
+	obj := validAdmissionVolume()
+	err := ReferenceValidator{Store: st}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindVolume,
+		Name:      obj.Name,
+		NewObject: obj,
+	})
+	assertAdmissionReason(t, err, ReasonConflict)
 }
 
 func TestReferenceValidatorAllowsReadyReferenceGraph(t *testing.T) {

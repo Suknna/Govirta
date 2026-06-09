@@ -216,6 +216,46 @@ func TestApplyCannotReferenceStampedObject(t *testing.T) {
 	}
 }
 
+// TestDeleteRepeatedRescansReferences covers the state3 guard: even after an
+// object is already stamped (deletionTimestamp set), a repeated DELETE must
+// re-run the reverse-reference scan and reject with 409 if a downstream
+// reference exists. Apply admission now blocks new references to a deleting
+// object, so this race is closed at the front door; but the state3 guard is a
+// defense-in-depth backstop against any reference that appears out-of-band
+// (legacy data, direct store write, future code path). We seed the referencing
+// VM directly into the store — bypassing apply admission — to exercise exactly
+// that backstop.
+func TestDeleteRepeatedRescansReferences(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	vol := validVolume()
+	if rec := doApply(t, srv, metav1.KindVolume, vol.Name, vol); rec.Code != http.StatusCreated {
+		t.Fatalf("seed volume apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// First delete: no referencing VM yet, so it stamps successfully (202).
+	if rec := doDelete(t, srv, metav1.KindVolume, vol.Name); rec.Code != http.StatusAccepted {
+		t.Fatalf("first delete = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A VM referencing the deleting Volume appears out-of-band (apply admission
+	// would have rejected it, so we write it straight to the store). validVM's
+	// Spec.VolumeRefs is ["vol-a"] and validVolume().Name is "vol-a".
+	vm := validVM()
+	seedStoreObject(t, st, metav1.KindVM, vm.Name, vm)
+
+	// Repeated DELETE must re-scan references and reject: the object is still
+	// referenced, so it cannot proceed toward finalize.
+	rec := doDelete(t, srv, metav1.KindVolume, vol.Name)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("repeat delete = %d, want 409 (state3 must re-scan references); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if want := refIdentity(metav1.KindVM, vm.Name); !strings.Contains(decodeError(t, rec), want) {
+		t.Fatalf("error does not name the referencing object %q", want)
+	}
+}
+
 // TestDeleteConcurrentWriteReturns409 covers the state2 CAS branch: stamping
 // deletionTimestamp is a conditional Put against the ResourceVersion read in
 // the same request. If a concurrent apply/status write bumps the revision
