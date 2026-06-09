@@ -33,7 +33,8 @@
 - `internal/controlplane/apiserver/apply_admission.go` — decodeObjectByKind 加 Snapshot
 - `internal/controlplane/apiserver/admission/object.go` — Metadata/TypeMeta/Spec/Status switch 加 Snapshot
 - `internal/controlplane/apiserver/admission/fields.go` — FieldPolicyValidator 加 Snapshot（全 immutable）
-- `internal/controlplane/apiserver/admission/references.go` — ReferenceValidator 加 Snapshot vmRef（by name）；ReverseReferenceValidator 加 `VM ← Snapshot.vmRef`
+- `internal/controlplane/apiserver/admission/references.go` — ReferenceValidator 加 Snapshot vmRef（by name）
+- `internal/controlplane/apiserver/admission/delete.go` — ReverseReferenceValidator 加 `VM ← Snapshot.vmRef`（VM case 当前 return nil）
 - `internal/controlplane/apiserver/admission/status.go` — StatusTypeValidator 加 Snapshot
 - `internal/node/agent.go` — 装配第 7 个控制器
 - `test/e2e/closure_test.go` — 扩展快照场景
@@ -469,9 +470,26 @@ type DeleteSnapshotRequest struct {
 
 Set `Capabilities.Snapshot = true` for the local driver's DriverInfo (it now supports snapshots).
 
+**BLOCKING — update existing fake drivers (else `go test ./internal/storage/...` won't compile):** adding `DeleteSnapshot` to the `block.Driver` interface forces every implementer to gain the method. Three test fakes currently satisfy `block.Driver` with only `Snapshot` and MUST get a `DeleteSnapshot` method (find any others with a fresh `grep -rn "func.*Snapshot(ctx context.Context, vol volume.Volume" internal/storage` before merge):
+- `internal/storage/pool/service_test.go` — `fakeDriver.Snapshot` (~:70)
+- `internal/storage/pool/service_test.go` — `lifecycleDriver.Snapshot` (~:1972)
+- `internal/storage/service_test.go` — `storageLifecycleDriver.Snapshot` (~:592)
+
+Each fake's new method mirrors its existing `Snapshot` shape — honor `ctx.Err()`, record the call if the fake records calls, and return a canned result. Example for a recording fake:
+
+```go
+func (d *fakeDriver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req block.DeleteSnapshotRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.deleteSnapshotCalls++
+	return d.deleteSnapshotErr
+}
+```
+
 - [ ] **Step 3: Implement local.Driver.Snapshot + DeleteSnapshot**
 
-In `internal/storage/local/driver.go`, replace the `ErrUnsupported` Snapshot stub with a real implementation, and add DeleteSnapshot. Both resolve the qcow2 path from `vol.Context[PathKey]` (the create path records it there), validate the path lies under the pool root (reuse the existing `ensureOwnedDir`/path-safety helper used by Publish), and run the qemuimg builder:
+In `internal/storage/local/driver.go`, replace the `ErrUnsupported` Snapshot stub with a real implementation, and add DeleteSnapshot. Both resolve and validate the qcow2 path the SAME way `Delete` (`driver.go:240-249`) and `Publish` do — via `d.pathFromVolume(vol)` (returns `(path, volumeDir, err)`, `driver.go:515`) + `d.ensureExistingOwnedDir(volumeDir)` + `ensurePublishableImage(path)` — NOT by reading `vol.Context[PathKey]` raw (that skips the ownership/expected-path check). `pathFromVolume` already reads `Context[PathKey]` internally and verifies it equals the expected derived path.
 
 ```go
 func (d *Driver) Snapshot(ctx context.Context, vol volume.Volume, req block.SnapshotRequest) (volume.Snapshot, error) {
@@ -481,11 +499,14 @@ func (d *Driver) Snapshot(ctx context.Context, vol volume.Volume, req block.Snap
 	if strings.TrimSpace(req.Name) == "" {
 		return volume.Snapshot{}, fmt.Errorf("%w: snapshot name is required", volume.ErrInvalidRequest)
 	}
-	path := vol.Context[PathKey]
-	if path == "" {
-		return volume.Snapshot{}, fmt.Errorf("%w: volume has no host path", volume.ErrInvalidRequest)
+	path, volumeDir, err := d.pathFromVolume(vol)
+	if err != nil {
+		return volume.Snapshot{}, err
 	}
-	if err := d.ensureOwnedFile(path); err != nil { // reuse the path-safety helper Publish uses
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
+		return volume.Snapshot{}, err
+	}
+	if err := ensurePublishableImage(path); err != nil {
 		return volume.Snapshot{}, err
 	}
 	if err := d.qemuimg.QCOW2().Snapshot().Path(path).Name(req.Name).Do(ctx); err != nil {
@@ -494,6 +515,11 @@ func (d *Driver) Snapshot(ctx context.Context, vol volume.Volume, req block.Snap
 	return volume.Snapshot{Name: req.Name, VolumeID: vol.ID}, nil
 }
 
+// DeleteSnapshot deletes a named internal snapshot. It is idempotent on a missing
+// snapshot: qemu-img `snapshot -d` errors non-zero when the named snapshot does
+// not exist, so we list first and skip the delete if absent. This keeps teardown
+// from sticking forever on a re-driven delete or on a disk that was never
+// snapshotted (a create that failed mid-fan-out left some disks untouched).
 func (d *Driver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req block.DeleteSnapshotRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -501,23 +527,47 @@ func (d *Driver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req bloc
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("%w: snapshot name is required", volume.ErrInvalidRequest)
 	}
-	path := vol.Context[PathKey]
-	if path == "" {
-		return fmt.Errorf("%w: volume has no host path", volume.ErrInvalidRequest)
-	}
-	if err := d.ensureOwnedFile(path); err != nil {
+	path, volumeDir, err := d.pathFromVolume(vol)
+	if err != nil {
 		return err
+	}
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
+		return err
+	}
+	if err := ensurePublishableImage(path); err != nil {
+		return err
+	}
+	// List-before-delete idempotency: only delete when the snapshot is present.
+	listing, err := d.qemuimg.QCOW2().SnapshotList().Path(path).Do(ctx)
+	if err != nil {
+		return fmt.Errorf("local: list snapshots on %q: %w", path, err)
+	}
+	if !snapshotListContains(listing, req.Name) {
+		return nil // already gone — idempotent success
 	}
 	if err := d.qemuimg.QCOW2().SnapshotDelete().Path(path).Name(req.Name).Do(ctx); err != nil {
 		return fmt.Errorf("local: delete snapshot %q on %q: %w", req.Name, path, err)
 	}
 	return nil
 }
+
+// snapshotListContains reports whether name appears as an internal snapshot tag
+// in qemu-img `snapshot -l` output. The output is a fixed-column table whose data
+// rows carry the tag in the second whitespace-delimited field (ID is first); a
+// header/empty output yields no match. Matching the exact tag token (not a
+// substring) avoids a prefix collision between two snapshot names.
+func snapshotListContains(listing, name string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == name {
+			return true
+		}
+	}
+	return false
+}
 ```
 
-NOTE: confirm the exact path-safety helper name local.Driver uses before qemu-img operations (read `Publish`/`ensurePublishableImage` and the `ensureOwnedDir` method already in the file). Use whichever existing helper validates a leaf qcow2 file path is owned/non-symlink. If only `ensurePublishableImage` exists for leaf files, reuse it.
-
-DELETE idempotency on a missing internal snapshot: qemu-img `snapshot -d` returns non-zero if the named snapshot does not exist. The IDEMPOTENT-on-missing contract lives in the controller/service layer, not here — see Task 5 Step where the controller treats "snapshot not found" as already-deleted. Do NOT silently swallow the qemu-img error in the driver; return it and let the upper layer classify. (If a sentinel is needed, add `volume.ErrSnapshotNotFound` and map it, but only if the qemu-img error text is reliably classifiable; otherwise the controller's list-before-delete in Task 5 avoids the missing-delete entirely.)
+NOTE: `pathFromVolume`/`ensureExistingOwnedDir`/`ensurePublishableImage` are the real helpers (confirmed at `driver.go:515`/`:401`/`:377`); `ensureOwnedFile` does NOT exist — do not use it. The `snapshotListContains` parse assumes the standard `qemu-img snapshot -l` table where the snapshot tag is the second column. Confirm the column position against a real `qemu-img snapshot -l` output during implementation; if the format differs, adjust the field index but keep the exact-token match.
 
 - [ ] **Step 4: Add pool.Service forwarding**
 
@@ -604,7 +654,8 @@ git commit -m "feat(storage): wire qcow2 snapshot create/delete through volume s
 **Files:**
 - Modify: `internal/controlplane/apiserver/admission/object.go`
 - Modify: `internal/controlplane/apiserver/admission/fields.go`
-- Modify: `internal/controlplane/apiserver/admission/references.go`
+- Modify: `internal/controlplane/apiserver/admission/references.go` (ReferenceValidator vmRef)
+- Modify: `internal/controlplane/apiserver/admission/delete.go` (ReverseReferenceValidator VM 反向边)
 - Modify: `internal/controlplane/apiserver/admission/status.go`
 - Test: `internal/controlplane/apiserver/admission/*_test.go`
 
@@ -617,7 +668,7 @@ Acceptance evidence:
 
 - [ ] **Step 2: Add Snapshot to object.go switches**
 
-In `internal/controlplane/apiserver/admission/object.go`, add `case snapshotv1.Snapshot:` returning `o.ObjectMeta` / `o.TypeMeta` / `o.Spec` / `o.Status` in Metadata/TypeMeta/Spec/Status respectively, and to `normalizeObject` if it has a pointer-deref switch (read the file to confirm the pointer-normalization shape and mirror it). Import `snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"`.
+In `internal/controlplane/apiserver/admission/object.go`, add `case snapshotv1.Snapshot:` returning `o.ObjectMeta` / `o.TypeMeta` / `o.Spec` / `o.Status` in Metadata/TypeMeta/Spec/Status respectively. Also add the bare-status entries the other kinds have: the `Status()` bare-status switch (`case snapshotv1.SnapshotStatus:` returning itself) and the `normalizeObject` pointer-deref switch (`case *snapshotv1.Snapshot:` / `case *snapshotv1.SnapshotStatus:` dereferencing to the value) — read the file first to confirm the exact bare-status + pointer-normalization shapes and mirror them for every other kind so Snapshot has full symmetry. Import `snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"`.
 
 - [ ] **Step 3: Add Snapshot immutable policy to fields.go**
 
@@ -654,7 +705,7 @@ In `references.go` `ReferenceValidator.Validate`'s type switch, add:
 
 - [ ] **Step 5: Add VM ← Snapshot.vmRef to ReverseReferenceValidator**
 
-In `references.go` `ReverseReferenceValidator.Validate`'s `case metav1.KindVM:` (currently returns nil — VM was the apex), add a Snapshot scan. The VM is referenced by name, so the scan compares `Snapshot.spec.vmRef` to the VM's name (`req.Name`), matching the existing Volume/NIC-by-name pattern (NOT the removed UID pattern):
+In `delete.go` `ReverseReferenceValidator.Validate`'s `case metav1.KindVM:` (currently returns nil — VM was the apex), add a Snapshot scan. The VM is referenced by name, so the scan compares `Snapshot.spec.vmRef` to the VM's name (`req.Name`), matching the existing Volume/NIC-by-name pattern (NOT the removed UID pattern):
 
 ```go
 	case metav1.KindVM:
@@ -783,18 +834,23 @@ In `handler_apply.go` (beside `applyNIC`/`applyVM`):
 // must run on the node that holds the VM's qcow2 files) and persists it. This is
 // the third admission mutation precedent after NIC MAC allocation and VM
 // scheduling: the user never supplies a Snapshot nodeName — it is a deterministic
-// derivation of the target VM's placement (single source of truth). On create the
-// VM must already exist (ReferenceValidator enforced it). On update the existing
-// nodeName is preserved (a snapshot cannot migrate), so injection only runs for
-// create.
+// derivation of the target VM's placement (single source of truth).
+//
+// nodeName is re-resolved on BOTH create and update. preserveUpdateObjectMeta
+// preserves resourceVersion/deletionTimestamp/finalizers but NOT nodeName, and
+// EnvelopeValidator does not treat nodeName as server-owned — so an identical
+// re-apply (Snapshot spec is fully immutable, so any re-apply classifies as
+// update) carrying no nodeName would otherwise persist an empty nodeName and the
+// node watch (?nodeName=) would stop routing it. Re-resolving on update keeps the
+// stored nodeName stable (a snapshot cannot migrate; the target VM's nodeName is
+// itself immutable post-bind). The vmRef VM is proven to exist by
+// ReferenceValidator on both create and update.
 func (s *Server) applySnapshot(ctx context.Context, key string, snap *snapshotv1.Snapshot, req admission.Request) (store.RawObject, *apiError) {
-	if req.Operation == admission.OperationCreate {
-		node, aerr := s.resolveVMNodeName(ctx, snap.Spec.VMRef)
-		if aerr != nil {
-			return store.RawObject{}, aerr
-		}
-		snap.NodeName = node
+	node, aerr := s.resolveVMNodeName(ctx, snap.Spec.VMRef)
+	if aerr != nil {
+		return store.RawObject{}, aerr
 	}
+	snap.NodeName = node
 	return s.putWithPostAdmission(ctx, key, *snap, req)
 }
 
@@ -930,29 +986,31 @@ func (c *SnapshotController) Reconcile(ctx context.Context, ev controller.Event)
 		return controller.RequeueAfter(snapshotRequeueDelay), err
 	}
 
-	livePhase, err := c.vmLivePhase(ctx, vm)
+	cold, err := c.vmIsCold(ctx, vm)
 	if err != nil {
 		return controller.RequeueAfter(snapshotRequeueDelay), err
 	}
 
 	if isDeleting(snap.ObjectMeta) {
-		return c.reconcileDelete(ctx, snap, vm, livePhase)
+		return c.reconcileDelete(ctx, snap, vm, cold)
 	}
-	return c.reconcileCreate(ctx, snap, vm, livePhase)
+	return c.reconcileCreate(ctx, snap, vm, cold)
 }
 ```
 
 Create path:
 
 ```go
-func (c *SnapshotController) reconcileCreate(ctx context.Context, snap snapshotv1.Snapshot, vm vmv1.VM, livePhase vmm.Phase) (controller.ReconcileResult, error) {
+func (c *SnapshotController) reconcileCreate(ctx context.Context, snap snapshotv1.Snapshot, vm vmv1.VM, cold bool) (controller.ReconcileResult, error) {
 	// Level-triggered idempotence: a ready snapshot is already at desired state.
 	if snap.Status.Phase == snapshotv1.SnapshotPhaseReady {
 		return controller.Done(), nil
 	}
-	// stopped gate: qemu-img snapshot is unsafe on a running image (QEMU hard constraint).
-	if livePhase != vmm.PhaseStopped {
-		pending := snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhasePending, Message: "waiting for VM stopped"}
+	// Cold gate: qemu-img snapshot is unsafe while a QEMU process holds the qcow2
+	// (QEMU hard constraint). "Cold" = process-dead AND non-running intent
+	// (PhaseStopped/PhaseDefined) or runtime absent — see vmIsCold + spec §5.0.
+	if !cold {
+		pending := snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhasePending, Message: "waiting for VM cold (stopped/defined)"}
 		if err := c.patchStatus(ctx, snap.Name, snap.Status, pending); err != nil {
 			return controller.RequeueAfter(snapshotRequeueDelay), err
 		}
@@ -1017,10 +1075,12 @@ func (c *SnapshotController) rollback(ctx context.Context, snapUID string, creat
 Delete path:
 
 ```go
-func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv1.Snapshot, vm vmv1.VM, livePhase vmm.Phase) (controller.ReconcileResult, error) {
-	// stopped gate also applies to delete (qemu-img snapshot -d unsafe on running image).
-	if livePhase != vmm.PhaseStopped {
-		deleting := snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseDeleting, Message: "waiting for VM stopped"}
+func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv1.Snapshot, vm vmv1.VM, cold bool) (controller.ReconcileResult, error) {
+	// Cold gate also applies to delete: qemu-img snapshot -d is unsafe while a
+	// QEMU process holds the qcow2 (same hard constraint as create). "Cold" =
+	// process-dead non-running intent or runtime absent — see vmIsCold + spec §5.0.
+	if !cold {
+		deleting := snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseDeleting, Message: "waiting for VM cold (stopped/defined)"}
 		if err := c.patchStatus(ctx, snap.Name, snap.Status, deleting); err != nil {
 			return controller.RequeueAfter(snapshotRequeueDelay), err
 		}
@@ -1034,6 +1094,10 @@ func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv
 			errs = append(errs, err)
 			continue
 		}
+		// DeleteVolumeSnapshot is idempotent on a missing internal snapshot (the
+		// driver lists before deleting), so a re-driven teardown or a disk that was
+		// never snapshotted (create failed mid-fan-out) does not error here — the
+		// finalizer can still drain (spec §5.2/§5.3).
 		if derr := c.volumes.DeleteVolumeSnapshot(ctx, storage.DeleteVolumeSnapshotRequest{
 			PoolName:     target.poolName,
 			VolumeID:     target.volumeID,
@@ -1043,9 +1107,11 @@ func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
+		// Keep the finalizer and requeue. The status patch error is joined with the
+		// teardown cause so neither is swallowed (项目铁律: 不吞错).
 		deleting := snapshotv1.SnapshotStatus{Phase: snapshotv1.SnapshotPhaseDeleting, Message: err.Error()}
-		_ = c.patchStatus(ctx, snap.Name, snap.Status, deleting)
-		return controller.RequeueAfter(snapshotRequeueDelay), fmt.Errorf("snapshot controller: delete %q: %w", snap.Name, err)
+		patchErr := c.patchStatus(ctx, snap.Name, snap.Status, deleting)
+		return controller.RequeueAfter(snapshotRequeueDelay), fmt.Errorf("snapshot controller: delete %q: %w", snap.Name, errors.Join(err, patchErr))
 	}
 	if err := removeTeardownFinalizer(ctx, c.client, c.Kind(), snap.Name); err != nil {
 		return controller.Requeue(), fmt.Errorf("snapshot controller: remove finalizer %q: %w", snap.Name, err)
@@ -1054,7 +1120,7 @@ func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv
 }
 ```
 
-Helpers (`volumeTarget`, `resolveVolumeTarget`, `targetVM`, `vmLivePhase`, `patchStatus`):
+Helpers (`volumeTarget`, `resolveVolumeTarget`, `targetVM`, `vmIsCold`, `patchStatus`):
 
 ```go
 // volumeTarget is a resolved (pool, derived volume id) pair for one of the VM's
@@ -1094,15 +1160,33 @@ func (c *SnapshotController) targetVM(ctx context.Context, vmName string) (vmv1.
 	return vm, nil
 }
 
-// vmLivePhase reads the VM's live process phase via vmm (上下一致: live is the
-// single source of truth, not the VM object's status projection). The vmm key is
-// the VM's UID (the runtime is keyed by uid, as the VM controller does).
-func (c *SnapshotController) vmLivePhase(ctx context.Context, vm vmv1.VM) (vmm.Phase, error) {
+// vmIsCold reports whether the target VM is safe for qemu-img snapshot, i.e. no
+// QEMU process holds the qcow2 (上下一致: live is the single source of truth, not
+// the VM object's status projection). The vmm runtime is keyed by the VM's UID
+// (the same identity the VM controller uses: c.vmm.Status(ctx, obj.UID)).
+//
+// "Cold" = process-dead AND non-running intent. That is PhaseStopped (stopped
+// after a run) or PhaseDefined (powerState=Off, never started) — both have a dead
+// process and an intent that is not running, so the VM controller will not Start
+// it during the snapshot (no restart race). PhaseFailed is intent=running and the
+// VM controller may re-Start it, so it is NOT cold. A vmm.ErrNotFound (the runtime
+// vm.json is absent) means no process exists at all, which is equivalent to cold —
+// critical on the delete path where the VM object still exists but its runtime is
+// already gone (otherwise teardown would requeue forever). See spec §5.0.
+func (c *SnapshotController) vmIsCold(ctx context.Context, vm vmv1.VM) (bool, error) {
 	live, err := c.vmm.Status(ctx, vm.UID)
 	if err != nil {
-		return "", fmt.Errorf("snapshot controller: read VM %q live phase: %w", vm.Name, err)
+		if errors.Is(err, vmm.ErrNotFound) {
+			return true, nil
+		}
+		return false, fmt.Errorf("snapshot controller: read VM %q live phase: %w", vm.Name, err)
 	}
-	return live.Phase, nil
+	switch live.Phase {
+	case vmm.PhaseStopped, vmm.PhaseDefined:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func (c *SnapshotController) patchStatus(ctx context.Context, name string, observed, desired snapshotv1.SnapshotStatus) error {
@@ -1135,7 +1219,7 @@ func snapshotStatusEqual(a, b snapshotv1.SnapshotStatus) bool {
 }
 ```
 
-NOTE: confirm `vmm.VM` exposes `.Phase` and `.UID`/the runtime key field by reading `internal/vmm/vm.go` (the `vmm.VM` struct). The VM controller calls `c.vmm.Status(ctx, uuid)` — confirm whether the uuid arg is `vm.UID` (apis VM metadata uid) by reading how the VM controller derives it (`internal/node/controllers/vm.go` create/status path). Use the SAME identity the VM controller uses so the snapshot reads the same runtime.
+VERIFIED (against source, no re-check needed): `vmm.VM` exposes `.Phase` (`internal/vmm/vm.go`); the VM controller calls `c.vmm.Status(ctx, obj.UID)` (`internal/node/controllers/vm.go:153`), so the snapshot controller uses the SAME identity (`vm.UID`, the apis VM metadata uid) to read the same runtime. `vmm.ErrNotFound` exists (`internal/vmm/errors.go:10`) for the `vmIsCold` cold-on-missing branch.
 
 - [ ] **Step 4: Register controller in agent**
 
@@ -1147,14 +1231,17 @@ In `internal/node/agent.go` `NewAgent`, add to the `list`:
 
 - [ ] **Step 5: Write tests**
 
-`internal/node/controllers/snapshot_test.go` with fake VolumeSnapshotter (records SnapshotVolume/DeleteVolumeSnapshot calls, can be told to fail on the Nth call), fake VMRunner (Status returns a configurable phase), fake DependencyReader (Get returns seeded VM/Volume objects, PatchStatus + RemoveFinalizer recorded). Cases:
-- VM not stopped → status Pending + RequeueAfter, no SnapshotVolume calls.
-- VM stopped, 2 volumeRefs, both succeed → status Ready with 2 Created, 2 SnapshotVolume calls with SnapshotName==snap.UID.
-- VM stopped, 2nd disk fails → 1st rolled back (DeleteVolumeSnapshot called for disk 0), status Failed with disk0 Created + disk1 Failed, RequeueAfter.
-- ready snapshot re-reconcile → no-op (no SnapshotVolume calls).
-- delete path, VM running → keep finalizer (no RemoveFinalizer), status Deleting, RequeueAfter.
+`internal/node/controllers/snapshot_test.go` with fake VolumeSnapshotter (records SnapshotVolume/DeleteVolumeSnapshot calls, can be told to fail on the Nth call), fake VMRunner (Status returns a configurable phase, or a configurable error so a test can return `vmm.ErrNotFound`), fake DependencyReader (Get returns seeded VM/Volume objects, PatchStatus + RemoveFinalizer recorded). Cases (cold gate = `vmIsCold`: PhaseStopped/PhaseDefined/`vmm.ErrNotFound` are cold; PhaseRunning/PhaseStarting/PhaseStopping/PhaseFailed are NOT cold):
+- create, VM live phase PhaseRunning (not cold) → status Pending + RequeueAfter, no SnapshotVolume calls.
+- create, VM live phase PhaseFailed (intent=running, NOT cold) → status Pending + RequeueAfter, no SnapshotVolume calls (proves Failed is excluded — restart race).
+- create, VM live phase PhaseDefined (powerState=Off never started, IS cold) → fan-out proceeds (proves the B2 fix: a freshly-defined Off VM snapshots without an On→Off cycle).
+- create, VM live phase PhaseStopped, 2 volumeRefs, both succeed → status Ready with 2 Created, 2 SnapshotVolume calls with SnapshotName==snap.UID.
+- create, VM stopped, 2nd disk fails → 1st rolled back (DeleteVolumeSnapshot called for disk 0), status Failed with disk0 Created + disk1 Failed, RequeueAfter.
+- create, ready snapshot re-reconcile → no-op (no SnapshotVolume calls).
+- delete path, VM live phase PhaseRunning (not cold) → keep finalizer (no RemoveFinalizer), status Deleting, RequeueAfter.
 - delete path, VM stopped → DeleteVolumeSnapshot for each disk + RemoveFinalizer called.
-- delete path, VM gone (ErrNotFound) → RemoveFinalizer called (qcow2 gone with VM).
+- delete path, VM live phase reports `vmm.ErrNotFound` (runtime gone, VM object present) → treated as cold, deletes proceed + RemoveFinalizer called (proves I2: runtime-gone-but-object-present does not requeue forever).
+- delete path, VM object gone (master ErrNotFound) → RemoveFinalizer called (qcow2 gone with VM).
 - status no-op guard: observed==desired → no PatchStatus call.
 
 - [ ] **Step 6: Run verification**
