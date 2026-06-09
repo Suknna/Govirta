@@ -14,9 +14,17 @@ import (
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
 
-// ReferenceValidator rejects apply requests whose upstream object references are
-// absent or already deletion-marked. It reads the store at admission time so the
-// control plane does not maintain a second, drift-prone reference index.
+// ReferenceValidator validates an apply request's object references against the
+// live store at admission time, so the control plane does not maintain a second,
+// drift-prone reference index. Two reference kinds have different absence rules:
+//   - by-name upstream refs (StoragePool/Image/Network): absent -> reject 400.
+//     These targets must already exist before the referring object is applied.
+//   - Volume/NIC vmRef (a VM uid): absent -> allow. Volume/NIC are independent
+//     resources that may be applied before their owning VM exists, binding a
+//     future VM uid. Only an already-existing but deletion-marked VM is rejected.
+//
+// In all cases, referencing an object that already carries a deletionTimestamp is
+// rejected 409, closing the Knife 1 stamp-to-finalize window from the apply side.
 type ReferenceValidator struct {
 	Store StoreReader
 }
