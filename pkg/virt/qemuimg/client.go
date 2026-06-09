@@ -126,6 +126,22 @@ func (c QCOW2Client) Snapshot() *snapshot.Builder {
 	return snapshot.New(c.binary, c.runner)
 }
 
+// SnapshotDelete returns a builder for deleting a qcow2 internal snapshot.
+func (c QCOW2Client) SnapshotDelete() *snapshot.DeleteBuilder {
+	return snapshot.NewDelete(c.binary, c.runner)
+}
+
+// SnapshotRevert returns a builder for reverting to a qcow2 internal snapshot.
+// Execution-plane only; no declarative API wires this in the current scope.
+func (c QCOW2Client) SnapshotRevert() *snapshot.RevertBuilder {
+	return snapshot.NewRevert(c.binary, c.runner)
+}
+
+// SnapshotList returns a builder for listing a qcow2 file's internal snapshots.
+func (c QCOW2Client) SnapshotList() *snapshot.ListBuilder {
+	return snapshot.NewList(c.binary, c.runner)
+}
+
 // Check returns a builder for checking qcow2 image consistency.
 func (c QCOW2Client) Check() *check.Builder {
 	return check.New(c.binary, c.runner)

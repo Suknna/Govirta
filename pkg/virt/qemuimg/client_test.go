@@ -220,6 +220,45 @@ func TestQCOW2SnapshotUsesConfiguredRunner(t *testing.T) {
 	assertRun(t, runner, "/custom/qemu-img", []string{"snapshot", "-c", "before-upgrade", "disk.qcow2"})
 }
 
+func TestQCOW2SnapshotDeleteUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().SnapshotDelete().Path("disk.qcow2").Name("before-upgrade").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"snapshot", "-d", "before-upgrade", "disk.qcow2"})
+}
+
+func TestQCOW2SnapshotRevertUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	err := client.QCOW2().SnapshotRevert().Path("disk.qcow2").Name("before-upgrade").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"snapshot", "-a", "before-upgrade", "disk.qcow2"})
+}
+
+func TestQCOW2SnapshotListUsesConfiguredRunner(t *testing.T) {
+	runner := &recordingRunner{result: imgexec.Result{Stdout: "snapshot list output"}}
+	client := NewClient(Config{Binary: "/custom/qemu-img", Runner: runner})
+
+	out, err := client.QCOW2().SnapshotList().Path("disk.qcow2").Do(context.Background())
+
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	if out != "snapshot list output" {
+		t.Fatalf("Do() stdout = %q, want %q", out, "snapshot list output")
+	}
+	assertRun(t, runner, "/custom/qemu-img", []string{"snapshot", "-l", "disk.qcow2"})
+}
+
 func TestQCOW2RemoveDeletesFileWithoutRunner(t *testing.T) {
 	runner := &recordingRunner{}
 	path := filepath.Join(t.TempDir(), "disk.qcow2")
