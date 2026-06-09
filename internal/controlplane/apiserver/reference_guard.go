@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 )
 
@@ -204,12 +205,10 @@ func (s *Server) referenceGuard(ctx context.Context, kind metav1.Kind, name stri
 	}
 }
 
-// listPrefix builds the trailing-slash store prefix /govirta/<kind>/ that scopes
-// a List to exactly one kind's collection, matching the watch handler's prefix
-// shape. The trailing slash prevents a kind whose name prefixes another from
-// bleeding into the scan.
+// listPrefix delegates to the admission package's canonical collection-prefix
+// helper so read/watch/reference scans and admission validators cannot drift.
 func listPrefix(kind metav1.Kind) string {
-	return fmt.Sprintf("/govirta/%s/", kind)
+	return admission.ListPrefix(kind)
 }
 
 // refIdentity renders a referencing object's identity as "<Kind>/<name>" for the

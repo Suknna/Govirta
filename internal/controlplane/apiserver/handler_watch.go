@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/rs/zerolog"
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 )
@@ -85,7 +86,7 @@ func (s *Server) Watch(w http.ResponseWriter, r *http.Request) {
 
 	// Trailing slash scopes the prefix to this kind's collection so a kind whose
 	// name prefixes another cannot bleed into the stream.
-	prefix := fmt.Sprintf("/govirta/%s/", kind)
+	prefix := admission.ListPrefix(kind)
 	events, err := s.store.Watch(ctx, prefix, startRevision)
 	if err != nil {
 		writeWatchError(ctx, w, internalErr(fmt.Errorf("apiserver: open watch %s: %w", kind, err)))

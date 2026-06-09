@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/rs/zerolog"
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 )
@@ -106,7 +107,7 @@ func (s *Server) list(ctx context.Context, r *http.Request) ([]byte, *apiError) 
 
 	// Trailing slash scopes the prefix to this kind's collection so a kind whose
 	// name prefixes another cannot bleed into the result.
-	raws, err := s.store.List(ctx, fmt.Sprintf("/govirta/%s/", kind))
+	raws, err := s.store.List(ctx, admission.ListPrefix(kind))
 	if err != nil {
 		return nil, internalErr(fmt.Errorf("apiserver: list %s: %w", kind, err))
 	}
