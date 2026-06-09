@@ -2,7 +2,6 @@ package apiserver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,7 @@ import (
 	"slices"
 
 	"github.com/rs/zerolog"
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 )
@@ -43,13 +43,6 @@ func (s *Server) finalizersHandler(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /apis/{kind}/{name}/finalizers", s.PatchFinalizers)
 }
 
-// finalizerPatch is the request body for the finalizers sub-resource: the single
-// finalizer the caller wants removed. Only removal is supported — a node moves the
-// delete forward by摘 finalizer, never by adding one or touching anything else.
-type finalizerPatch struct {
-	Remove metav1.Finalizer `json:"remove"`
-}
-
 // PatchFinalizers removes the requested finalizer from the stored object via a
 // read-modify-write, then either really deletes the object (last finalizer gone
 // and deletion was requested) or writes the trimmed object back. On the delete
@@ -78,7 +71,7 @@ func (s *Server) PatchFinalizers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 回写：对象仍在（还剩 finalizer，或没有删除意图）。返回当前对象字节 + 新版本号。
+	// 回写：对象仍在（删除中但还剩其它 finalizer）。返回当前对象字节 + 新版本号。
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(resourceVersionHeader, raw.ResourceVersion)
 	w.WriteHeader(http.StatusOK)
@@ -107,12 +100,20 @@ func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.Ra
 	if err != nil {
 		return store.RawObject{}, false, badRequest(fmt.Errorf("apiserver: read finalizers body: %w", err))
 	}
-	var patch finalizerPatch
-	if err := json.Unmarshal(body, &patch); err != nil {
+	patch, err := admission.DecodeFinalizerPatch(body)
+	if err != nil {
 		return store.RawObject{}, false, badRequest(fmt.Errorf("apiserver: decode finalizers patch: %w", err))
 	}
-	if patch.Remove == "" {
-		return store.RawObject{}, false, badRequest(fmt.Errorf("apiserver: finalizers patch: %q field is required", "remove"))
+	bodyReq := admission.Request{
+		Operation:   admission.OperationFinalizersPatch,
+		Subresource: admission.SubresourceFinalizers,
+		Kind:        kind,
+		Name:        name,
+		NewRaw:      body,
+		NewObject:   patch,
+	}
+	if err := admission.FinalizersPatchBodyChain().Validate(ctx, bodyReq); err != nil {
+		return store.RawObject{}, false, admissionToAPIError(err)
 	}
 
 	raw, err := s.store.Get(ctx, key)
@@ -123,6 +124,12 @@ func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.Ra
 		return store.RawObject{}, false, internalErr(fmt.Errorf("apiserver: finalizers get %s/%s: %w", kind, name, err))
 	}
 
+	targetReq := bodyReq
+	targetReq.OldRaw = raw.Value
+	if err := admission.FinalizersPatchTargetChain().Validate(ctx, targetReq); err != nil {
+		return store.RawObject{}, false, admissionToAPIError(err)
+	}
+
 	// Decode only the metadata, keeping the rest of the object as opaque bytes so
 	// spec/status are physically preserved on write-back (see metadataPatchObject).
 	obj, err := decodeMetadataPatchObject(raw.Value)
@@ -130,9 +137,9 @@ func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.Ra
 		return store.RawObject{}, false, internalErr(fmt.Errorf("apiserver: decode %s/%s for finalizers: %w", kind, name, err))
 	}
 
-	// Remove the named finalizer. Removing one that is not present is an idempotent
-	// no-op (DeleteFunc removes zero elements), not an error — a node may retry its
-	// finalizer摘除 and must converge regardless of whether a prior attempt landed.
+	// Remove the whitelisted node-teardown finalizer. Removing that finalizer when
+	// it is already absent remains an idempotent no-op for deleting objects; any
+	// non-whitelisted finalizer was rejected by admission before this point.
 	obj.Metadata.Finalizers = slices.DeleteFunc(obj.Metadata.Finalizers, func(f metav1.Finalizer) bool {
 		return f == patch.Remove
 	})
@@ -154,9 +161,8 @@ func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.Ra
 		return store.RawObject{}, true, nil
 	}
 
-	// 关键安全语义：finalizer 清空但没有 deletionTimestamp（对象没有删除意图）→ 不真删。
-	// 一个仍然存活、只是恰好没有 finalizer 的对象被真删会是误删；这里只回写裁剪后的对象。
-	// 还剩 finalizer 的情况同样落到这里：单纯回写缩短后的列表。
+	// 还剩 finalizer：删除尚未收口，单纯回写缩短后的列表。没有 deletionTimestamp
+	// 的对象已被 FinalizersPatchTargetChain 拒绝，不能到达这里。
 	newValue, err := obj.marshal()
 	if err != nil {
 		return store.RawObject{}, false, internalErr(fmt.Errorf("apiserver: re-encode %s/%s for finalizers: %w", kind, name, err))

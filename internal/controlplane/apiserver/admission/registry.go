@@ -39,5 +39,20 @@ func StatusPatchChain(st StoreReader) Chain {
 // FinalizersPatchChain returns validators for finalizer removal requests before
 // the handler mutates metadata.finalizers.
 func FinalizersPatchChain() Chain {
-	return NewChain()
+	return NewChain(
+		FinalizersPatchShapeValidator{},
+		WhitelistFinalizerValidator{},
+		FinalizerDeletionPreconditionValidator{},
+	)
+}
+
+func FinalizersPatchBodyChain() Chain {
+	return NewChain(
+		FinalizersPatchShapeValidator{},
+		WhitelistFinalizerValidator{},
+	)
+}
+
+func FinalizersPatchTargetChain() Chain {
+	return NewChain(FinalizerDeletionPreconditionValidator{})
 }

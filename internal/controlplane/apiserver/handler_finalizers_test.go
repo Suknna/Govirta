@@ -11,6 +11,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/mac"
 	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
@@ -24,10 +25,18 @@ import (
 // recorded response.
 func doPatchFinalizers(t *testing.T, srv *Server, kind metav1.Kind, name string, remove metav1.Finalizer) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(finalizerPatch{Remove: remove})
+	body, err := json.Marshal(admission.FinalizerPatch{Remove: remove})
 	if err != nil {
 		t.Fatalf("marshal finalizer patch: %v", err)
 	}
+	req := httptest.NewRequest(http.MethodPatch, "/apis/"+string(kind)+"/"+name+"/finalizers", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func doPatchFinalizersRaw(t *testing.T, srv *Server, kind metav1.Kind, name string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPatch, "/apis/"+string(kind)+"/"+name+"/finalizers", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -151,11 +160,7 @@ func TestPatchFinalizersRemovesOneKeepsOthers(t *testing.T) {
 	}
 }
 
-// TestPatchFinalizersRemoveAbsentIsIdempotent covers the idempotent no-op: removing
-// a finalizer the object does not carry changes nothing — the object stays, its
-// finalizer list is unchanged, and the call still succeeds (a node retrying its
-// finalizer摘除 must converge regardless of whether a prior attempt already landed).
-func TestPatchFinalizersRemoveAbsentIsIdempotent(t *testing.T) {
+func TestPatchFinalizersRejectsNonWhitelistedFinalizer(t *testing.T) {
 	srv, st := newTestServer(t)
 
 	vol := validVolume()
@@ -166,28 +171,23 @@ func TestPatchFinalizersRemoveAbsentIsIdempotent(t *testing.T) {
 
 	const absent metav1.Finalizer = "govirta.io/not-present"
 	rec := doPatchFinalizers(t, srv, metav1.KindVolume, vol.Name, absent)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// The object must still exist with its finalizer list unchanged.
 	after := storedMeta(t, st, metav1.KindVolume, vol.Name)
 	if !slices.Equal(after.Finalizers, before.Finalizers) {
-		t.Fatalf("finalizers changed: got %v, want %v (removing an absent finalizer is a no-op)", after.Finalizers, before.Finalizers)
+		t.Fatalf("finalizers changed: got %v, want %v (rejected non-whitelisted finalizer must not mutate)", after.Finalizers, before.Finalizers)
 	}
 }
 
-// TestPatchFinalizersEmptyWithoutDeletionTimestampDoesNotDelete is the key safety
-// case: an object with NO deletionTimestamp (no deletion intent) whose finalizer
-// list is emptied must NOT be really deleted — it is a live object that merely
-// happens to have no finalizers, and真删 would be a wrong removal. The handler
-// only writes the trimmed (now empty) finalizer list back; the object survives.
-func TestPatchFinalizersEmptyWithoutDeletionTimestampDoesNotDelete(t *testing.T) {
+func TestPatchFinalizersRejectsObjectWithoutDeletionTimestamp(t *testing.T) {
 	srv, st := newTestServer(t)
 
 	// Seed a live Volume (apply, so NO deletionTimestamp) carrying only the
-	// node-teardown finalizer. Removing it empties the list — but with no deletion
-	// intent, the object must stay.
+	// node-teardown finalizer. Admission rejects finalizer removal without an
+	// explicit deletion intent.
 	vol := validVolume()
 	if rec := doApply(t, srv, metav1.KindVolume, vol.Name, vol); rec.Code != http.StatusCreated {
 		t.Fatalf("seed volume apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
@@ -198,16 +198,11 @@ func TestPatchFinalizersEmptyWithoutDeletionTimestampDoesNotDelete(t *testing.T)
 	}
 
 	rec := doPatchFinalizers(t, srv, metav1.KindVolume, vol.Name, metav1.FinalizerNodeTeardown)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	// Write-back path: the response carries the current object, not an empty body.
-	if rec.Body.Len() == 0 {
-		t.Fatalf("body empty; want the written-back object (no real delete without deletion intent)")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The object MUST still exist — emptying finalizers on a non-deleting object
-	// must never trigger真删.
+	// The rejected request must not mutate the live object.
 	after, err := st.Get(context.Background(), storeKey(metav1.KindVolume, vol.Name))
 	if err != nil {
 		t.Fatalf("store.Get after finalizer removal: err = %v, want the object to survive (no deletion intent)", err)
@@ -216,13 +211,13 @@ func TestPatchFinalizersEmptyWithoutDeletionTimestampDoesNotDelete(t *testing.T)
 	if err := json.Unmarshal(after.Value, &stored); err != nil {
 		t.Fatalf("decode stored Volume: %v", err)
 	}
-	if len(stored.Finalizers) != 0 {
-		t.Fatalf("finalizers = %v, want empty (the named finalizer was removed)", stored.Finalizers)
+	if !slices.Contains(stored.Finalizers, metav1.FinalizerNodeTeardown) {
+		t.Fatalf("finalizers = %v, want unchanged node-teardown finalizer after rejected patch", stored.Finalizers)
 	}
 	if stored.DeletionTimestamp != "" {
 		t.Fatalf("deletionTimestamp = %q, want still empty (write-back must not invent deletion intent)", stored.DeletionTimestamp)
 	}
-	// Spec preserved byte-for-byte through the write-back.
+	// Spec preserved through the rejected request.
 	if stored.Spec != vol.Spec {
 		t.Fatalf("spec changed: got %+v, want %+v", stored.Spec, vol.Spec)
 	}
@@ -298,6 +293,32 @@ func TestPatchFinalizersMissingObjectReturns404(t *testing.T) {
 	}
 }
 
+func TestPatchFinalizersInvalidBodyBeatsMissingObject(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "empty remove", body: []byte(`{}`)},
+		{name: "non whitelisted", body: []byte(`{"remove":"govirta.io/not-present"}`)},
+		{name: "unknown field", body: []byte(`{"remove":"govirta.io/node-teardown","extra":true}`)},
+		{name: "trailing", body: []byte(`{"remove":"govirta.io/node-teardown"} {}`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doPatchFinalizersRaw(t, srv, metav1.KindVolume, "nonexistent", tt.body)
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("status = 404, want body/admission validation before missing-object lookup; body=%s", rec.Body.String())
+			}
+			if rec.Code != http.StatusBadRequest && rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 400/409 body validation; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestPatchFinalizersMissingRemoveFieldReturns400 covers the required-field
 // validation branch: a PATCH body whose "remove" field is empty (absent, or the
 // empty string) must be rejected with 400 before any store access, with the
@@ -324,8 +345,8 @@ func TestPatchFinalizersMissingRemoveFieldReturns400(t *testing.T) {
 		t.Fatalf("expected non-empty error body")
 	}
 
-	// The required-field check must short-circuit before touching the store:
-	// the seeded object stays intact with its finalizers untouched.
+	// The required-field check must not mutate the store: the seeded object stays
+	// intact with its finalizers untouched.
 	after := storedMeta(t, st, metav1.KindVolume, vol.Name)
 	if !slices.Contains(after.Finalizers, metav1.FinalizerNodeTeardown) {
 		t.Fatalf("finalizers = %v, want still to contain %q (a rejected 400 must not mutate the object)", after.Finalizers, metav1.FinalizerNodeTeardown)
