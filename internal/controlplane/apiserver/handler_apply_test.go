@@ -578,6 +578,71 @@ func TestApplyVMUpdateAllowsShutdownPowerState(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsImmutableVMArchUpdate(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedVM(t, st, obj.Name)
+
+	update := validVM()
+	update.Spec.Arch = "aarch64"
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("update status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.Spec.Arch != created.Spec.Arch {
+		t.Fatalf("stored arch = %q, want unchanged %q", stored.Spec.Arch, created.Spec.Arch)
+	}
+}
+
+func TestApplyAllowsColdMutableVMMemoryUpdate(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	update := validVM()
+	update.Spec.MemoryMiB = 4096
+	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVM(t, st, obj.Name)
+	if stored.Spec.MemoryMiB != update.Spec.MemoryMiB {
+		t.Fatalf("stored memoryMiB = %d, want %d", stored.Spec.MemoryMiB, update.Spec.MemoryMiB)
+	}
+}
+
+func TestApplyRejectsVolumeCapacityDecrease(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVolume()
+	if rec := doApply(t, srv, metav1.KindVolume, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedVolume(t, st, obj.Name)
+
+	update := validVolume()
+	update.Spec.CapacityBytes = created.Spec.CapacityBytes - 1
+	rec := doApply(t, srv, metav1.KindVolume, update.Name, update)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("update status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVolume(t, st, obj.Name)
+	if stored.Spec.CapacityBytes != created.Spec.CapacityBytes {
+		t.Fatalf("stored capacityBytes = %d, want unchanged %d", stored.Spec.CapacityBytes, created.Spec.CapacityBytes)
+	}
+}
+
 func TestApplyVMUpdatePreservesExistingNodeNameWhenOmitted(t *testing.T) {
 	srv, st := newTestServer(t)
 
@@ -805,6 +870,19 @@ func storedNIC(t *testing.T, st store.Store, name string) nicv1.NIC {
 	var stored nicv1.NIC
 	if err := json.Unmarshal(raw.Value, &stored); err != nil {
 		t.Fatalf("decode stored NIC %s: %v", name, err)
+	}
+	return stored
+}
+
+func storedVolume(t *testing.T, st store.Store, name string) volumev1.Volume {
+	t.Helper()
+	raw, err := st.Get(context.Background(), storeKey(metav1.KindVolume, name))
+	if err != nil {
+		t.Fatalf("get stored Volume %s: %v", name, err)
+	}
+	var stored volumev1.Volume
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored Volume %s: %v", name, err)
 	}
 	return stored
 }
