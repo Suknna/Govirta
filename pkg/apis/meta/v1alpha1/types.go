@@ -28,6 +28,8 @@ const (
 	KindNIC Kind = "NIC"
 	// KindVM identifies a VM object.
 	KindVM Kind = "VM"
+	// KindSnapshot identifies a Snapshot object (whole-VM cold snapshot).
+	KindSnapshot Kind = "Snapshot"
 )
 
 // Finalizer 是阻止对象在 live 资源拆净前被真正删除的守卫标识。
