@@ -84,8 +84,8 @@ func (b *DeleteBuilder) Do(ctx context.Context) error {
 }
 
 // RevertBuilder builds `qemu-img snapshot -a <name> <path>` (apply/revert to an
-// internal snapshot). Execution-plane only; not wired to a declarative API in
-// this knife (revert is a Job-backlog concern, memory 1042 / note #33).
+// internal snapshot). Execution-plane only; no declarative API wires this in the
+// current scope.
 type RevertBuilder struct {
 	binary string
 	runner imgexec.Runner
