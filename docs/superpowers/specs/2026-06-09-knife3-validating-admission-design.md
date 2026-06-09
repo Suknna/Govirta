@@ -236,7 +236,7 @@ Admission validators：
 | Network | `NIC.spec.networkRef` |
 | Volume | `VM.spec.volumeRefs`（按 Volume object name） |
 | NIC | `VM.spec.nicRefs`（按 NIC object name） |
-| VM | `Volume.spec.vmRef`、`NIC.spec.vmRef`（按 VM UID） |
+| VM | 无反向边（VM 是所有权树顶点；`Volume.spec.vmRef` / `NIC.spec.vmRef` 是所有权回指针，仅在 apply 侧约束，不阻塞删 VM） |
 
 ## 7. status PATCH Admission
 

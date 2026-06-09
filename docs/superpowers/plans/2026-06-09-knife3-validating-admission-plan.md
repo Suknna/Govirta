@@ -882,7 +882,7 @@ Goal: apply rejects missing references and references to deletion-marked objects
 Acceptance evidence:
 - Applying a NIC referencing a deletion-marked Network returns 409.
 - Applying a VM referencing a missing Volume returns 400.
-- Applying a Volume referencing a missing VM UID returns 400.
+- Applying a Volume whose `vmRef` names a VM that does not yet exist is allowed (Volume/NIC are independent resources created before the VM); only a `vmRef` pointing at a deletion-marked VM returns 409.
 
 - [ ] **Step 2: Implement reference helpers using StoreReader**
 
@@ -906,8 +906,8 @@ func findVMByUID(ctx context.Context, st StoreReader, uid string) (metav1.Object
 
 Reference checks:
 
-- `Volume`: `poolRef` StoragePool by name; root volume `imageRef` Image by name; root volume `imageFilePoolRef` StoragePool by name; `vmRef` VM by UID via list.
-- `NIC`: `networkRef` Network by name; `vmRef` VM by UID via list.
+- `Volume`: `poolRef` StoragePool by name; root volume `imageRef` Image by name; root volume `imageFilePoolRef` StoragePool by name; `vmRef` — absent VM allowed (independent resource), deletion-marked VM rejected, matched by UID via list.
+- `NIC`: `networkRef` Network by name; `vmRef` — absent VM allowed, deletion-marked VM rejected, matched by UID via list.
 - `VM`: every `volumeRefs` Volume by name; every `nicRefs` NIC by name.
 - `Image`: `filePoolRef` StoragePool by name.
 - `StoragePool` and `Network`: no upstream references to validate.
@@ -928,7 +928,8 @@ Admission tests:
 
 - `TestReferenceValidatorRejectsMissingVMVolumeRef`
 - `TestReferenceValidatorRejectsDeletingNetworkRef`
-- `TestReferenceValidatorRejectsMissingVolumeVMUID`
+- `TestReferenceValidatorAllowsAbsentVolumeVMUID`
+- `TestReferenceValidatorRejectsDeletingVolumeVMUID`
 - `TestReferenceValidatorAllowsReadyReferenceGraph`
 
 Handler tests:
@@ -967,23 +968,25 @@ git commit -m "feat(admission): reject invalid object references"
 
 - [ ] **Step 1: Confirm goal and acceptance criteria**
 
-Goal: DELETE uses admission for protective reverse-reference validation, including VM references by UID.
+Goal: DELETE uses admission for protective reverse-reference validation. The dependency graph matches Knife 1 exactly: a VM is the ownership apex and has NO reverse edge (deleting a VM must not be blocked by Volume.vmRef / NIC.vmRef ownership backpointers, or reverse teardown deadlocks).
 
 Acceptance evidence:
-- Deleting a VM referenced by Volume/NIC `vmRef` returns 409.
+- Deleting a Volume named by a VM's `volumeRefs` returns 409.
+- Deleting a VM that still owns a Volume/NIC (via their `vmRef`) is ALLOWED (VM has no reverse edge).
 - Existing delete guard tests still pass.
 - `reference_guard.go` is removed or no longer owns policy.
 
 - [ ] **Step 2: Implement `DeleteReferenceValidator`**
 
-Use the same projections currently in `reference_guard.go`, moved into admission. Add VM reverse refs that Knife 1 intentionally skipped:
+Use the same projections currently in `reference_guard.go`, moved into admission. Do NOT add a VM reverse edge: Knife 1 deliberately left VM with no downstream reverse reference because Volume.vmRef / NIC.vmRef are ownership backpointers, not VM dependencies. The graph is:
 
 ```go
 case metav1.KindVM:
-	// list Volume and NIC; compare spec.vmRef to the VM object's UID
+	// VM is the ownership apex — no reverse edge, reference-clear by construction.
+	return nil
 ```
 
-For delete request, the handler must pass the old typed object in `OldObject` so the VM validator has the VM UID.
+The handler still passes the decoded target metadata in `OldObject`/`OldRaw` for uniformity, but the VM branch needs no UID scan.
 
 Update `DeleteChain`:
 
@@ -1017,13 +1020,12 @@ The handler still owns 404 for missing object, deletionTimestamp stamping, CAS P
 Admission tests:
 
 - `TestDeleteReferenceValidatorRejectsStoragePoolReferencedByImageFilePool`
-- `TestDeleteReferenceValidatorRejectsVMReferencedByVolumeUID`
-- `TestDeleteReferenceValidatorRejectsVMReferencedByNICUID`
-- `TestDeleteReferenceValidatorAllowsUnreferencedVM`
+- `TestDeleteReferenceValidatorRejectsVolumeReferencedByVM`
+- `TestDeleteReferenceValidatorRejectsNICReferencedByVM`
+- `TestDeleteReferenceValidatorAllowsVMWithOwnedVolumeAndNIC`
 
 Handler tests:
 
-- `TestDeleteRejectsVMReferencedByVolume`
 - existing StoragePool/Image/Network/Volume/NIC delete guard tests continue passing.
 
 - [ ] **Step 5: Verify and commit**

@@ -9,9 +9,9 @@ import (
 )
 
 // deleteRequest builds a DELETE admission request the way the handler does: the
-// target's decoded metadata travels in OldObject (and the raw bytes in OldRaw)
-// so the VM branch can resolve the deletion target's UID. Non-VM kinds match by
-// Name alone and ignore the UID.
+// target's decoded metadata travels in OldObject. All kinds match downstream
+// dependents by Name; the UID field is retained in the helper signature for
+// callers that still seed it but no reverse edge consumes it.
 func deleteRequest(kind metav1.Kind, name, uid string) Request {
 	return Request{
 		Operation: OperationDelete,
@@ -98,52 +98,26 @@ func TestDeleteReferenceValidatorRejectsNICReferencedByVM(t *testing.T) {
 	assertReferencedBy(t, err, "VM/vm-a")
 }
 
-// TestDeleteReferenceValidatorRejectsVMReferencedByVolumeUID proves the new VM
-// reverse edge: deleting a VM still owned by a Volume (Volume.vmRef == VM uid) is
-// rejected. The match is by UID, not name — the VM's UID is resolved from the
-// request's OldObject metadata.
-func TestDeleteReferenceValidatorRejectsVMReferencedByVolumeUID(t *testing.T) {
+// TestDeleteReferenceValidatorAllowsVMOwningVolumeAndNIC proves a VM has no
+// reverse-delete edge: it is the apex of the ownership tree, so deleting it must
+// be allowed even while a Volume and a NIC still carry its UID in their vmRef
+// ownership backpointer. Blocking VM deletion on those backpointers would
+// deadlock reverse teardown (the Volume cannot go because VM.volumeRefs names
+// it, and the VM cannot go because Volume.vmRef points back). The vmRef
+// backpointer is enforced only on the apply side, never on delete.
+func TestDeleteReferenceValidatorAllowsVMOwningVolumeAndNIC(t *testing.T) {
 	st := newReferenceTestStore(t)
 	vol := dataAdmissionVolume("vol-owned")
 	vol.Spec.VMRef = "uid-vm-a"
 	seedReferenceObject(t, st, vol)
-
-	err := ReverseReferenceValidator{Store: st}.Validate(
-		context.Background(), deleteRequest(metav1.KindVM, "vm-a", "uid-vm-a"))
-	assertAdmissionReason(t, err, ReasonConflict)
-	assertReferencedBy(t, err, "Volume/vol-owned")
-}
-
-// TestDeleteReferenceValidatorRejectsVMReferencedByNICUID proves the VM reverse
-// edge through NIC.vmRef: deleting a VM still owned by a NIC is rejected by UID.
-func TestDeleteReferenceValidatorRejectsVMReferencedByNICUID(t *testing.T) {
-	st := newReferenceTestStore(t)
 	nic := admissionNIC("nic-owned")
 	nic.Spec.VMRef = "uid-vm-a"
 	seedReferenceObject(t, st, nic)
 
 	err := ReverseReferenceValidator{Store: st}.Validate(
 		context.Background(), deleteRequest(metav1.KindVM, "vm-a", "uid-vm-a"))
-	assertAdmissionReason(t, err, ReasonConflict)
-	assertReferencedBy(t, err, "NIC/nic-owned")
-}
-
-// TestDeleteReferenceValidatorAllowsUnreferencedVM proves a VM whose UID is held
-// by no Volume/NIC vmRef is reference-clear. We seed a Volume and a NIC that
-// point at a different VM UID to prove the scan rejects non-matching owners.
-func TestDeleteReferenceValidatorAllowsUnreferencedVM(t *testing.T) {
-	st := newReferenceTestStore(t)
-	vol := dataAdmissionVolume("vol-other-vm")
-	vol.Spec.VMRef = "uid-some-other-vm"
-	seedReferenceObject(t, st, vol)
-	nic := admissionNIC("nic-other-vm")
-	nic.Spec.VMRef = "uid-some-other-vm"
-	seedReferenceObject(t, st, nic)
-
-	err := ReverseReferenceValidator{Store: st}.Validate(
-		context.Background(), deleteRequest(metav1.KindVM, "vm-a", "uid-vm-a"))
 	if err != nil {
-		t.Fatalf("Validate() error = %v, want nil (VM not referenced)", err)
+		t.Fatalf("Validate() error = %v, want nil (VM is the ownership apex, no reverse edge)", err)
 	}
 }
 
@@ -183,25 +157,6 @@ func TestDeleteReferenceValidatorIgnoresNonDeleteOperation(t *testing.T) {
 	}
 }
 
-// TestDeleteReferenceValidatorResolvesVMUIDFromOldRaw proves the OldRaw fallback:
-// when OldObject does not carry typed metadata, the VM UID is decoded from the
-// raw stored bytes the handler also supplies.
-func TestDeleteReferenceValidatorResolvesVMUIDFromOldRaw(t *testing.T) {
-	st := newReferenceTestStore(t)
-	vol := dataAdmissionVolume("vol-owned")
-	vol.Spec.VMRef = "uid-vm-a"
-	seedReferenceObject(t, st, vol)
-
-	err := ReverseReferenceValidator{Store: st}.Validate(context.Background(), Request{
-		Operation: OperationDelete,
-		Kind:      metav1.KindVM,
-		Name:      "vm-a",
-		OldRaw:    []byte(`{"metadata":{"name":"vm-a","uid":"uid-vm-a"}}`),
-	})
-	assertAdmissionReason(t, err, ReasonConflict)
-	assertReferencedBy(t, err, "Volume/vol-owned")
-}
-
 // TestDeleteReferenceValidatorListErrorIsInternal proves a store List failure
 // surfaces as Internal (500), never a false unreferenced pass.
 func TestDeleteReferenceValidatorListErrorIsInternal(t *testing.T) {
@@ -225,42 +180,6 @@ func TestDeleteReferenceValidatorDecodeErrorIsInternal(t *testing.T) {
 
 	err := ReverseReferenceValidator{Store: st}.Validate(
 		context.Background(), deleteRequest(metav1.KindVolume, "vol-a", "uid-vol-a"))
-	assertAdmissionReason(t, err, ReasonInternal)
-}
-
-// TestDeleteReferenceValidatorEmptyVMUIDIsReferenceClear proves the safety-
-// critical short-circuit: a VM with no UID can never be the target of any
-// vmRef, so even when Volume/NIC carry an empty vmRef the scan must not produce
-// a false match. Seeds a Volume and a NIC with empty vmRef and deletes a VM with
-// empty UID; the result must be reference-clear, never a spurious conflict.
-func TestDeleteReferenceValidatorEmptyVMUIDIsReferenceClear(t *testing.T) {
-	st := newReferenceTestStore(t)
-	vol := dataAdmissionVolume("vol-empty-vmref")
-	vol.Spec.VMRef = ""
-	seedReferenceObject(t, st, vol)
-	nic := admissionNIC("nic-empty-vmref")
-	nic.Spec.VMRef = ""
-	seedReferenceObject(t, st, nic)
-
-	err := ReverseReferenceValidator{Store: st}.Validate(
-		context.Background(), deleteRequest(metav1.KindVM, "vm-no-uid", ""))
-	if err != nil {
-		t.Fatalf("Validate() error = %v, want nil (empty UID cannot match empty vmRef)", err)
-	}
-}
-
-// TestDeleteReferenceValidatorMissingTargetMetadataIsInternal proves the
-// targetUID total-failure path: when a VM delete request carries neither typed
-// OldObject metadata nor OldRaw bytes, the UID cannot be resolved and the scan
-// surfaces Internal (500) rather than silently treating the VM as unreferenced.
-func TestDeleteReferenceValidatorMissingTargetMetadataIsInternal(t *testing.T) {
-	st := newReferenceTestStore(t)
-
-	err := ReverseReferenceValidator{Store: st}.Validate(context.Background(), Request{
-		Operation: OperationDelete,
-		Kind:      metav1.KindVM,
-		Name:      "vm-a",
-	})
 	assertAdmissionReason(t, err, ReasonInternal)
 }
 

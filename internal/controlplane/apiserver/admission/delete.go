@@ -11,24 +11,30 @@ import (
 )
 
 // ReverseReferenceValidator protects a DELETE by scanning the live store for any
-// downstream object that still references the deletion target, rejecting the
-// delete with Conflict (409) until the dependent is removed first. It is the
-// inverse of apply's ReferenceValidator: apply rejects a referrer that points at
-// a missing/deleting target; this rejects deleting a target that is still
-// pointed at. The reference graph (by object NAME unless noted):
+// downstream object that still requires the deletion target as a prerequisite,
+// rejecting the delete with Conflict (409) until the dependent is removed first.
+// It is the inverse of apply's ReferenceValidator: apply rejects a referrer that
+// points at a missing/deleting target; this rejects deleting a target that is
+// still depended on. The dependency graph (by object NAME):
 //
 //	StoragePool <- Volume.poolRef, Volume.imageFilePoolRef, Image.filePoolRef
 //	Image       <- Volume.imageRef
 //	Network     <- NIC.networkRef
 //	Volume      <- VM.volumeRefs[]
 //	NIC         <- VM.nicRefs[]
-//	VM          <- Volume.vmRef, NIC.vmRef  (by VM UID, not name)
+//	VM          <- (nothing)
 //
-// The VM edges close the gap Knife 1 left open: Volume/NIC carry a vmRef holding
-// the owning VM's UID, so deleting a VM that still owns a Volume or NIC must be
-// rejected. DELETE only carries kind+name, so the VM's UID is read from the
-// request's OldObject (the metadata the handler already decoded for the stamp
-// write-back); OldRaw is the fallback source. See targetUID.
+// A VM has no reverse edge: it is the apex of the ownership tree. VM.volumeRefs /
+// VM.nicRefs make Volume/NIC prerequisites of the VM (so they cannot be deleted
+// while the VM names them), but the Volume.vmRef / NIC.vmRef backpointers are
+// ownership, not a dependency the VM has — they must NOT block deleting the VM.
+// Reverse teardown deletes the VM first (its object disappears once its finalizer
+// drains), which removes the volumeRefs/nicRefs edges and unblocks the owned
+// Volume/NIC. Blocking VM deletion on those backpointers would deadlock teardown:
+// the Volume cannot go (VM still names it) and the VM cannot go (Volume points
+// back), so nothing is ever removed. The vmRef backpointer is enforced only on
+// the apply side (ReferenceValidator rejects attaching a Volume/NIC to a
+// deleting VM); delete protection deliberately ignores it.
 //
 // Each scan decodes a minimal projection (metadata.name plus the spec ref fields
 // it needs), never a whole typed object. A store list or projection decode
@@ -40,10 +46,11 @@ type ReverseReferenceValidator struct {
 
 func (ReverseReferenceValidator) Name() string { return "ReverseReferenceValidator" }
 
-// volumeDeleteRefProjection decodes the StoragePool/Image/VM-bearing ref fields a
+// volumeDeleteRefProjection decodes the StoragePool/Image-bearing ref fields a
 // Volume can hold: poolRef (block pool) and imageFilePoolRef (root volume's image
-// file pool) both name a StoragePool; imageRef names an Image; vmRef holds the
-// owning VM's UID.
+// file pool) both name a StoragePool; imageRef names an Image. The vmRef
+// ownership backpointer is intentionally not decoded here — it is not a delete
+// dependency (see ReverseReferenceValidator doc).
 type volumeDeleteRefProjection struct {
 	Metadata struct {
 		Name string `json:"name"`
@@ -52,7 +59,6 @@ type volumeDeleteRefProjection struct {
 		PoolRef          string `json:"poolRef"`
 		ImageRef         string `json:"imageRef"`
 		ImageFilePoolRef string `json:"imageFilePoolRef"`
-		VMRef            string `json:"vmRef"`
 	} `json:"spec"`
 }
 
@@ -67,15 +73,15 @@ type imageDeleteRefProjection struct {
 	} `json:"spec"`
 }
 
-// nicDeleteRefProjection decodes a NIC's networkRef (names a Network) and vmRef
-// (holds the owning VM's UID).
+// nicDeleteRefProjection decodes a NIC's networkRef (names a Network). The vmRef
+// ownership backpointer is intentionally not decoded — it is not a delete
+// dependency (see ReverseReferenceValidator doc).
 type nicDeleteRefProjection struct {
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
 		NetworkRef string `json:"networkRef"`
-		VMRef      string `json:"vmRef"`
 	} `json:"spec"`
 }
 
@@ -202,45 +208,12 @@ func (v ReverseReferenceValidator) Validate(ctx context.Context, req Request) er
 		return nil
 
 	case metav1.KindVM:
-		// A VM is referenced by Volume.vmRef and NIC.vmRef, both holding the VM's
-		// UID (not its name). Knife 1 skipped this edge; closing it requires the
-		// VM's own UID, which DELETE does not carry by name — it is resolved from
-		// the request's decoded target metadata.
-		uid, err := v.targetUID(req)
-		if err != nil {
-			return Reject(v.Name(), ReasonInternal, fmt.Errorf("resolve deleting VM uid: %w", err))
-		}
-		if uid == "" {
-			// A VM with no UID cannot be the target of any vmRef, so it is
-			// reference-clear by construction; nothing downstream can point at it.
-			return nil
-		}
-		vols, err := v.list(ctx, metav1.KindVolume, req.Kind)
-		if err != nil {
-			return err
-		}
-		for _, raw := range vols {
-			var proj volumeDeleteRefProjection
-			if derr := json.Unmarshal(raw.Value, &proj); derr != nil {
-				return v.decodeReject(metav1.KindVolume, raw.Key, derr)
-			}
-			if proj.Spec.VMRef == uid {
-				return v.reject(req.Kind, req.Name, metav1.KindVolume, proj.Metadata.Name)
-			}
-		}
-		nics, err := v.list(ctx, metav1.KindNIC, req.Kind)
-		if err != nil {
-			return err
-		}
-		for _, raw := range nics {
-			var proj nicDeleteRefProjection
-			if derr := json.Unmarshal(raw.Value, &proj); derr != nil {
-				return v.decodeReject(metav1.KindNIC, raw.Key, derr)
-			}
-			if proj.Spec.VMRef == uid {
-				return v.reject(req.Kind, req.Name, metav1.KindNIC, proj.Metadata.Name)
-			}
-		}
+		// A VM has no reverse delete edge: it is the apex of the ownership tree.
+		// Volume.vmRef / NIC.vmRef are ownership backpointers, not dependencies the
+		// VM has, so they must not block deleting the VM (see the type doc for why
+		// blocking here deadlocks reverse teardown). The apply-side
+		// ReferenceValidator still prevents attaching a new Volume/NIC to a
+		// deleting VM, which is where that backpointer is enforced.
 		return nil
 
 	default:
@@ -272,23 +245,4 @@ func (v ReverseReferenceValidator) decodeReject(listKind metav1.Kind, key string
 // learn what must be removed before the delete can proceed.
 func (v ReverseReferenceValidator) reject(targetKind metav1.Kind, targetName string, refKind metav1.Kind, refName string) error {
 	return Reject(v.Name(), ReasonConflict, fmt.Errorf("%s/%s still referenced by %s/%s", targetKind, targetName, refKind, refName))
-}
-
-// targetUID resolves the deletion target's UID for the VM reverse-reference scan.
-// The DELETE handler decodes the target's metadata for the stamp write-back and
-// passes it as Request.OldObject (a metav1.ObjectMeta); OldRaw (the full stored
-// bytes) is the fallback. Only the VM branch needs this — other kinds match by
-// name from Request.Name.
-func (v ReverseReferenceValidator) targetUID(req Request) (string, error) {
-	if meta, ok := req.OldObject.(metav1.ObjectMeta); ok {
-		return meta.UID, nil
-	}
-	if len(req.OldRaw) > 0 {
-		meta, err := decodeStoredMetadata(req.OldRaw)
-		if err != nil {
-			return "", err
-		}
-		return meta.UID, nil
-	}
-	return "", fmt.Errorf("delete target metadata unavailable (OldObject type %T, OldRaw empty)", req.OldObject)
 }
