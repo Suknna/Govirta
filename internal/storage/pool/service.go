@@ -490,7 +490,9 @@ func (s *Service) DeleteVolume(ctx context.Context, poolName string, volumeID vo
 	return nil
 }
 
-// SnapshotVolume creates a qcow2 internal snapshot on an unpublished volume in the named pool.
+// SnapshotVolume creates a qcow2 internal snapshot on a volume in the named pool.
+// Snapshot safety (no live QEMU process) is enforced upstream by the
+// SnapshotController VM cold gate, not by a publish-state check here.
 func (s *Service) SnapshotVolume(ctx context.Context, poolName string, volumeID volume.ID, snapshotName string) error {
 	if err := ctx.Err(); err != nil {
 		return err

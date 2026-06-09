@@ -231,7 +231,9 @@ type SnapshotVolumeRequest struct {
 	SnapshotName string
 }
 
-// SnapshotVolume creates a qcow2 internal snapshot on an unpublished volume.
+// SnapshotVolume creates a qcow2 internal snapshot on a volume. Snapshot safety
+// (no QEMU process holding the qcow2) is the SnapshotController's responsibility
+// via the VM cold gate (spec §5.0); this layer does not re-check publish state.
 func (s *VolumeService) SnapshotVolume(ctx context.Context, req SnapshotVolumeRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -252,7 +254,9 @@ type DeleteVolumeSnapshotRequest struct {
 	SnapshotName string
 }
 
-// DeleteVolumeSnapshot deletes a qcow2 internal snapshot from an unpublished volume.
+// DeleteVolumeSnapshot deletes a qcow2 internal snapshot from a volume. Like
+// SnapshotVolume, snapshot safety is enforced by the SnapshotController's VM cold
+// gate (spec §5.0), not by a publish-state check at this layer.
 func (s *VolumeService) DeleteVolumeSnapshot(ctx context.Context, req DeleteVolumeSnapshotRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
