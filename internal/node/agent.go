@@ -115,6 +115,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 		controllers.NewNetworkController(networkSvc, master),
 		controllers.NewNICController(nicSvc, master, cfg.OwnerUID, cfg.OwnerGID),
 		controllers.NewVMController(vmmSvc, master, cfg.GuestCPU),
+		controllers.NewSnapshotController(volumeSvc, vmmSvc, master),
 	}
 
 	return newAgentWithDeps(source, list), nil
