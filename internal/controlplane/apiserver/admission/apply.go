@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"slices"
 
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
@@ -60,14 +59,14 @@ func (v EnvelopeValidator) Validate(ctx context.Context, req Request) error {
 		if oldMeta.UID != meta.UID {
 			return Reject(v.Name(), ReasonConflict, fmt.Errorf("uid is immutable: existing %q vs requested %q", oldMeta.UID, meta.UID))
 		}
-		if meta.ResourceVersion != "" && meta.ResourceVersion != oldMeta.ResourceVersion {
-			return Reject(v.Name(), ReasonConflict, fmt.Errorf("resourceVersion is server-owned: existing %q vs requested %q", oldMeta.ResourceVersion, meta.ResourceVersion))
+		if meta.ResourceVersion != "" {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("resourceVersion is server-owned on update"))
 		}
-		if meta.DeletionTimestamp != "" && meta.DeletionTimestamp != oldMeta.DeletionTimestamp {
-			return Reject(v.Name(), ReasonConflict, fmt.Errorf("deletionTimestamp is server-owned: existing %q vs requested %q", oldMeta.DeletionTimestamp, meta.DeletionTimestamp))
+		if meta.DeletionTimestamp != "" {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("deletionTimestamp is server-owned on update"))
 		}
-		if len(meta.Finalizers) != 0 && !slices.Equal(meta.Finalizers, oldMeta.Finalizers) {
-			return Reject(v.Name(), ReasonConflict, fmt.Errorf("finalizers are server-owned: existing %v vs requested %v", oldMeta.Finalizers, meta.Finalizers))
+		if len(meta.Finalizers) != 0 {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("finalizers are server-owned on update"))
 		}
 	}
 	return nil

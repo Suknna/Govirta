@@ -274,6 +274,66 @@ func TestApplyRejectsUserProvidedFinalizers(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsMissingMetadataUID(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	obj.UID = ""
+
+	rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+	if _, err := st.Get(context.Background(), storeKey(metav1.KindStoragePool, obj.Name)); err == nil {
+		t.Fatalf("rejected StoragePool must not be stored")
+	}
+}
+
+func TestApplyUpdateRejectsServerOwnedMetadataInBody(t *testing.T) {
+	serverOwnedCases := []struct {
+		name   string
+		mutate func(*storagepoolv1.StoragePool)
+	}{
+		{name: "resourceVersion", mutate: func(obj *storagepoolv1.StoragePool) { obj.ResourceVersion = "client-rv" }},
+		{name: "deletionTimestamp", mutate: func(obj *storagepoolv1.StoragePool) { obj.DeletionTimestamp = "2026-06-09T00:00:00Z" }},
+		{name: "finalizers", mutate: func(obj *storagepoolv1.StoragePool) {
+			obj.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+		}},
+	}
+
+	for _, tt := range serverOwnedCases {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, st := newTestServer(t)
+			obj := validStoragePool()
+			if rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj); rec.Code != http.StatusCreated {
+				t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+			}
+
+			update := validStoragePool()
+			tt.mutate(&update)
+			rec := doApply(t, srv, metav1.KindStoragePool, update.Name, update)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("update status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if msg := decodeError(t, rec); msg == "" {
+				t.Fatalf("expected non-empty error body")
+			}
+
+			raw := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
+			var stored storagepoolv1.StoragePool
+			if err := json.Unmarshal(raw.Value, &stored); err != nil {
+				t.Fatalf("decode stored StoragePool: %v", err)
+			}
+			if stored.Spec != obj.Spec {
+				t.Fatalf("stored spec changed after rejected update: got %+v want %+v", stored.Spec, obj.Spec)
+			}
+		})
+	}
+}
+
 // TestApplyNICAllocInjectsNodeTeardownFinalizer 验证：apply 一个 MAC 为空的 NIC 时，
 // 走 applyNIC 的 WithAllocation 分配分支——该分支在闭包内对 *nic 重新 json.Marshal 后
 // store.Put，是与直 put 结构不同的独立 marshal 路径。注入点位置若写错（例如 injectFinalizer
