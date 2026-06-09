@@ -23,7 +23,7 @@ func PostApplyChain() Chain {
 // DeleteChain returns validators for DELETE requests before the handler stamps
 // deletionTimestamp or finalizes an already-deleting object.
 func DeleteChain(st StoreReader) Chain {
-	return NewChain()
+	return NewChain(ReverseReferenceValidator{Store: st})
 }
 
 // StatusPatchChain returns validators for bare status subresource patches before

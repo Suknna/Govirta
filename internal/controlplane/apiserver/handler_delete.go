@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 )
@@ -67,7 +68,8 @@ func (s *Server) Delete(w http.ResponseWriter, r *http.Request) {
 // delete is the kind-dispatched delete state machine. It resolves kind/name,
 // reads the object, and either stamps deletionTimestamp (first delete) or
 // returns idempotently (already deleting), guarding both paths with a reverse-
-// reference scan. ctx is threaded into every store and guard call end to end.
+// reference scan run through the admission DeleteChain. ctx is threaded into
+// every store and admission call end to end.
 func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 	kind := metav1.Kind(r.PathValue("kind"))
 	name := r.PathValue("name")
@@ -88,26 +90,31 @@ func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 		return internalErr(fmt.Errorf("apiserver: decode %s/%s for delete: %w", kind, name, err))
 	}
 
-	// 状态3：已带 deletionTimestamp（重复删除 / 删除进行中）。不重复打戳，但仍重扫
-	// 反向引用作为额外一层防护——这条 DELETE 入口路径会拒绝被引用的删除中对象。注意：
-	// "打戳到真删之间被新引用"的窗口不在这里关闭（真删时不能做引用守卫，否则造僵尸对象，
-	// 见顶部块注释），关闭它的正确位置是未来的 apply 准入侧，属本刀范围外的 backlog。
+	// 反向引用保护经 admission DeleteChain：被下游引用则拒绝（409），强制调用者先删依赖
+	// 对象。本检查在"首次打戳"（状态2）和"重复删除/删除进行中"（状态3）两条入口路径上同样
+	// 运行——状态3 仍重扫是额外一层防护，拒绝在删除窗口内 out-of-band 冒出的新引用。VM 删除
+	// 需要其自身 UID 才能扫 Volume.vmRef / NIC.vmRef，故把已解出的目标 metadata 作为
+	// OldObject、原始字节作为 OldRaw 一并传入，供 ReverseReferenceValidator 解析 UID。
+	admissionReq := admission.Request{
+		Operation: admission.OperationDelete,
+		Kind:      kind,
+		Name:      name,
+		OldRaw:    raw.Value,
+		OldObject: obj.Metadata,
+	}
+	if err := admission.DeleteChain(s.store).Validate(ctx, admissionReq); err != nil {
+		return admissionToAPIError(err)
+	}
+
+	// 状态3：已带 deletionTimestamp（重复删除 / 删除进行中）。不重复打戳，幂等返回 202，
+	// 不刷新时间戳（保留首次删除请求的时刻）。引用守卫已在上方统一跑过。
 	if obj.Metadata.DeletionTimestamp != "" {
-		if apiErr := s.guardNotReferenced(ctx, kind, name); apiErr != nil {
-			return apiErr
-		}
-		// 幂等：已在删除中，直接返回 202，不刷新时间戳（保留首次删除请求的时刻）。
 		return nil
 	}
 
-	// 状态2：首次删除。先做反向引用保护：被下游引用则拒绝，强制调用者先删依赖对象。
-	if apiErr := s.guardNotReferenced(ctx, kind, name); apiErr != nil {
-		return apiErr
-	}
-
-	// 打戳：deletionTimestamp = 当前 UTC RFC3339，并防御性确保 node-teardown
-	// finalizer 在列表里（理论上 apply 时 admission 已注入，这里兜底防止漏注入即被删
-	// 导致 node 侧 live 资源无人拆除的泄漏）。
+	// 状态2：首次删除。打戳：deletionTimestamp = 当前 UTC RFC3339，并防御性确保
+	// node-teardown finalizer 在列表里（理论上 apply 时 admission 已注入，这里兜底防止
+	// 漏注入即被删导致 node 侧 live 资源无人拆除的泄漏）。
 	obj.Metadata.DeletionTimestamp = time.Now().UTC().Format(time.RFC3339)
 	ensureFinalizer(&obj.Metadata)
 
@@ -126,26 +133,6 @@ func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 		return internalErr(fmt.Errorf("apiserver: delete put %s/%s: %w", kind, name, err))
 	}
 
-	return nil
-}
-
-// guardNotReferenced runs the reverse-reference scan and maps its outcome to an
-// *apiError, or nil when the object is reference-clear. A live reference is a
-// 409 whose message names the referencing object ("still referenced by
-// <Kind>/<name>") so the caller knows what to remove first. An unknown kind is a
-// caller-facing 404 (the kind collection does not exist); any other guard
-// failure (a store list / decode error) is a 5xx — errors 向上传播，从不吞掉。
-func (s *Server) guardNotReferenced(ctx context.Context, kind metav1.Kind, name string) *apiError {
-	referencedBy, referenced, err := s.referenceGuard(ctx, kind, name)
-	if err != nil {
-		if errors.Is(err, ErrUnknownKind) {
-			return notFound(err)
-		}
-		return internalErr(fmt.Errorf("apiserver: reference guard %s/%s: %w", kind, name, err))
-	}
-	if referenced {
-		return conflictErr(fmt.Errorf("apiserver: cannot delete %s/%s: still referenced by %s", kind, name, referencedBy))
-	}
 	return nil
 }
 

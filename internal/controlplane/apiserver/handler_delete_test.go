@@ -17,6 +17,14 @@ import (
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
 
+// refIdentity renders a referencing object's identity as "<Kind>/<name>", the
+// shape the DELETE 409 message embeds. The reverse-reference scan moved into the
+// admission package (ReverseReferenceValidator), so this is now a test-only
+// helper for asserting the referencing object appears in the error.
+func refIdentity(kind metav1.Kind, name string) string {
+	return string(kind) + "/" + name
+}
+
 // doDelete submits DELETE /apis/{kind}/{name} through the server's handler and
 // returns the recorded response.
 func doDelete(t *testing.T, srv *Server, kind metav1.Kind, name string) *httptest.ResponseRecorder {
