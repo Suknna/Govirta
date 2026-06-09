@@ -19,12 +19,15 @@ import (
 
 // classifyApply inspects the target key without changing the eventual Put
 // semantics. Callers use the result for admission decisions, not CAS.
-func (s *Server) classifyApply(ctx context.Context, kind metav1.Kind, key string) (admission.Operation, store.RawObject, any, error) {
+func (s *Server) classifyApply(ctx context.Context, kind metav1.Kind, name, key string) (admission.Operation, store.RawObject, any, error) {
 	raw, err := s.store.Get(ctx, key)
 	if err == nil {
 		obj, err := decodeObjectByKind(kind, raw.Value)
 		if err != nil {
 			return "", store.RawObject{}, nil, fmt.Errorf("apiserver: decode existing %s %q: %w", kind, key, err)
+		}
+		if err := validateStoredObjectEnvelope(kind, name, obj); err != nil {
+			return "", store.RawObject{}, nil, fmt.Errorf("apiserver: invalid existing %s %q: %w", kind, key, err)
 		}
 		return admission.OperationUpdate, raw, obj, nil
 	}
@@ -32,6 +35,30 @@ func (s *Server) classifyApply(ctx context.Context, kind metav1.Kind, key string
 		return admission.OperationCreate, store.RawObject{}, nil, nil
 	}
 	return "", store.RawObject{}, nil, fmt.Errorf("apiserver: classify apply %q: %w", key, err)
+}
+
+func validateStoredObjectEnvelope(kind metav1.Kind, name string, obj any) error {
+	typeMeta, err := admission.TypeMeta(obj)
+	if err != nil {
+		return err
+	}
+	if typeMeta.APIVersion != metav1.APIGroupVersion {
+		return fmt.Errorf("apiVersion %q must be %q", typeMeta.APIVersion, metav1.APIGroupVersion)
+	}
+	if typeMeta.Kind != kind {
+		return fmt.Errorf("kind %q must match store kind %q", typeMeta.Kind, kind)
+	}
+	meta, err := admission.Metadata(obj)
+	if err != nil {
+		return err
+	}
+	if meta.Name != name {
+		return fmt.Errorf("metadata.name %q must match store name %q", meta.Name, name)
+	}
+	if err := meta.Validate(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func decodeObjectByKind(kind metav1.Kind, raw []byte) (any, error) {
@@ -111,5 +138,23 @@ func preserveVMUpdateMetadata(oldObject any, vm *vmv1.VM) *apiError {
 		vm.Finalizers = append(vm.Finalizers[:0], existing.Finalizers...)
 	}
 
+	return nil
+}
+
+func preserveUpdateObjectMeta(req admission.Request, meta *metav1.ObjectMeta) *apiError {
+	if req.Operation != admission.OperationUpdate {
+		return nil
+	}
+	existing, err := admission.Metadata(req.OldObject)
+	if err != nil {
+		return internalErr(fmt.Errorf("apiserver: existing object metadata for %s/%s: %w", req.Kind, req.Name, err))
+	}
+	meta.ResourceVersion = existing.ResourceVersion
+	meta.DeletionTimestamp = existing.DeletionTimestamp
+	if len(existing.Finalizers) > 0 {
+		meta.Finalizers = append(meta.Finalizers[:0], existing.Finalizers...)
+	} else {
+		meta.Finalizers = nil
+	}
 	return nil
 }

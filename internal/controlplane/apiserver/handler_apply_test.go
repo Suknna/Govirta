@@ -334,6 +334,68 @@ func TestApplyUpdateRejectsServerOwnedMetadataInBody(t *testing.T) {
 	}
 }
 
+func TestApplyUpdatePreservesServerOwnedMetadataForNonVM(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	if rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedStoragePool(t, st, obj.Name)
+	created.ResourceVersion = "stored-rv"
+	created.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	created.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown, metav1.Finalizer("example.com/other")}
+	data, err := json.Marshal(created)
+	if err != nil {
+		t.Fatalf("marshal stored StoragePool: %v", err)
+	}
+	if _, err := st.Put(context.Background(), storeKey(metav1.KindStoragePool, obj.Name), data, ""); err != nil {
+		t.Fatalf("overwrite stored StoragePool: %v", err)
+	}
+
+	update := validStoragePool()
+	rec := doApply(t, srv, metav1.KindStoragePool, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedStoragePool(t, st, obj.Name)
+	if stored.ResourceVersion != created.ResourceVersion {
+		t.Fatalf("stored resourceVersion = %q, want %q", stored.ResourceVersion, created.ResourceVersion)
+	}
+	if stored.DeletionTimestamp != created.DeletionTimestamp {
+		t.Fatalf("stored deletionTimestamp = %q, want %q", stored.DeletionTimestamp, created.DeletionTimestamp)
+	}
+	if len(stored.Finalizers) != len(created.Finalizers) {
+		t.Fatalf("stored finalizers = %v, want %v", stored.Finalizers, created.Finalizers)
+	}
+	for i := range created.Finalizers {
+		if stored.Finalizers[i] != created.Finalizers[i] {
+			t.Fatalf("stored finalizers = %v, want %v", stored.Finalizers, created.Finalizers)
+		}
+	}
+}
+
+func TestApplyUpdateCorruptExistingEnvelopeReturnsInternalError(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	stored := obj
+	stored.UID = ""
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal invalid stored StoragePool: %v", err)
+	}
+	if _, err := st.Put(context.Background(), storeKey(metav1.KindStoragePool, obj.Name), data, ""); err != nil {
+		t.Fatalf("seed invalid stored StoragePool: %v", err)
+	}
+
+	rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("update status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestApplyNICAllocInjectsNodeTeardownFinalizer 验证：apply 一个 MAC 为空的 NIC 时，
 // 走 applyNIC 的 WithAllocation 分配分支——该分支在闭包内对 *nic 重新 json.Marshal 后
 // store.Put，是与直 put 结构不同的独立 marshal 路径。注入点位置若写错（例如 injectFinalizer
@@ -369,6 +431,51 @@ func TestApplyNICAllocInjectsNodeTeardownFinalizer(t *testing.T) {
 	want := []metav1.Finalizer{metav1.FinalizerNodeTeardown}
 	if len(stored.Finalizers) != len(want) || stored.Finalizers[0] != want[0] {
 		t.Fatalf("stored finalizers = %v, want %v (lost across applyNIC re-marshal)", stored.Finalizers, want)
+	}
+}
+
+func TestApplyNICUpdatePreservesExistingMACWhenBodyOmitsIt(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validNIC()
+	if rec := doApply(t, srv, metav1.KindNIC, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedNIC(t, st, obj.Name)
+	if created.Spec.MAC == "" {
+		t.Fatalf("created NIC MAC is empty")
+	}
+
+	update := validNIC()
+	update.Spec.MAC = ""
+	rec := doApply(t, srv, metav1.KindNIC, update.Name, update)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	stored := storedNIC(t, st, obj.Name)
+	if stored.Spec.MAC != created.Spec.MAC {
+		t.Fatalf("stored MAC = %q, want preserved %q", stored.Spec.MAC, created.Spec.MAC)
+	}
+}
+
+func TestApplyNICUpdateRejectsMACChange(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validNIC()
+	if rec := doApply(t, srv, metav1.KindNIC, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	created := storedNIC(t, st, obj.Name)
+
+	update := validNIC()
+	update.Spec.MAC = "02:00:00:00:99:99"
+	rec := doApply(t, srv, metav1.KindNIC, update.Name, update)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("update status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	stored := storedNIC(t, st, obj.Name)
+	if stored.Spec.MAC != created.Spec.MAC {
+		t.Fatalf("stored MAC = %q, want unchanged %q", stored.Spec.MAC, created.Spec.MAC)
 	}
 }
 
@@ -672,6 +779,32 @@ func storedVM(t *testing.T, st store.Store, name string) vmv1.VM {
 	var stored vmv1.VM
 	if err := json.Unmarshal(raw.Value, &stored); err != nil {
 		t.Fatalf("decode stored VM %s: %v", name, err)
+	}
+	return stored
+}
+
+func storedStoragePool(t *testing.T, st store.Store, name string) storagepoolv1.StoragePool {
+	t.Helper()
+	raw, err := st.Get(context.Background(), storeKey(metav1.KindStoragePool, name))
+	if err != nil {
+		t.Fatalf("get stored StoragePool %s: %v", name, err)
+	}
+	var stored storagepoolv1.StoragePool
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored StoragePool %s: %v", name, err)
+	}
+	return stored
+}
+
+func storedNIC(t *testing.T, st store.Store, name string) nicv1.NIC {
+	t.Helper()
+	raw, err := st.Get(context.Background(), storeKey(metav1.KindNIC, name))
+	if err != nil {
+		t.Fatalf("get stored NIC %s: %v", name, err)
+	}
+	var stored nicv1.NIC
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored NIC %s: %v", name, err)
 	}
 	return stored
 }

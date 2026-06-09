@@ -1,11 +1,9 @@
 // Package apiserver implements the Govirta control-plane HTTP surface. It is the
 // admission boundary between caller-submitted resource JSON and the raw
-// store.Store: it decodes a submitted object by its kind, runs the apis-layer
-// Validate() contracts, applies admission-time mutations/checks that are the
-// apiserver's responsibility (NIC MAC allocation, Network range self-consistency),
-// and persists the object. The store remains kind-agnostic; all kind dispatch
-// lives here. This package never imports or mutates pkg/apis types — it only
-// decodes into them and calls their public Validate() methods.
+// store.Store: it decodes a submitted object by its kind, runs validating
+// admission, applies apiserver-owned mutations (finalizer injection, NIC MAC
+// allocation, VM node binding, server-owned metadata preservation), and persists
+// the object. The store remains kind-agnostic; all kind dispatch lives here.
 package apiserver
 
 import (
@@ -95,6 +93,9 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		}
 		pool := obj.(storagepoolv1.StoragePool)
 		injectFinalizer(&pool.ObjectMeta)
+		if aerr := preserveUpdateObjectMeta(req, &pool.ObjectMeta); aerr != nil {
+			return nil, aerr
+		}
 		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, pool.Name), pool, req)
 		if aerr != nil {
 			return nil, aerr
@@ -109,6 +110,9 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		}
 		image := obj.(imagev1.Image)
 		injectFinalizer(&image.ObjectMeta)
+		if aerr := preserveUpdateObjectMeta(req, &image.ObjectMeta); aerr != nil {
+			return nil, aerr
+		}
 		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, image.Name), image, req)
 		if aerr != nil {
 			return nil, aerr
@@ -123,6 +127,9 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		}
 		volume := obj.(volumev1.Volume)
 		injectFinalizer(&volume.ObjectMeta)
+		if aerr := preserveUpdateObjectMeta(req, &volume.ObjectMeta); aerr != nil {
+			return nil, aerr
+		}
 		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, volume.Name), volume, req)
 		if aerr != nil {
 			return nil, aerr
@@ -137,6 +144,9 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		}
 		network := obj.(networkv1.Network)
 		injectFinalizer(&network.ObjectMeta)
+		if aerr := preserveUpdateObjectMeta(req, &network.ObjectMeta); aerr != nil {
+			return nil, aerr
+		}
 		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, network.Name), network, req)
 		if aerr != nil {
 			return nil, aerr
@@ -151,6 +161,9 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 		}
 		nic := obj.(nicv1.NIC)
 		injectFinalizer(&nic.ObjectMeta)
+		if aerr := preserveUpdateObjectMeta(req, &nic.ObjectMeta); aerr != nil {
+			return nil, aerr
+		}
 		raw, aerr := s.applyNIC(ctx, storeKey(kind, nic.Name), &nic, req)
 		if aerr != nil {
 			return nil, aerr
@@ -183,7 +196,7 @@ func (s *Server) decodeAndAdmitApply(ctx context.Context, kind metav1.Kind, name
 		return nil, admission.Request{}, badRequest(fmt.Errorf("apiserver: decode %s: %w", kind, err))
 	}
 	key := storeKey(kind, name)
-	op, oldRaw, oldObj, err := s.classifyApply(ctx, kind, key)
+	op, oldRaw, oldObj, err := s.classifyApply(ctx, kind, name, key)
 	if err != nil {
 		return nil, admission.Request{}, internalErr(err)
 	}
@@ -218,6 +231,18 @@ func injectFinalizer(meta *metav1.ObjectMeta) {
 // chosen MAC cannot be claimed by a concurrent apply between selection and write.
 // A non-empty submitted MAC is preserved as-is (already validated by Validate()).
 func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC, req admission.Request) (store.RawObject, *apiError) {
+	if req.Operation == admission.OperationUpdate {
+		oldNIC, ok := req.OldObject.(nicv1.NIC)
+		if !ok {
+			return store.RawObject{}, internalErr(fmt.Errorf("apiserver: existing object for NIC %q has type %T", nic.Name, req.OldObject))
+		}
+		if nic.Spec.MAC == "" {
+			nic.Spec.MAC = oldNIC.Spec.MAC
+		} else if oldNIC.Spec.MAC != "" && nic.Spec.MAC != oldNIC.Spec.MAC {
+			return store.RawObject{}, conflictErr(fmt.Errorf("%w: mac is immutable for NIC update: existing %q vs requested %q", nicv1.ErrInvalidSpec, oldNIC.Spec.MAC, nic.Spec.MAC))
+		}
+	}
+
 	if nic.Spec.MAC != "" {
 		return s.putWithPostAdmission(ctx, key, *nic, req)
 	}
