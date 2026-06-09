@@ -35,7 +35,7 @@
 | `qemu-img snapshot -l`（列） | ❌ 缺 | 本刀补齐（回滚/管理辅助） |
 | `local.Driver.Snapshot` | ⚠️ 返回 `ErrUnsupported` | 本刀接线到执行面 |
 | admission 框架 / 反向引用扫描 | ✅ 已建（刀 3） | `internal/controlplane/apiserver/admission` |
-| stopped 门禁（live phase） | ✅ 已建（刀 2/3） | VM 控制器 live phase 判定 |
+| 冷门禁（live phase，精化自 stopped 门禁） | ✅ 已建（刀 2/3） | VM 控制器 live phase 判定；本刀精化为 `vmIsCold` |
 
 ## 2. 产品哲学
 
@@ -154,14 +154,27 @@ Snapshot 沿用 `FinalizerNodeTeardown`：
 框架（watch→workqueue→reconcile→PATCH status + RemoveFinalizer），`Kind()` 返回
 `metav1.KindSnapshot`，在 `node.Agent` 装配时注册。
 
+### 5.0 冷门禁定义（cold gate，精化自「stopped 门禁」）
+
+qemu-img snapshot 的安全硬约束是**没有 QEMU 进程打开这个 qcow2**——这是「进程死」而非字面 `PhaseStopped`。VM live phase 中进程死的态有三个：`PhaseStopped`（启动后停止）、`PhaseDefined`（`powerState=Off` 从未启动）、`PhaseFailed`（intent=running 但异常退出）。
+
+**冷门禁 = 进程死 且 非 running 意图**，落到 phase 即 **`PhaseStopped` 或 `PhaseDefined`**：
+
+- **允许 `PhaseStopped` + `PhaseDefined`**：两者 intent 都不是 running，VM 控制器不会在快照期间擅自重启（无竞争）；且进程死，qcow2 无人持有，qemu-img 安全。`PhaseDefined` 必须放行——否则 `powerState=Off` 新建 VM 必须先 On→Off 一次才能打快照（接近 bug 的 UX）。
+- **排除 `PhaseFailed`**：它 intent=running，VM 控制器下次 reconcile 可能重新 Start，快照期间存在进程重启竞争——不安全，门禁不放行（视为「未冷」，requeue 等待）。
+- **`vmm.ErrNotFound`（runtime 不存在）视为已冷**：runtime `vm.json` 不存在意味着没有任何进程持有 qcow2，等价进程死；尤其删除路径上 VM 对象在但 runtime 已没，必须放行而非永久 requeue。
+
+实现用一个共享判定 `vmIsCold(phase)`（建/删两路共用一处定义），`vmm.ErrNotFound` 也归入 cold。下文「冷门禁通过」即指此判定为真。
+
 ### 5.1 建快照路径（无 deletionTimestamp）
 
 ```
 1. decode → 若 status.phase == Ready 提前返回（level-triggered 幂等，沿用刀 1/3 防 PATCH 自环）
 2. 解析 spec.vmRef → 经 master client 读 VM 对象 → 取 spec.volumeRefs
-3. stopped 门禁：查 vmRef 的 VM live phase
-   - != Stopped → status=Pending + message "waiting for VM stopped" + RequeueAfter
-4. VM stopped → 逐块 volumeRef：经 storage 边界解析 qcow2 path → snapshot create <snapshot-uid>
+3. 冷门禁：查 vmRef 的 VM live phase（vmm.Status；ErrNotFound 视为已冷）
+   - 未冷（PhaseFailed/PhaseStarting/PhaseRunning/PhaseStopping）→ status=Pending
+     + message "waiting for VM cold (stopped/defined)" + RequeueAfter
+4. 冷门禁通过 → 逐块 volumeRef：经 storage 边界解析 qcow2 path → snapshot create <snapshot-uid>
 5. 全有或全无：
    - 中途某块失败 → 回滚已建的（snapshot delete <uid>）→ status=Failed
      + diskSnapshots（已建的标 Created、失败的标 Failed）+ message + RequeueAfter
@@ -172,20 +185,23 @@ Snapshot 沿用 `FinalizerNodeTeardown`：
 ### 5.2 删快照路径（deletionTimestamp 非空 / EventDeleted）
 
 ```
-1. stopped 门禁：查 vmRef 的 VM live phase
-   - != Stopped → 不摘 finalizer + status=Deleting + message "waiting for VM stopped" + RequeueAfter
-2. VM stopped → 逐块 volumeRef：snapshot delete <snapshot-uid>
-   - 幂等：内部快照不存在视为已删（不报错）
+1. 冷门禁：查 vmRef 的 VM live phase（vmm.Status；ErrNotFound 视为已冷）
+   - 未冷 → 不摘 finalizer + status=Deleting + message "waiting for VM cold" + RequeueAfter
+   - VM 对象本身已不存在（master ErrNotFound）→ qcow2 随 VM 一起没了，直接 RemoveFinalizer
+2. 冷门禁通过 → 逐块 volumeRef：snapshot delete <snapshot-uid>
+   - 幂等：内部快照不存在视为已删（不报错）——delete 前 list 一次，缺失则跳过
 3. 全部删净 → RemoveFinalizer → apiserver 见 finalizers 空 → 真 store.Delete
 4. 中途失败 → 保留 finalizer + status=Deleting + message + RequeueAfter（level-triggered 重试）
 ```
 
 ### 5.3 门禁与收敛纪律
 
-- stopped 门禁两路都用 **live phase**（非 status 投影），与刀 3 cold-mutable 门禁同构
-  （上下一致铁律：live 实况是唯一权威）。
+- 冷门禁两路都用 **live phase**（非 status 投影），与刀 3 cold-mutable 门禁同构
+  （上下一致铁律：live 实况是唯一权威）。`vmIsCold` 是建/删共享的单一判定。
 - 门禁未过 / 扇出失败 → `RequeueAfter` 延迟轮询（刀 2 引入），不紧打转。
 - 所有错误向上传播，多块盘失败 / 回滚失败用 `errors.Join` 合并（项目铁律）。
+- 删除幂等：删不存在的内部快照不得报错（list-before-delete 或 sentinel 容忍），
+  否则 teardown 会因「重复删 / 创建中途失败留下的部分盘」永久卡住 finalizer。
 - status PATCH 前比对：与期望 status 相同则跳过 PATCH（沿用刀 1/3 防自环）。
 
 ## 6. 执行面补齐（`pkg/virt/qemuimg/snapshot`）
@@ -269,7 +285,8 @@ Snapshot 沿用 `FinalizerNodeTeardown`：
 3. nodeName = apiserver admission 从 vmRef 解析注入（第三个 mutation 先例）。
 4. 内部快照命名 = 所有盘统一用 Snapshot UID。
 5. 扇出原子性 = 全有或全无（失败回滚已建的，status=Failed 可重试）。
-6. stopped 门禁 = 建和删都要求 VM stopped（qemu-img 硬约束）。
+6. 冷门禁 = 建和删都要求 VM 进程死且非 running 意图（`PhaseStopped`/`PhaseDefined`，
+   `vmm.ErrNotFound` 视为已冷；排除 `PhaseFailed`）——精化自「stopped 门禁」，详见 §5.0。
 7. 执行面 = 补齐 `-c`/`-d`/`-a`/`-l`（回滚就绪待 Job）。
 8. status = 结构化 per-disk 结果（phase + diskSnapshots + message）。
 9. 字段可变性 = 全 spec immutable（与 Image 同类）。
