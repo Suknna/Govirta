@@ -4,13 +4,18 @@ package admission
 // before apiserver-owned mutation such as finalizer injection, MAC allocation,
 // or VM node binding runs.
 func PreApplyChain(st StoreReader) Chain {
-	return NewChain()
+	return NewChain(
+		EnvelopeValidator{},
+		SpecValidator{},
+		ApplyOperationValidator{},
+		VMPowerStateValidator{},
+	)
 }
 
 // PostApplyChain returns validators that check the final object after
 // apiserver-owned mutation and before the object is written to the store.
 func PostApplyChain() Chain {
-	return NewChain()
+	return NewChain(NICFinalMACValidator{})
 }
 
 // DeleteChain returns validators for DELETE requests before the handler stamps

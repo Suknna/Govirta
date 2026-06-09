@@ -256,29 +256,21 @@ func TestApplyInjectsNodeTeardownFinalizer(t *testing.T) {
 	}
 }
 
-// TestApplyPreservesExistingFinalizers 验证：apply 一个已带 finalizer 的对象时，
-// apiserver 不覆盖原值（有条件注入只在 Finalizers 为空时生效）。
-// 这与 MAC/调度的有条件注入一致，为未来多 finalizer 场景留口。
-func TestApplyPreservesExistingFinalizers(t *testing.T) {
+func TestApplyRejectsUserProvidedFinalizers(t *testing.T) {
 	srv, st := newTestServer(t)
 
-	const existing = metav1.Finalizer("govirta.io/custom")
 	obj := validStoragePool()
-	obj.Finalizers = []metav1.Finalizer{existing}
+	obj.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
 
 	rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-
-	raw := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
-	var stored storagepoolv1.StoragePool
-	if err := json.Unmarshal(raw.Value, &stored); err != nil {
-		t.Fatalf("decode stored StoragePool: %v", err)
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
 	}
-
-	if len(stored.Finalizers) != 1 || stored.Finalizers[0] != existing {
-		t.Fatalf("stored finalizers = %v, want %v (existing must be preserved as-is)", stored.Finalizers, []metav1.Finalizer{existing})
+	if _, err := st.Get(context.Background(), storeKey(metav1.KindStoragePool, obj.Name)); err == nil {
+		t.Fatalf("rejected StoragePool must not be stored")
 	}
 }
 
@@ -479,7 +471,7 @@ func TestApplyVMUpdateAllowsExplicitSameNodeName(t *testing.T) {
 	}
 }
 
-func TestApplyVMUpdateRejectsDifferentNodeName(t *testing.T) {
+func TestApplyVMUpdateRejectsDifferentNodeNameWithConflict(t *testing.T) {
 	srv, st := newTestServer(t)
 
 	obj := validVM()
@@ -492,8 +484,8 @@ func TestApplyVMUpdateRejectsDifferentNodeName(t *testing.T) {
 	update.NodeName = "node-2"
 	update.Spec.PowerState = vmv1.PowerStateShutdown
 	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("update status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("update status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if msg := decodeError(t, rec); msg == "" {
 		t.Fatalf("expected non-empty error body")
@@ -505,6 +497,45 @@ func TestApplyVMUpdateRejectsDifferentNodeName(t *testing.T) {
 	}
 	if stored.Spec.PowerState != created.Spec.PowerState {
 		t.Fatalf("stored powerState = %q, want unchanged %q", stored.Spec.PowerState, created.Spec.PowerState)
+	}
+}
+
+func TestApplyUpdateRejectsUIDChange(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	if rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	update := validStoragePool()
+	update.UID = "uid-other"
+	rec := doApply(t, srv, metav1.KindStoragePool, update.Name, update)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("update status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
+	var stored storagepoolv1.StoragePool
+	if err := json.Unmarshal(raw.Value, &stored); err != nil {
+		t.Fatalf("decode stored StoragePool: %v", err)
+	}
+	if stored.UID != obj.UID {
+		t.Fatalf("stored uid = %q, want unchanged %q", stored.UID, obj.UID)
+	}
+}
+
+func TestApplyUpdateCorruptExistingNonVMReturnsInternalError(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	if _, err := st.Put(context.Background(), storeKey(metav1.KindStoragePool, obj.Name), []byte("{"), ""); err != nil {
+		t.Fatalf("seed corrupt StoragePool: %v", err)
+	}
+
+	rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("update status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

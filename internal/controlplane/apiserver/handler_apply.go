@@ -16,7 +16,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 
 	"github.com/rs/zerolog"
 	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
@@ -90,126 +89,119 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 
 	switch kind {
 	case metav1.KindStoragePool:
-		var obj storagepoolv1.StoragePool
-		if err := json.Unmarshal(body, &obj); err != nil {
-			return nil, badRequest(fmt.Errorf("apiserver: decode StoragePool: %w", err))
-		}
-		if err := validateObject(obj.ObjectMeta, obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		if err := requireName(name, obj.Name); err != nil {
-			return nil, badRequest(err)
-		}
-		injectFinalizer(&obj.ObjectMeta)
-		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
 			return nil, aerr
 		}
-		obj.ResourceVersion = raw.ResourceVersion
-		return marshalResponse(obj)
+		pool := obj.(storagepoolv1.StoragePool)
+		injectFinalizer(&pool.ObjectMeta)
+		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, pool.Name), pool, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		pool.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(pool)
 
 	case metav1.KindImage:
-		var obj imagev1.Image
-		if err := json.Unmarshal(body, &obj); err != nil {
-			return nil, badRequest(fmt.Errorf("apiserver: decode Image: %w", err))
-		}
-		if err := validateObject(obj.ObjectMeta, obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		if err := requireName(name, obj.Name); err != nil {
-			return nil, badRequest(err)
-		}
-		injectFinalizer(&obj.ObjectMeta)
-		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
 			return nil, aerr
 		}
-		obj.ResourceVersion = raw.ResourceVersion
-		return marshalResponse(obj)
+		image := obj.(imagev1.Image)
+		injectFinalizer(&image.ObjectMeta)
+		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, image.Name), image, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		image.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(image)
 
 	case metav1.KindVolume:
-		var obj volumev1.Volume
-		if err := json.Unmarshal(body, &obj); err != nil {
-			return nil, badRequest(fmt.Errorf("apiserver: decode Volume: %w", err))
-		}
-		if err := validateObject(obj.ObjectMeta, obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		if err := requireName(name, obj.Name); err != nil {
-			return nil, badRequest(err)
-		}
-		injectFinalizer(&obj.ObjectMeta)
-		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
 			return nil, aerr
 		}
-		obj.ResourceVersion = raw.ResourceVersion
-		return marshalResponse(obj)
+		volume := obj.(volumev1.Volume)
+		injectFinalizer(&volume.ObjectMeta)
+		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, volume.Name), volume, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		volume.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(volume)
 
 	case metav1.KindNetwork:
-		var obj networkv1.Network
-		if err := json.Unmarshal(body, &obj); err != nil {
-			return nil, badRequest(fmt.Errorf("apiserver: decode Network: %w", err))
-		}
-		if err := validateObject(obj.ObjectMeta, obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		if err := requireName(name, obj.Name); err != nil {
-			return nil, badRequest(err)
-		}
-		// Admission-time cross-field self-consistency, beyond per-field Validate().
-		if err := validateNetworkAdmission(obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		injectFinalizer(&obj.ObjectMeta)
-		raw, aerr := s.put(ctx, storeKey(kind, obj.Name), obj)
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
 			return nil, aerr
 		}
-		obj.ResourceVersion = raw.ResourceVersion
-		return marshalResponse(obj)
+		network := obj.(networkv1.Network)
+		injectFinalizer(&network.ObjectMeta)
+		raw, aerr := s.putWithPostAdmission(ctx, storeKey(kind, network.Name), network, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		network.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(network)
 
 	case metav1.KindNIC:
-		var obj nicv1.NIC
-		if err := json.Unmarshal(body, &obj); err != nil {
-			return nil, badRequest(fmt.Errorf("apiserver: decode NIC: %w", err))
-		}
-		if err := validateObject(obj.ObjectMeta, obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		if err := requireName(name, obj.Name); err != nil {
-			return nil, badRequest(err)
-		}
-		injectFinalizer(&obj.ObjectMeta)
-		raw, aerr := s.applyNIC(ctx, storeKey(kind, obj.Name), &obj)
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
 			return nil, aerr
 		}
-		obj.ResourceVersion = raw.ResourceVersion
-		return marshalResponse(obj)
+		nic := obj.(nicv1.NIC)
+		injectFinalizer(&nic.ObjectMeta)
+		raw, aerr := s.applyNIC(ctx, storeKey(kind, nic.Name), &nic, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		nic.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(nic)
 
 	case metav1.KindVM:
-		var obj vmv1.VM
-		if err := json.Unmarshal(body, &obj); err != nil {
-			return nil, badRequest(fmt.Errorf("apiserver: decode VM: %w", err))
-		}
-		if err := validateObject(obj.ObjectMeta, obj.Spec); err != nil {
-			return nil, badRequest(err)
-		}
-		if err := requireName(name, obj.Name); err != nil {
-			return nil, badRequest(err)
-		}
-		injectFinalizer(&obj.ObjectMeta)
-		raw, aerr := s.applyVM(ctx, storeKey(kind, obj.Name), &obj)
+		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
 			return nil, aerr
 		}
-		obj.ResourceVersion = raw.ResourceVersion
-		return marshalResponse(obj)
+		vm := obj.(vmv1.VM)
+		injectFinalizer(&vm.ObjectMeta)
+		raw, aerr := s.applyVM(ctx, storeKey(kind, vm.Name), &vm, req)
+		if aerr != nil {
+			return nil, aerr
+		}
+		vm.ResourceVersion = raw.ResourceVersion
+		return marshalResponse(vm)
 
 	default:
 		return nil, notFound(fmt.Errorf("%w: %q", ErrUnknownKind, kind))
 	}
+}
+
+func (s *Server) decodeAndAdmitApply(ctx context.Context, kind metav1.Kind, name string, body []byte) (any, admission.Request, *apiError) {
+	obj, err := decodeObjectByKind(kind, body)
+	if err != nil {
+		return nil, admission.Request{}, badRequest(fmt.Errorf("apiserver: decode %s: %w", kind, err))
+	}
+	key := storeKey(kind, name)
+	op, oldRaw, oldObj, err := s.classifyApply(ctx, kind, key)
+	if err != nil {
+		return nil, admission.Request{}, internalErr(err)
+	}
+	req := admission.Request{
+		Operation: op,
+		Kind:      kind,
+		Name:      name,
+		NewRaw:    body,
+		NewObject: obj,
+		OldObject: oldObj,
+	}
+	if len(oldRaw.Value) != 0 {
+		req.OldRaw = oldRaw.Value
+	}
+	if err := admission.PreApplyChain(s.store).Validate(ctx, req); err != nil {
+		return nil, admission.Request{}, admissionToAPIError(err)
+	}
+	return obj, req, nil
 }
 
 // injectFinalizer 在对象持久化前注入默认 node-teardown finalizer（仅当 Finalizers 为空），
@@ -225,14 +217,17 @@ func injectFinalizer(meta *metav1.ObjectMeta) {
 // allocation and the NIC Put happen atomically inside WithAllocation so the
 // chosen MAC cannot be claimed by a concurrent apply between selection and write.
 // A non-empty submitted MAC is preserved as-is (already validated by Validate()).
-func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC) (store.RawObject, *apiError) {
+func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC, req admission.Request) (store.RawObject, *apiError) {
 	if nic.Spec.MAC != "" {
-		return s.put(ctx, key, *nic)
+		return s.putWithPostAdmission(ctx, key, *nic, req)
 	}
 
 	var raw store.RawObject
 	err := s.alloc.WithAllocation(ctx, func(hw net.HardwareAddr) error {
 		nic.Spec.MAC = hw.String()
+		if err := validatePostApply(ctx, *nic, req); err != nil {
+			return err
+		}
 		data, mErr := json.Marshal(*nic)
 		if mErr != nil {
 			return fmt.Errorf("apiserver: marshal NIC: %w", mErr)
@@ -245,6 +240,10 @@ func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC) (stor
 		return nil
 	})
 	if err != nil {
+		var admissionErr *admission.Error
+		if errors.As(err, &admissionErr) {
+			return store.RawObject{}, admissionToAPIError(err)
+		}
 		if errors.Is(err, mac.ErrMACPoolExhausted) {
 			return store.RawObject{}, conflictErr(err)
 		}
@@ -290,71 +289,38 @@ func (s *Server) put(ctx context.Context, key string, obj any) (store.RawObject,
 	return raw, nil
 }
 
-// specValidator is the subset of the apis Spec contract the apiserver depends on:
-// each resource Spec exposes Validate() to self-check its fields.
-type specValidator interface {
-	Validate() error
+func (s *Server) putWithPostAdmission(ctx context.Context, key string, obj any, req admission.Request) (store.RawObject, *apiError) {
+	if err := validatePostApply(ctx, obj, req); err != nil {
+		return store.RawObject{}, admissionToAPIError(err)
+	}
+	return s.put(ctx, key, obj)
 }
 
-// validateObject runs both halves of the apis-layer identity+spec contract and
-// joins their failures, because there is no object-level Validate(): meta and
-// spec validate independently and a caller may violate both at once.
-func validateObject(meta metav1.ObjectMeta, spec specValidator) error {
-	return errors.Join(meta.Validate(), spec.Validate())
+func validatePostApply(ctx context.Context, obj any, req admission.Request) error {
+	req.NewObject = obj
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return admission.Reject("PostApplyMarshal", admission.ReasonInternal, fmt.Errorf("apiserver: marshal final object: %w", err))
+	}
+	req.NewRaw = data
+	return admission.PostApplyChain().Validate(ctx, req)
 }
 
-// requireName enforces that the URL identity matches the body identity. metaName
-// is guaranteed non-empty here because validateObject already rejected an empty
-// name with a 400.
-func requireName(pathName, metaName string) error {
-	if pathName != metaName {
-		return fmt.Errorf("%w: path %q vs metadata.name %q", ErrNameMismatch, pathName, metaName)
+func admissionToAPIError(err error) *apiError {
+	var admissionErr *admission.Error
+	if !errors.As(err, &admissionErr) {
+		return internalErr(err)
 	}
-	return nil
-}
-
-// validateNetworkAdmission checks cross-field self-consistency that per-field
-// Validate() cannot: a non-negative lease, an ordered DHCP range, and gateway +
-// DHCP bounds contained in the declared subnet. Addresses are re-parsed (they
-// already passed Validate) and any parse failure is propagated rather than
-// ignored, so a future Validate change cannot let a malformed value slip through.
-func validateNetworkAdmission(spec networkv1.NetworkSpec) error {
-	if spec.LeaseSeconds < 0 {
-		return fmt.Errorf("%w: leaseSeconds must be non-negative, got %d", ErrNetworkAdmission, spec.LeaseSeconds)
+	switch admissionErr.Reason {
+	case admission.ReasonBadRequest:
+		return badRequest(err)
+	case admission.ReasonConflict:
+		return conflictErr(err)
+	case admission.ReasonInternal:
+		return internalErr(err)
+	default:
+		return internalErr(err)
 	}
-
-	subnet, err := netip.ParsePrefix(spec.Subnet)
-	if err != nil {
-		return fmt.Errorf("%w: subnet %q: %w", ErrNetworkAdmission, spec.Subnet, err)
-	}
-	gateway, err := netip.ParsePrefix(spec.GatewayCIDR)
-	if err != nil {
-		return fmt.Errorf("%w: gatewayCIDR %q: %w", ErrNetworkAdmission, spec.GatewayCIDR, err)
-	}
-	start, err := netip.ParseAddr(spec.DHCPRangeStart)
-	if err != nil {
-		return fmt.Errorf("%w: dhcpRangeStart %q: %w", ErrNetworkAdmission, spec.DHCPRangeStart, err)
-	}
-	end, err := netip.ParseAddr(spec.DHCPRangeEnd)
-	if err != nil {
-		return fmt.Errorf("%w: dhcpRangeEnd %q: %w", ErrNetworkAdmission, spec.DHCPRangeEnd, err)
-	}
-
-	if start.Compare(end) > 0 {
-		return fmt.Errorf("%w: dhcpRangeStart %s is after dhcpRangeEnd %s", ErrNetworkAdmission, start, end)
-	}
-
-	gw := gateway.Addr()
-	if !subnet.Contains(gw) {
-		return fmt.Errorf("%w: gateway %s not in subnet %s", ErrNetworkAdmission, gw, subnet)
-	}
-	if !subnet.Contains(start) {
-		return fmt.Errorf("%w: dhcpRangeStart %s not in subnet %s", ErrNetworkAdmission, start, subnet)
-	}
-	if !subnet.Contains(end) {
-		return fmt.Errorf("%w: dhcpRangeEnd %s not in subnet %s", ErrNetworkAdmission, end, subnet)
-	}
-	return nil
 }
 
 // storeKey delegates to the admission package's canonical key helper so the
