@@ -99,6 +99,29 @@ func TestFieldPolicyRejectsNetworkSpecChange(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonConflict)
 }
 
+func TestFieldPolicyRejectsNetworkOptionOrderChange(t *testing.T) {
+	old := validAdmissionNetwork()
+	old.Spec.DNS = []string{"1.1.1.1", "8.8.8.8"}
+	old.Spec.Router = []string{"192.168.100.1", "192.168.100.254"}
+
+	tests := []struct {
+		name   string
+		mutate func(*networkv1.Network)
+	}{
+		{name: "dns", mutate: func(obj *networkv1.Network) { obj.Spec.DNS = []string{"8.8.8.8", "1.1.1.1"} }},
+		{name: "router", mutate: func(obj *networkv1.Network) { obj.Spec.Router = []string{"192.168.100.254", "192.168.100.1"} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := old
+			tt.mutate(&obj)
+			err := validateFieldPolicyUpdate(metav1.KindNetwork, old.Name, old, obj)
+			assertAdmissionReason(t, err, ReasonConflict)
+		})
+	}
+}
+
 func TestFieldPolicyRejectsImageSpecChange(t *testing.T) {
 	old := validAdmissionImage()
 	obj := old

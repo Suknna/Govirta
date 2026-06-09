@@ -162,16 +162,32 @@ func (v FieldPolicyValidator) validateNIC(oldNIC, newNIC nicv1.NIC) error {
 func (v FieldPolicyValidator) validateNetwork(oldNetwork, newNetwork networkv1.Network) error {
 	oldSpec := oldNetwork.Spec
 	newSpec := newNetwork.Spec
-	if oldSpec.BridgeName != newSpec.BridgeName ||
-		oldSpec.Subnet != newSpec.Subnet ||
-		oldSpec.GatewayCIDR != newSpec.GatewayCIDR ||
-		oldSpec.DHCPRangeStart != newSpec.DHCPRangeStart ||
-		oldSpec.DHCPRangeEnd != newSpec.DHCPRangeEnd ||
-		oldSpec.EgressInterface != newSpec.EgressInterface ||
-		oldSpec.LeaseSeconds != newSpec.LeaseSeconds ||
-		!slices.Equal(oldSpec.DNS, newSpec.DNS) ||
-		!slices.Equal(oldSpec.Router, newSpec.Router) {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec is immutable for Network update"))
+	if oldSpec.BridgeName != newSpec.BridgeName {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.bridgeName is immutable for Network update: existing %q vs requested %q", oldSpec.BridgeName, newSpec.BridgeName))
+	}
+	if oldSpec.Subnet != newSpec.Subnet {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.subnet is immutable for Network update: existing %q vs requested %q", oldSpec.Subnet, newSpec.Subnet))
+	}
+	if oldSpec.GatewayCIDR != newSpec.GatewayCIDR {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.gatewayCIDR is immutable for Network update: existing %q vs requested %q", oldSpec.GatewayCIDR, newSpec.GatewayCIDR))
+	}
+	if oldSpec.DHCPRangeStart != newSpec.DHCPRangeStart {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.dhcpRangeStart is immutable for Network update: existing %q vs requested %q", oldSpec.DHCPRangeStart, newSpec.DHCPRangeStart))
+	}
+	if oldSpec.DHCPRangeEnd != newSpec.DHCPRangeEnd {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.dhcpRangeEnd is immutable for Network update: existing %q vs requested %q", oldSpec.DHCPRangeEnd, newSpec.DHCPRangeEnd))
+	}
+	if oldSpec.EgressInterface != newSpec.EgressInterface {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.egressInterface is immutable for Network update: existing %q vs requested %q", oldSpec.EgressInterface, newSpec.EgressInterface))
+	}
+	if oldSpec.LeaseSeconds != newSpec.LeaseSeconds {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.leaseSeconds is immutable for Network update: existing %d vs requested %d", oldSpec.LeaseSeconds, newSpec.LeaseSeconds))
+	}
+	if !slices.Equal(oldSpec.DNS, newSpec.DNS) {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.dns is immutable for Network update: existing %v vs requested %v", oldSpec.DNS, newSpec.DNS))
+	}
+	if !slices.Equal(oldSpec.Router, newSpec.Router) {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.router is immutable for Network update: existing %v vs requested %v", oldSpec.Router, newSpec.Router))
 	}
 	return nil
 }
@@ -179,12 +195,20 @@ func (v FieldPolicyValidator) validateNetwork(oldNetwork, newNetwork networkv1.N
 func (v FieldPolicyValidator) validateImage(oldImage, newImage imagev1.Image) error {
 	oldSpec := oldImage.Spec
 	newSpec := newImage.Spec
-	if oldSpec.FilePoolRef != newSpec.FilePoolRef ||
-		oldSpec.Source.Type != newSpec.Source.Type ||
-		oldSpec.Source.Location != newSpec.Source.Location ||
-		oldSpec.Format != newSpec.Format ||
-		oldSpec.DeclaredSizeBytes != newSpec.DeclaredSizeBytes {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec is immutable for Image update"))
+	if oldSpec.FilePoolRef != newSpec.FilePoolRef {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.filePoolRef is immutable for Image update: existing %q vs requested %q", oldSpec.FilePoolRef, newSpec.FilePoolRef))
+	}
+	if oldSpec.Source.Type != newSpec.Source.Type {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.source.type is immutable for Image update: existing %q vs requested %q", oldSpec.Source.Type, newSpec.Source.Type))
+	}
+	if oldSpec.Source.Location != newSpec.Source.Location {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.source.location is immutable for Image update: existing %q vs requested %q", oldSpec.Source.Location, newSpec.Source.Location))
+	}
+	if oldSpec.Format != newSpec.Format {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.format is immutable for Image update: existing %q vs requested %q", oldSpec.Format, newSpec.Format))
+	}
+	if oldSpec.DeclaredSizeBytes != newSpec.DeclaredSizeBytes {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.declaredSizeBytes is immutable for Image update: existing %d vs requested %d", oldSpec.DeclaredSizeBytes, newSpec.DeclaredSizeBytes))
 	}
 	return nil
 }
@@ -192,11 +216,17 @@ func (v FieldPolicyValidator) validateImage(oldImage, newImage imagev1.Image) er
 func (v FieldPolicyValidator) validateStoragePool(oldPool, newPool storagepoolv1.StoragePool) error {
 	oldSpec := oldPool.Spec
 	newSpec := newPool.Spec
-	if oldSpec.Backend != newSpec.Backend ||
-		oldSpec.Type != newSpec.Type ||
-		oldSpec.StorageRoot != newSpec.StorageRoot ||
-		oldSpec.CapacityBytes != newSpec.CapacityBytes {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec is immutable for StoragePool update"))
+	if oldSpec.Backend != newSpec.Backend {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.backend is immutable for StoragePool update: existing %q vs requested %q", oldSpec.Backend, newSpec.Backend))
+	}
+	if oldSpec.Type != newSpec.Type {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.type is immutable for StoragePool update: existing %q vs requested %q", oldSpec.Type, newSpec.Type))
+	}
+	if oldSpec.StorageRoot != newSpec.StorageRoot {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.storageRoot is immutable for StoragePool update: existing %q vs requested %q", oldSpec.StorageRoot, newSpec.StorageRoot))
+	}
+	if oldSpec.CapacityBytes != newSpec.CapacityBytes {
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.capacityBytes is immutable for StoragePool update: existing %d vs requested %d", oldSpec.CapacityBytes, newSpec.CapacityBytes))
 	}
 	return nil
 }
