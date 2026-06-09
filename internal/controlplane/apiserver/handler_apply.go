@@ -224,10 +224,13 @@ func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC, req a
 		if !ok {
 			return store.RawObject{}, internalErr(fmt.Errorf("apiserver: existing object for NIC %q has type %T", nic.Name, req.OldObject))
 		}
+		// An update body that omits the MAC inherits the existing one — this is a
+		// handler mutation, not validation. Rejecting an explicit MAC *change* is
+		// validating policy that FieldPolicyValidator already enforces in the
+		// PreApplyChain (mac is immutable), which runs before this handler, so a
+		// changed MAC never reaches here.
 		if nic.Spec.MAC == "" {
 			nic.Spec.MAC = oldNIC.Spec.MAC
-		} else if oldNIC.Spec.MAC != "" && nic.Spec.MAC != oldNIC.Spec.MAC {
-			return store.RawObject{}, conflictErr(fmt.Errorf("%w: mac is immutable for NIC update: existing %q vs requested %q", nicv1.ErrInvalidSpec, oldNIC.Spec.MAC, nic.Spec.MAC))
 		}
 	}
 

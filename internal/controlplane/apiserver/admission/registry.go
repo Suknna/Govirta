@@ -36,8 +36,13 @@ func StatusPatchChain(st StoreReader) Chain {
 	)
 }
 
-// FinalizersPatchChain returns validators for finalizer removal requests before
-// the handler mutates metadata.finalizers.
+// FinalizersPatchChain returns the full finalizer-removal validator set in one
+// chain. The live handler does NOT use this: it splits validation across the
+// store read (body shape/whitelist before the read, deletion precondition after)
+// via FinalizersPatchBodyChain + FinalizersPatchTargetChain. This combined chain
+// exists only as a single-call convenience for unit tests that supply both the
+// body and the target object up front; production code must use the split chains
+// so body errors (400) are returned before the store is touched.
 func FinalizersPatchChain() Chain {
 	return NewChain(
 		FinalizersPatchShapeValidator{},
@@ -46,6 +51,10 @@ func FinalizersPatchChain() Chain {
 	)
 }
 
+// FinalizersPatchBodyChain validates only the request body (shape + whitelist),
+// with no dependency on the stored target. The handler runs it before reading
+// the object so a malformed or non-whitelisted removal is rejected (400/409)
+// without a store round-trip.
 func FinalizersPatchBodyChain() Chain {
 	return NewChain(
 		FinalizersPatchShapeValidator{},
@@ -53,6 +62,10 @@ func FinalizersPatchBodyChain() Chain {
 	)
 }
 
+// FinalizersPatchTargetChain validates the precondition that depends on the
+// stored target (object must carry a deletionTimestamp). The handler runs it
+// after reading the object, separately from the body chain, so the read only
+// happens once the body is known valid.
 func FinalizersPatchTargetChain() Chain {
 	return NewChain(FinalizerDeletionPreconditionValidator{})
 }
