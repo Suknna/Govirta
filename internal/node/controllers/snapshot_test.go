@@ -510,6 +510,49 @@ func TestSnapshotDeleteVMRuntimeGoneIsCold(t *testing.T) {
 	}
 }
 
+func TestSnapshotDeleteVolumeGoneIsTreatedAsDrained(t *testing.T) {
+	// One of the VM's Volume objects is gone (master ErrNotFound). Its qcow2 (and
+	// the internal snapshot inside it) is destroyed, so that disk's snapshot is
+	// already torn down → skip it, keep draining the rest, and still drop the
+	// finalizer. Symmetric with the VM-gone branch (parent gone → snapshot gone):
+	// a Volume that disappears first must not permanently wedge the finalizer.
+	vm := snapVMObject("vm-a", "vol-0", "vol-1")
+	snap := deletingSnapshot("snap-a", "vm-a")
+	vols := &fakeVolumeSnapshotter{}
+	runner := &snapVMRunner{phase: vmm.PhaseStopped}
+	dep := snapDeps(t, vm,
+		snapVolumeObject("vol-0", "vm-a", "block-pool", 0),
+		snapVolumeObject("vol-1", "vm-a", "block-pool", 1),
+	)
+	// vol-0's Volume object is gone; vol-1 resolves normally.
+	dep.notFound = map[string]bool{depKey(string(metav1.KindVolume), "vol-0"): true}
+	c := NewSnapshotController(vols, runner, dep)
+
+	result, err := c.Reconcile(context.Background(), newSnapshotEvent(t, controller.EventModified, snap))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (Volume gone is drained, not an error)", err)
+	}
+	if result.ShouldRequeue() {
+		t.Fatalf("Reconcile() requeued, want done (gone Volume must not wedge teardown)")
+	}
+	// Only the live disk (vol-1, diskIndex 1) is deleted; the gone disk is skipped.
+	if len(vols.deleteCalls) != 1 {
+		t.Fatalf("DeleteVolumeSnapshot called %d times, want 1 (only the live disk)", len(vols.deleteCalls))
+	}
+	if vols.deleteCalls[0].VolumeID != volume.ID("vm-a-root-1") {
+		t.Errorf("delete VolumeID = %q, want vm-a-root-1 (the live disk)", vols.deleteCalls[0].VolumeID)
+	}
+	if vols.deleteCalls[0].SnapshotName != snap.UID {
+		t.Errorf("delete SnapshotName = %q, want %q", vols.deleteCalls[0].SnapshotName, snap.UID)
+	}
+	if dep.removeFinalizerCalls != 1 {
+		t.Fatalf("RemoveFinalizer called %d times, want 1 (teardown completes despite gone Volume)", dep.removeFinalizerCalls)
+	}
+	if dep.lastFinalizer != string(metav1.FinalizerNodeTeardown) {
+		t.Errorf("RemoveFinalizer finalizer = %q, want %q", dep.lastFinalizer, metav1.FinalizerNodeTeardown)
+	}
+}
+
 func TestSnapshotDeleteVMObjectGoneRemovesFinalizer(t *testing.T) {
 	// VM object gone (master ErrNotFound) → the qcow2 files are gone with the VM,
 	// so drop the finalizer without touching the volume service.

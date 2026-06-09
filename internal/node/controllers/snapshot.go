@@ -205,10 +205,22 @@ func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv
 		return controller.RequeueAfter(snapshotRequeueDelay), nil
 	}
 
+	logger := zerolog.Ctx(ctx)
 	var errs []error
 	for _, volRef := range vm.Spec.VolumeRefs {
 		target, err := c.resolveVolumeTarget(ctx, volRef)
 		if err != nil {
+			if errors.Is(err, client.ErrNotFound) {
+				// Volume object gone: its qcow2 file (and therefore the internal
+				// snapshot living inside it) has been destroyed, so this disk's
+				// snapshot is already torn down — skip it and keep draining the
+				// rest. This is symmetric with the VM-gone branch in Reconcile
+				// (parent gone → snapshot gone): the node converges on live
+				// reality (上下一致铁律), so a Volume that disappears first must
+				// not permanently wedge the finalizer.
+				logger.Info().Str("volRef", volRef).Msg("snapshot teardown: Volume gone; disk snapshot already drained, skipping")
+				continue
+			}
 			errs = append(errs, err)
 			continue
 		}
