@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/rs/zerolog"
+	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/store"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 )
@@ -85,6 +86,21 @@ func (s *Server) patchStatus(ctx context.Context, r *http.Request) (store.RawObj
 		return store.RawObject{}, badRequest(fmt.Errorf("apiserver: status body is not valid JSON"))
 	}
 
+	// Validating admission for the bare status subresource: it checks the body
+	// shape (a bare status object, not a full envelope), decodes + validates the
+	// per-kind Status enums, and gates on the target object's lifecycle. It never
+	// mutates; the read-modify-write merge below still owns the write.
+	req := admission.Request{
+		Operation:   admission.OperationStatusPatch,
+		Subresource: admission.SubresourceStatus,
+		Kind:        kind,
+		Name:        name,
+		NewRaw:      body,
+	}
+	if err := admission.StatusPatchChain(s.store).Validate(ctx, req); err != nil {
+		return store.RawObject{}, admissionToAPIError(err)
+	}
+
 	var lastConflict error
 	for attempt := 0; attempt < statusRetryLimit; attempt++ {
 		raw, gErr := s.store.Get(ctx, key)
@@ -93,6 +109,12 @@ func (s *Server) patchStatus(ctx context.Context, r *http.Request) (store.RawObj
 				return store.RawObject{}, notFound(fmt.Errorf("apiserver: status %s/%s: %w", kind, name, gErr))
 			}
 			return store.RawObject{}, internalErr(fmt.Errorf("apiserver: status get %s/%s: %w", kind, name, gErr))
+		}
+
+		currentReq := req
+		currentReq.OldRaw = raw.Value
+		if err := (admission.TargetObjectValidator{}).Validate(ctx, currentReq); err != nil {
+			return store.RawObject{}, admissionToAPIError(err)
 		}
 
 		merged, mErr := mergeStatus(raw.Value, body)

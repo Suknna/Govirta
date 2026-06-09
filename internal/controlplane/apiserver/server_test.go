@@ -147,7 +147,11 @@ func TestServerRunStatusRoute(t *testing.T) {
 		t.Fatalf("apply status = %d, want 201", resp.StatusCode)
 	}
 
-	statusBody, err := json.Marshal(vmv1.VMStatus{Phase: vmv1.VMPhaseRunning})
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseRunning,
+		ObservedPowerState: vmv1.ObservedPowerStateOn,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
 	}

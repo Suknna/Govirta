@@ -40,7 +40,12 @@ func TestStatusPatchUpdatesStatusPreservesSpec(t *testing.T) {
 	before := storedRaw(t, st, metav1.KindVM, vm.Name)
 
 	// Report an observed running phase from the node.
-	reported := vmv1.VMStatus{Phase: vmv1.VMPhaseRunning, Message: "qmp up"}
+	reported := vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseRunning,
+		ObservedPowerState: vmv1.ObservedPowerStateOn,
+		PowerTransition:    vmv1.PowerTransitionNone,
+		Message:            "qmp up",
+	}
 	statusBody, err := json.Marshal(reported)
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
@@ -102,7 +107,11 @@ func TestStatusPatchUpdatesStatusPreservesSpec(t *testing.T) {
 func TestStatusPatchMissingObjectReturns404(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	statusBody, err := json.Marshal(vmv1.VMStatus{Phase: vmv1.VMPhaseRunning})
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseRunning,
+		ObservedPowerState: vmv1.ObservedPowerStateOn,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
 	}
@@ -113,6 +122,71 @@ func TestStatusPatchMissingObjectReturns404(t *testing.T) {
 	}
 	if msg := decodeError(t, rec); msg == "" {
 		t.Fatalf("expected non-empty error body")
+	}
+}
+
+func TestStatusPatchRejectsFullObjectBody(t *testing.T) {
+	srv, _ := newTestServer(t)
+	vm := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {
+		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	body, err := json.Marshal(vm)
+	if err != nil {
+		t.Fatalf("marshal vm: %v", err)
+	}
+	rec := doPatchStatus(t, srv, metav1.KindVM, vm.Name, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for full-object status body; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStatusPatchRejectsInvalidPhase(t *testing.T) {
+	srv, _ := newTestServer(t)
+	vm := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {
+		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doPatchStatus(t, srv, metav1.KindVM, vm.Name, []byte(`{"phase":"teleporting","observedPowerState":"On","powerTransition":"None"}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid VM phase; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStatusPatchRejectsUnknownStatusField(t *testing.T) {
+	srv, _ := newTestServer(t)
+	vm := validVM()
+	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {
+		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doPatchStatus(t, srv, metav1.KindVM, vm.Name, []byte(`{"phase":"running","observedPowerState":"On","powerTransition":"None","unexpected":true}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for unknown status field; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStatusPatchRejectsDeletingObjectWithNoFinalizers(t *testing.T) {
+	srv, st := newTestServer(t)
+	vm := validVM()
+	vm.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	vm.Finalizers = nil
+	seedStoreObject(t, st, metav1.KindVM, vm.Name, vm)
+
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseStopped,
+		ObservedPowerState: vmv1.ObservedPowerStateOff,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+
+	rec := doPatchStatus(t, srv, metav1.KindVM, vm.Name, statusBody)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 for deleting object with no finalizers; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -133,6 +207,125 @@ func (s *stalePatchStore) Put(ctx context.Context, key string, value []byte, exp
 		return store.RawObject{}, store.ErrRevisionConflict
 	}
 	return s.Store.Put(ctx, key, value, expectedVersion)
+}
+
+type statusFinalizerClearingStore struct {
+	store.Store
+	targetKey          string
+	clearOnGet         int
+	gets               int
+	conflictsRemaining int
+}
+
+func (s *statusFinalizerClearingStore) Get(ctx context.Context, key string) (store.RawObject, error) {
+	raw, err := s.Store.Get(ctx, key)
+	if err != nil || key != s.targetKey {
+		return raw, err
+	}
+	s.gets++
+	if s.gets != s.clearOnGet {
+		return raw, nil
+	}
+
+	var vm vmv1.VM
+	if err := json.Unmarshal(raw.Value, &vm); err != nil {
+		return store.RawObject{}, err
+	}
+	vm.Finalizers = nil
+	data, err := json.Marshal(vm)
+	if err != nil {
+		return store.RawObject{}, err
+	}
+	if _, err := s.Store.Put(ctx, key, data, raw.ResourceVersion); err != nil {
+		return store.RawObject{}, err
+	}
+	return s.Store.Get(ctx, key)
+}
+
+func (s *statusFinalizerClearingStore) Put(ctx context.Context, key string, value []byte, expectedVersion string) (store.RawObject, error) {
+	if key == s.targetKey && expectedVersion != "" && s.conflictsRemaining > 0 {
+		s.conflictsRemaining--
+		return store.RawObject{}, store.ErrRevisionConflict
+	}
+	return s.Store.Put(ctx, key, value, expectedVersion)
+}
+
+func TestStatusPatchRechecksTargetLifecycleAfterGet(t *testing.T) {
+	base := fake.New()
+	t.Cleanup(func() {
+		if err := base.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	})
+	pool, err := mac.NewPool(net.HardwareAddr{0x02, 0x00, 0x00}, 0x000001, 0x0000ff)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	alloc := mac.NewAllocator(pool, base)
+
+	vm := validVM()
+	vm.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	vm.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	seedStoreObject(t, base, metav1.KindVM, vm.Name, vm)
+
+	wrapped := &statusFinalizerClearingStore{Store: base, targetKey: storeKey(metav1.KindVM, vm.Name), clearOnGet: 2}
+	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseStopped,
+		ObservedPowerState: vmv1.ObservedPowerStateOff,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+
+	rec := doPatchStatus(t, srv, metav1.KindVM, vm.Name, statusBody)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 after current object loses finalizers; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStatusPatchRechecksTargetLifecycleAfterCASConflict(t *testing.T) {
+	base := fake.New()
+	t.Cleanup(func() {
+		if err := base.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	})
+	pool, err := mac.NewPool(net.HardwareAddr{0x02, 0x00, 0x00}, 0x000001, 0x0000ff)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	alloc := mac.NewAllocator(pool, base)
+
+	vm := validVM()
+	vm.DeletionTimestamp = "2026-06-09T00:00:00Z"
+	vm.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	seedStoreObject(t, base, metav1.KindVM, vm.Name, vm)
+
+	wrapped := &statusFinalizerClearingStore{
+		Store:              base,
+		targetKey:          storeKey(metav1.KindVM, vm.Name),
+		clearOnGet:         3,
+		conflictsRemaining: 1,
+	}
+	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseStopped,
+		ObservedPowerState: vmv1.ObservedPowerStateOff,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+
+	rec := doPatchStatus(t, srv, metav1.KindVM, vm.Name, statusBody)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 after retry reads object with no finalizers; body=%s", rec.Code, rec.Body.String())
+	}
+	if wrapped.conflictsRemaining != 0 {
+		t.Fatalf("forced CAS conflict was not exercised; conflictsRemaining=%d", wrapped.conflictsRemaining)
+	}
 }
 
 func TestStatusPatchRetriesThenSucceedsOnConflict(t *testing.T) {
@@ -158,7 +351,11 @@ func TestStatusPatchRetriesThenSucceedsOnConflict(t *testing.T) {
 		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
-	statusBody, err := json.Marshal(vmv1.VMStatus{Phase: vmv1.VMPhaseRunning})
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseRunning,
+		ObservedPowerState: vmv1.ObservedPowerStateOn,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
 	}
@@ -204,7 +401,11 @@ func TestStatusPatchExhaustedRetriesReturns409(t *testing.T) {
 		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
-	statusBody, err := json.Marshal(vmv1.VMStatus{Phase: vmv1.VMPhaseRunning})
+	statusBody, err := json.Marshal(vmv1.VMStatus{
+		Phase:              vmv1.VMPhaseRunning,
+		ObservedPowerState: vmv1.ObservedPowerStateOn,
+		PowerTransition:    vmv1.PowerTransitionNone,
+	})
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
 	}

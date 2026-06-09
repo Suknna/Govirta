@@ -28,8 +28,12 @@ func DeleteChain(st StoreReader) Chain {
 
 // StatusPatchChain returns validators for bare status subresource patches before
 // the handler merges status into the stored object.
-func StatusPatchChain() Chain {
-	return NewChain()
+func StatusPatchChain(st StoreReader) Chain {
+	return NewChain(
+		PatchShapeValidator{},
+		StatusTypeValidator{},
+		TargetObjectValidator{Store: st},
+	)
 }
 
 // FinalizersPatchChain returns validators for finalizer removal requests before
