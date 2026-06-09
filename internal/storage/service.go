@@ -224,6 +224,48 @@ func (s *VolumeService) DeleteVolume(ctx context.Context, req DeleteVolumeReques
 	return s.pools.DeleteVolume(ctx, req.PoolName, req.VolumeID)
 }
 
+// SnapshotVolumeRequest identifies a volume and the internal snapshot name to create.
+type SnapshotVolumeRequest struct {
+	PoolName     string
+	VolumeID     volume.ID
+	SnapshotName string
+}
+
+// SnapshotVolume creates a qcow2 internal snapshot on an unpublished volume.
+func (s *VolumeService) SnapshotVolume(ctx context.Context, req SnapshotVolumeRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.PoolName == "" {
+		return pool.ErrPoolRequired
+	}
+	if req.VolumeID == "" || req.SnapshotName == "" {
+		return volume.ErrInvalidRequest
+	}
+	return s.pools.SnapshotVolume(ctx, req.PoolName, req.VolumeID, req.SnapshotName)
+}
+
+// DeleteVolumeSnapshotRequest identifies a volume and the internal snapshot name to delete.
+type DeleteVolumeSnapshotRequest struct {
+	PoolName     string
+	VolumeID     volume.ID
+	SnapshotName string
+}
+
+// DeleteVolumeSnapshot deletes a qcow2 internal snapshot from an unpublished volume.
+func (s *VolumeService) DeleteVolumeSnapshot(ctx context.Context, req DeleteVolumeSnapshotRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.PoolName == "" {
+		return pool.ErrPoolRequired
+	}
+	if req.VolumeID == "" || req.SnapshotName == "" {
+		return volume.ErrInvalidRequest
+	}
+	return s.pools.DeleteVolumeSnapshot(ctx, req.PoolName, req.VolumeID, req.SnapshotName)
+}
+
 func validateCreateRequest(req CreateVolumeRequest) error {
 	if req.PoolName == "" {
 		return pool.ErrPoolRequired

@@ -207,6 +207,114 @@ func TestDeleteVolumeRejectsPublishedVolume(t *testing.T) {
 	}
 }
 
+func TestSnapshotVolumeValidationAndForwarding(t *testing.T) {
+	t.Run("pool required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.SnapshotVolume(context.Background(), SnapshotVolumeRequest{VolumeID: "vol-a", SnapshotName: "snap-a"})
+		if !errors.Is(err, ErrPoolRequired) {
+			t.Fatalf("SnapshotVolume() error = %v, want %v", err, ErrPoolRequired)
+		}
+		if driver.snapshotCalls != 0 {
+			t.Fatalf("snapshot driver calls = %d, want 0", driver.snapshotCalls)
+		}
+	})
+	t.Run("volume id required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.SnapshotVolume(context.Background(), SnapshotVolumeRequest{PoolName: "pool-a", SnapshotName: "snap-a"})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("SnapshotVolume() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.snapshotCalls != 0 {
+			t.Fatalf("snapshot driver calls = %d, want 0", driver.snapshotCalls)
+		}
+	})
+	t.Run("snapshot name required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.SnapshotVolume(context.Background(), SnapshotVolumeRequest{PoolName: "pool-a", VolumeID: "vol-a"})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("SnapshotVolume() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.snapshotCalls != 0 {
+			t.Fatalf("snapshot driver calls = %d, want 0", driver.snapshotCalls)
+		}
+	})
+	t.Run("forwards to driver", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		vol := createRootVolume(t, service)
+		if err := service.SnapshotVolume(context.Background(), SnapshotVolumeRequest{PoolName: "pool-a", VolumeID: vol.ID, SnapshotName: "snap-a"}); err != nil {
+			t.Fatalf("SnapshotVolume() error = %v, want nil", err)
+		}
+		if driver.snapshotCalls != 1 {
+			t.Fatalf("snapshot driver calls = %d, want 1", driver.snapshotCalls)
+		}
+		if driver.lastSnapshot.Name != "snap-a" {
+			t.Fatalf("snapshot name = %q, want snap-a", driver.lastSnapshot.Name)
+		}
+	})
+}
+
+func TestDeleteVolumeSnapshotValidationAndForwarding(t *testing.T) {
+	t.Run("pool required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.DeleteVolumeSnapshot(context.Background(), DeleteVolumeSnapshotRequest{VolumeID: "vol-a", SnapshotName: "snap-a"})
+		if !errors.Is(err, ErrPoolRequired) {
+			t.Fatalf("DeleteVolumeSnapshot() error = %v, want %v", err, ErrPoolRequired)
+		}
+		if driver.deleteSnapshotCalls != 0 {
+			t.Fatalf("delete-snapshot driver calls = %d, want 0", driver.deleteSnapshotCalls)
+		}
+	})
+	t.Run("volume id required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.DeleteVolumeSnapshot(context.Background(), DeleteVolumeSnapshotRequest{PoolName: "pool-a", SnapshotName: "snap-a"})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("DeleteVolumeSnapshot() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.deleteSnapshotCalls != 0 {
+			t.Fatalf("delete-snapshot driver calls = %d, want 0", driver.deleteSnapshotCalls)
+		}
+	})
+	t.Run("snapshot name required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.DeleteVolumeSnapshot(context.Background(), DeleteVolumeSnapshotRequest{PoolName: "pool-a", VolumeID: "vol-a"})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("DeleteVolumeSnapshot() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.deleteSnapshotCalls != 0 {
+			t.Fatalf("delete-snapshot driver calls = %d, want 0", driver.deleteSnapshotCalls)
+		}
+	})
+	t.Run("forwards to driver", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		vol := createRootVolume(t, service)
+		if err := service.DeleteVolumeSnapshot(context.Background(), DeleteVolumeSnapshotRequest{PoolName: "pool-a", VolumeID: vol.ID, SnapshotName: "snap-a"}); err != nil {
+			t.Fatalf("DeleteVolumeSnapshot() error = %v, want nil", err)
+		}
+		if driver.deleteSnapshotCalls != 1 {
+			t.Fatalf("delete-snapshot driver calls = %d, want 1", driver.deleteSnapshotCalls)
+		}
+		if driver.lastDeleteSnapshot.Name != "snap-a" {
+			t.Fatalf("delete-snapshot name = %q, want snap-a", driver.lastDeleteSnapshot.Name)
+		}
+	})
+}
+
+func TestSnapshotVolumeCanceledContextDoesNotCallDriver(t *testing.T) {
+	service, driver := newTestVolumeService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := service.SnapshotVolume(ctx, SnapshotVolumeRequest{PoolName: "pool-a", VolumeID: "vol-a", SnapshotName: "snap-a"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SnapshotVolume() error = %v, want %v", err, context.Canceled)
+	}
+	if err := service.DeleteVolumeSnapshot(ctx, DeleteVolumeSnapshotRequest{PoolName: "pool-a", VolumeID: "vol-a", SnapshotName: "snap-a"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteVolumeSnapshot() error = %v, want %v", err, context.Canceled)
+	}
+	if driver.snapshotCalls != 0 || driver.deleteSnapshotCalls != 0 {
+		t.Fatalf("driver calls after canceled ctx = snapshot:%d delete-snapshot:%d, want all zero", driver.snapshotCalls, driver.deleteSnapshotCalls)
+	}
+}
+
 func TestCanceledContextDoesNotCallDriver(t *testing.T) {
 	service, driver := newTestVolumeService(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -497,10 +605,16 @@ type storageLifecycleDriver struct {
 	deleteCalls           int
 	publishCalls          int
 	unpublishCalls        int
+	snapshotCalls         int
+	deleteSnapshotCalls   int
 	lastCreate            block.CreateRequest
 	lastCreateFromReader  block.CreateFromReaderRequest
+	lastSnapshot          block.SnapshotRequest
+	lastDeleteSnapshot    block.DeleteSnapshotRequest
 	createErr             error
 	createFromReaderErr   error
+	snapshotErr           error
+	deleteSnapshotErr     error
 }
 
 func (d *storageLifecycleDriver) DriverInfo(ctx context.Context) (block.DriverInfo, error) {
@@ -593,7 +707,18 @@ func (d *storageLifecycleDriver) Snapshot(ctx context.Context, vol volume.Volume
 	if err := ctx.Err(); err != nil {
 		return volume.Snapshot{}, err
 	}
-	return volume.Snapshot{}, volume.ErrUnsupported
+	d.snapshotCalls++
+	d.lastSnapshot = req
+	return volume.Snapshot{Name: req.Name, VolumeID: vol.ID}, d.snapshotErr
+}
+
+func (d *storageLifecycleDriver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req block.DeleteSnapshotRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.deleteSnapshotCalls++
+	d.lastDeleteSnapshot = req
+	return d.deleteSnapshotErr
 }
 
 func (d *storageLifecycleDriver) Resize(ctx context.Context, vol volume.Volume, req block.ResizeRequest) (volume.Volume, error) {

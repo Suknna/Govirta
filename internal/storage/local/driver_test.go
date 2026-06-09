@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -523,20 +524,115 @@ func TestDeleteRejectsSymlinkVolumeFileBeforeRunner(t *testing.T) {
 	}
 }
 
-func TestSnapshotAndResizeUnsupportedAfterContextCheck(t *testing.T) {
-	driver, _ := newTestDriver(t)
-	vol := newVolumeWithPath(filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2"))
+func TestSnapshotCreatesInternalSnapshotViaRunner(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
+
+	snap, err := driver.Snapshot(context.Background(), vol, block.SnapshotRequest{Name: "snap-a"})
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v, want nil", err)
+	}
+	if snap.Name != "snap-a" || snap.VolumeID != vol.ID {
+		t.Fatalf("Snapshot() = %+v, want Name=snap-a VolumeID=%q", snap, vol.ID)
+	}
+	calls := runner.args()
+	if len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want exactly one", calls)
+	}
+	want := []string{"snapshot", "-c", "snap-a", path}
+	if !slices.Equal(calls[0], want) {
+		t.Fatalf("snapshot argv = %#v, want %#v", calls[0], want)
+	}
+}
+
+func TestSnapshotRequiresName(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
+
+	if _, err := driver.Snapshot(context.Background(), vol, block.SnapshotRequest{Name: "  "}); !errors.Is(err, volume.ErrInvalidRequest) {
+		t.Fatalf("Snapshot(blank name) error = %v, want %v", err, volume.ErrInvalidRequest)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+}
+
+func TestDeleteSnapshotDeletesPresentSnapshot(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
+	runner.snapshotListStdout = "Snapshot list:\nID        TAG                 VM SIZE                DATE       VM CLOCK\n1         snap-a                 0 B 2026-06-09 00:00:00   00:00:00.000\n"
+
+	if err := driver.DeleteSnapshot(context.Background(), vol, block.DeleteSnapshotRequest{Name: "snap-a"}); err != nil {
+		t.Fatalf("DeleteSnapshot() error = %v, want nil", err)
+	}
+	calls := runner.args()
+	if len(calls) != 2 {
+		t.Fatalf("qemu-img calls = %#v, want list then delete", calls)
+	}
+	wantList := []string{"snapshot", "-l", path}
+	if !slices.Equal(calls[0], wantList) {
+		t.Fatalf("list argv = %#v, want %#v", calls[0], wantList)
+	}
+	wantDelete := []string{"snapshot", "-d", "snap-a", path}
+	if !slices.Equal(calls[1], wantDelete) {
+		t.Fatalf("delete argv = %#v, want %#v", calls[1], wantDelete)
+	}
+}
+
+func TestDeleteSnapshotMissingIsIdempotent(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
+	// Listing does not contain "snap-a" (only a prefix-colliding name) so delete
+	// must be skipped without error.
+	runner.snapshotListStdout = "Snapshot list:\nID        TAG                 VM SIZE                DATE       VM CLOCK\n1         snap-a-other           0 B 2026-06-09 00:00:00   00:00:00.000\n"
+
+	if err := driver.DeleteSnapshot(context.Background(), vol, block.DeleteSnapshotRequest{Name: "snap-a"}); err != nil {
+		t.Fatalf("DeleteSnapshot(missing) error = %v, want nil", err)
+	}
+	calls := runner.args()
+	if len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want only the list call", calls)
+	}
+	if calls[0][1] != "-l" {
+		t.Fatalf("expected only a list call, got %#v", calls)
+	}
+}
+
+func TestSnapshotAndDeleteSnapshotHonorCanceledContext(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	if _, err := driver.Snapshot(ctx, vol, block.SnapshotRequest{Name: "snap-a"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Snapshot(canceled) error = %v, want %v", err, context.Canceled)
 	}
+	if err := driver.DeleteSnapshot(ctx, vol, block.DeleteSnapshotRequest{Name: "snap-a"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteSnapshot(canceled) error = %v, want %v", err, context.Canceled)
+	}
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+}
+
+func TestResizeUnsupportedAfterContextCheck(t *testing.T) {
+	driver, _ := newTestDriver(t)
+	vol := newVolumeWithPath(filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
 	if _, err := driver.Resize(ctx, vol, block.ResizeRequest{CapacityBytes: 2048}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Resize(canceled) error = %v, want %v", err, context.Canceled)
-	}
-	if _, err := driver.Snapshot(context.Background(), vol, block.SnapshotRequest{Name: "snap-a"}); !errors.Is(err, volume.ErrUnsupported) {
-		t.Fatalf("Snapshot() error = %v, want %v", err, volume.ErrUnsupported)
 	}
 	if _, err := driver.Resize(context.Background(), vol, block.ResizeRequest{CapacityBytes: 2048}); !errors.Is(err, volume.ErrUnsupported) {
 		t.Fatalf("Resize() error = %v, want %v", err, volume.ErrUnsupported)
@@ -1216,9 +1312,10 @@ func writeFile(t *testing.T, path string, contents string) {
 }
 
 type fakeRunner struct {
-	calls        [][]string
-	err          error
-	beforeReturn func(args []string)
+	calls              [][]string
+	err                error
+	beforeReturn       func(args []string)
+	snapshotListStdout string
 }
 
 type readerFunc func([]byte) (int, error)
@@ -1267,6 +1364,12 @@ func (r *fakeRunner) Run(ctx context.Context, binary string, args []string) (qem
 		if err := os.WriteFile(args[len(args)-1], []byte("qcow2"), 0o600); err != nil {
 			return qemuimg.RunResult{Stderr: err.Error()}, err
 		}
+	}
+	if len(args) >= 2 && args[0] == "snapshot" && args[1] == "-l" {
+		if r.err != nil {
+			return qemuimg.RunResult{Stderr: r.err.Error()}, r.err
+		}
+		return qemuimg.RunResult{Stdout: r.snapshotListStdout}, nil
 	}
 	if r.beforeReturn != nil {
 		r.beforeReturn(args)

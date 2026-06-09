@@ -74,6 +74,13 @@ func (d fakeDriver) Snapshot(ctx context.Context, vol volume.Volume, req block.S
 	return volume.Snapshot{Name: req.Name, VolumeID: vol.ID}, nil
 }
 
+func (d fakeDriver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req block.DeleteSnapshotRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d fakeDriver) Resize(ctx context.Context, vol volume.Volume, req block.ResizeRequest) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
@@ -1974,6 +1981,13 @@ func (d *lifecycleDriver) Snapshot(ctx context.Context, vol volume.Volume, req b
 		return volume.Snapshot{}, err
 	}
 	return volume.Snapshot{}, volume.ErrUnsupported
+}
+
+func (d *lifecycleDriver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req block.DeleteSnapshotRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return volume.ErrUnsupported
 }
 
 func (d *lifecycleDriver) Resize(ctx context.Context, vol volume.Volume, req block.ResizeRequest) (volume.Volume, error) {

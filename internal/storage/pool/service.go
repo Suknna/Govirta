@@ -490,6 +490,64 @@ func (s *Service) DeleteVolume(ctx context.Context, poolName string, volumeID vo
 	return nil
 }
 
+// SnapshotVolume creates a qcow2 internal snapshot on an unpublished volume in the named pool.
+func (s *Service) SnapshotVolume(ctx context.Context, poolName string, volumeID volume.ID, snapshotName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	p, err := s.getPool(poolName)
+	if err != nil {
+		return err
+	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.ErrUnsupported
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	vol, exists := p.volumes[volumeID]
+	driver := p.Driver
+	if !exists {
+		return volume.ErrVolumeNotFound
+	}
+
+	if _, err := driver.Snapshot(ctx, cloneVolume(vol), block.SnapshotRequest{Name: snapshotName}); err != nil {
+		return fmt.Errorf("snapshot volume %q in pool %q: %w", volumeID, poolName, err)
+	}
+	return nil
+}
+
+// DeleteVolumeSnapshot deletes a qcow2 internal snapshot from a volume in the named pool.
+func (s *Service) DeleteVolumeSnapshot(ctx context.Context, poolName string, volumeID volume.ID, snapshotName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	p, err := s.getPool(poolName)
+	if err != nil {
+		return err
+	}
+	if p.Config.Type != PoolTypeBlock {
+		return volume.ErrUnsupported
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	vol, exists := p.volumes[volumeID]
+	driver := p.Driver
+	if !exists {
+		return volume.ErrVolumeNotFound
+	}
+
+	if err := driver.DeleteSnapshot(ctx, cloneVolume(vol), block.DeleteSnapshotRequest{Name: snapshotName}); err != nil {
+		return fmt.Errorf("delete snapshot %q on volume %q in pool %q: %w", snapshotName, volumeID, poolName, err)
+	}
+	return nil
+}
+
 // PutImage reserves and starts writing a new image in a named file pool.
 func (s *Service) PutImage(ctx context.Context, poolName string, req image.PutRequest) (image.ImageWriter, error) {
 	if err := ctx.Err(); err != nil {

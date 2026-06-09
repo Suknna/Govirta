@@ -88,6 +88,7 @@ func (d *Driver) DriverInfo(ctx context.Context) (block.DriverInfo, error) {
 		Capabilities: block.Capabilities{
 			CreateDelete: true,
 			Publish:      true,
+			Snapshot:     true,
 		},
 	}, nil
 }
@@ -347,12 +348,83 @@ func (d *Driver) Unpublish(ctx context.Context, vol volume.Volume, req block.Unp
 	return nil
 }
 
-// Snapshot is unsupported for the local driver until offline snapshot policy lands.
+// Snapshot creates a qcow2 internal snapshot on the volume's owned image. It
+// resolves and validates the path the same way Delete/Publish do — via
+// pathFromVolume + ensureExistingOwnedDir + ensurePublishableImage — so the
+// raw Context[PathKey] is never trusted without the ownership/expected-path
+// check.
 func (d *Driver) Snapshot(ctx context.Context, vol volume.Volume, req block.SnapshotRequest) (volume.Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Snapshot{}, err
 	}
-	return volume.Snapshot{}, volume.ErrUnsupported
+	if strings.TrimSpace(req.Name) == "" {
+		return volume.Snapshot{}, fmt.Errorf("%w: snapshot name is required", volume.ErrInvalidRequest)
+	}
+	path, volumeDir, err := d.pathFromVolume(vol)
+	if err != nil {
+		return volume.Snapshot{}, err
+	}
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
+		return volume.Snapshot{}, err
+	}
+	if err := ensurePublishableImage(path); err != nil {
+		return volume.Snapshot{}, err
+	}
+	if err := d.qemuimg.QCOW2().Snapshot().Path(path).Name(req.Name).Do(ctx); err != nil {
+		return volume.Snapshot{}, fmt.Errorf("local: create snapshot %q on %q: %w", req.Name, path, err)
+	}
+	return volume.Snapshot{Name: req.Name, VolumeID: vol.ID}, nil
+}
+
+// DeleteSnapshot deletes a named internal snapshot. It is idempotent on a missing
+// snapshot: qemu-img `snapshot -d` errors non-zero when the named snapshot does
+// not exist, so we list first and skip the delete if absent. This keeps teardown
+// from sticking forever on a re-driven delete or on a disk that was never
+// snapshotted (a create that failed mid-fan-out left some disks untouched).
+func (d *Driver) DeleteSnapshot(ctx context.Context, vol volume.Volume, req block.DeleteSnapshotRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return fmt.Errorf("%w: snapshot name is required", volume.ErrInvalidRequest)
+	}
+	path, volumeDir, err := d.pathFromVolume(vol)
+	if err != nil {
+		return err
+	}
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
+		return err
+	}
+	if err := ensurePublishableImage(path); err != nil {
+		return err
+	}
+	// List-before-delete idempotency: only delete when the snapshot is present.
+	listing, err := d.qemuimg.QCOW2().SnapshotList().Path(path).Do(ctx)
+	if err != nil {
+		return fmt.Errorf("local: list snapshots on %q: %w", path, err)
+	}
+	if !snapshotListContains(listing, req.Name) {
+		return nil // already gone — idempotent success
+	}
+	if err := d.qemuimg.QCOW2().SnapshotDelete().Path(path).Name(req.Name).Do(ctx); err != nil {
+		return fmt.Errorf("local: delete snapshot %q on %q: %w", req.Name, path, err)
+	}
+	return nil
+}
+
+// snapshotListContains reports whether name appears as an internal snapshot tag
+// in qemu-img `snapshot -l` output. The output is a fixed-column table whose data
+// rows carry the tag in the second whitespace-delimited field (ID is first); a
+// header/empty output yields no match. Matching the exact tag token (not a
+// substring) avoids a prefix collision between two snapshot names.
+func snapshotListContains(listing, name string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Resize is unsupported for the local driver until offline resize policy lands.

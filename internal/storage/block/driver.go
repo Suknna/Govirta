@@ -34,6 +34,9 @@ type Driver interface {
 	Publish(ctx context.Context, vol volume.Volume, req PublishRequest) (volume.PublishedVolume, error)
 	Unpublish(ctx context.Context, vol volume.Volume, req UnpublishRequest) error
 	Snapshot(ctx context.Context, vol volume.Volume, req SnapshotRequest) (volume.Snapshot, error)
+	// DeleteSnapshot deletes a named internal snapshot from the volume's qcow2 file.
+	// Deleting a missing snapshot is an idempotent success.
+	DeleteSnapshot(ctx context.Context, vol volume.Volume, req DeleteSnapshotRequest) error
 	Resize(ctx context.Context, vol volume.Volume, req ResizeRequest) (volume.Volume, error)
 }
 
@@ -80,6 +83,11 @@ type UnpublishRequest struct {
 
 // SnapshotRequest describes a future offline snapshot request.
 type SnapshotRequest struct {
+	Name string
+}
+
+// DeleteSnapshotRequest names the internal snapshot to delete from a volume.
+type DeleteSnapshotRequest struct {
 	Name string
 }
 
