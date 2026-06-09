@@ -32,6 +32,7 @@ const (
 	imageName = "image-cirros" // 03-image.json
 	poolBlock = "pool-block"   // 01-storagepool-block.json
 	poolFile  = "pool-file"    // 02-storagepool-file.json
+	snapName  = "snap-e2e"     // 08-snapshot.json
 )
 
 // applyOrder is the dependency order the controllers gate on: pools first, then
@@ -48,6 +49,8 @@ var dependencyApplyOrder = []string{
 }
 
 const vmManifestName = "07-vm.json"
+
+const snapshotManifestName = "08-snapshot.json"
 
 // TestDistributedSpineClosure drives the full lifecycle against the real
 // three-node topology: apply the spine in dependency order, wait for the VM to
@@ -152,21 +155,21 @@ func expectShutdownCreateRejected(ctx context.Context, t *testing.T, ctl, server
 func snapshotColdCycle(ctx context.Context, t *testing.T, ctl, server, manifests string) {
 	t.Helper()
 
-	path := filepath.Join(manifests, "08-snapshot.json")
+	path := filepath.Join(manifests, snapshotManifestName)
 	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
 	if err != nil {
-		t.Fatalf("apply 08-snapshot.json failed: %v\noutput:\n%s", err, out)
+		t.Fatalf("apply %s failed: %v\noutput:\n%s", snapshotManifestName, err, out)
 	}
-	t.Logf("applied 08-snapshot.json: %s", strings.TrimSpace(out))
+	t.Logf("applied %s: %s", snapshotManifestName, strings.TrimSpace(out))
 
-	waitObjectPhase(ctx, t, ctl, server, "Snapshot", "snap-e2e", "ready", 2*time.Minute)
+	waitObjectPhase(ctx, t, ctl, server, "Snapshot", snapName, "ready", 2*time.Minute)
 
 	// The snapshot pins the VM through spec.vmRef, so the VM must not be
 	// deletable while the snapshot is alive — proving the reverse-reference edge
 	// (VM ← Snapshot.vmRef) is enforced at admission.
 	expectReferencedRejection(ctx, t, ctl, server, "VM", vmName)
 
-	deleteAndWaitGone(ctx, t, ctl, server, "Snapshot", "snap-e2e", 2*time.Minute)
+	deleteAndWaitGone(ctx, t, ctl, server, "Snapshot", snapName, 2*time.Minute)
 }
 
 func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState string) string {
