@@ -42,3 +42,18 @@ func TestNICSpecValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestNICStatusValidateAcceptsKnownPhase(t *testing.T) {
+	status := NICStatus{Phase: NICPhaseReady}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestNICStatusValidateRejectsUnknownPhase(t *testing.T) {
+	status := NICStatus{Phase: NICPhase("bogus")}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}

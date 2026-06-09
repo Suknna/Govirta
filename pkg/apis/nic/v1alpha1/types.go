@@ -25,8 +25,21 @@ const (
 	NICPhaseFailed NICPhase = "failed"
 )
 
+// Valid reports whether p is a known NIC phase.
+func (p NICPhase) Valid() bool {
+	switch p {
+	case NICPhasePending, NICPhaseReady, NICPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // ErrInvalidSpec is returned when a NICSpec is not internally valid.
 var ErrInvalidSpec = errors.New("nic: invalid spec")
+
+// ErrInvalidStatus is returned when a NICStatus is not internally valid.
+var ErrInvalidStatus = errors.New("nic: invalid status")
 
 // NICSpec is the desired state of a VM NIC. MAC is platform-allocated; an empty
 // MAC at submit time is valid (the apiserver fills it). A non-empty MAC must be
@@ -64,6 +77,14 @@ type NICStatus struct {
 	Phase   NICPhase `json:"phase"`
 	TapName string   `json:"tapName,omitempty"`
 	Message string   `json:"message,omitempty"`
+}
+
+// Validate reports whether the status carries a known observed phase.
+func (s NICStatus) Validate() error {
+	if !s.Phase.Valid() {
+		return fmt.Errorf("%w: phase %q", ErrInvalidStatus, s.Phase)
+	}
+	return nil
 }
 
 // NIC is a first-class VM NIC API object.

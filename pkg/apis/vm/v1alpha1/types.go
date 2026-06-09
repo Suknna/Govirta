@@ -27,6 +27,16 @@ const (
 	VMPhaseFailed VMPhase = "failed"
 )
 
+// Valid reports whether p is a known VM phase.
+func (p VMPhase) Valid() bool {
+	switch p {
+	case VMPhaseDefined, VMPhaseStarting, VMPhaseRunning, VMPhaseStopping, VMPhaseStopped, VMPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // PowerState is the user's desired VM power intent.
 type PowerState string
 
@@ -96,6 +106,9 @@ func (p PowerTransition) Valid() bool {
 // ErrInvalidSpec is returned when a VMSpec is not internally valid.
 var ErrInvalidSpec = errors.New("vm: invalid spec")
 
+// ErrInvalidStatus is returned when a VMStatus is not internally valid.
+var ErrInvalidStatus = errors.New("vm: invalid status")
+
 // VMSpec is the desired state of a VM. VolumeRefs and NICRefs name the Volume
 // and NIC objects this VM depends on; the VM controller gates on their readiness.
 type VMSpec struct {
@@ -136,6 +149,20 @@ type VMStatus struct {
 	ObservedPowerState ObservedPowerState `json:"observedPowerState"`
 	PowerTransition    PowerTransition    `json:"powerTransition"`
 	Message            string             `json:"message,omitempty"`
+}
+
+// Validate reports whether the status carries known observed state values.
+func (s VMStatus) Validate() error {
+	if !s.Phase.Valid() {
+		return fmt.Errorf("%w: phase %q", ErrInvalidStatus, s.Phase)
+	}
+	if !s.ObservedPowerState.Valid() {
+		return fmt.Errorf("%w: observedPowerState %q", ErrInvalidStatus, s.ObservedPowerState)
+	}
+	if !s.PowerTransition.Valid() {
+		return fmt.Errorf("%w: powerTransition %q", ErrInvalidStatus, s.PowerTransition)
+	}
+	return nil
 }
 
 // VM is a first-class VM API object.

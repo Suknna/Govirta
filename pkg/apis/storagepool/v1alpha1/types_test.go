@@ -54,3 +54,18 @@ func TestStoragePoolEnumsValid(t *testing.T) {
 		t.Error("object pool type should be invalid")
 	}
 }
+
+func TestStoragePoolStatusValidateAcceptsKnownPhase(t *testing.T) {
+	status := StoragePoolStatus{Phase: PoolPhaseReady}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestStoragePoolStatusValidateRejectsUnknownPhase(t *testing.T) {
+	status := StoragePoolStatus{Phase: PoolPhase("bogus")}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}

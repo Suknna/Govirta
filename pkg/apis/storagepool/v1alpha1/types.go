@@ -61,8 +61,21 @@ const (
 	PoolPhaseFailed PoolPhase = "failed"
 )
 
+// Valid reports whether p is a known storage pool phase.
+func (p PoolPhase) Valid() bool {
+	switch p {
+	case PoolPhasePending, PoolPhaseReady, PoolPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // ErrInvalidSpec is returned when a StoragePoolSpec is not internally valid.
 var ErrInvalidSpec = errors.New("storagepool: invalid spec")
+
+// ErrInvalidStatus is returned when a StoragePoolStatus is not internally valid.
+var ErrInvalidStatus = errors.New("storagepool: invalid status")
 
 // StoragePoolSpec is the desired state of a storage pool (explicit semantic
 // intent only). StorageRoot is the host path the node driver registers under.
@@ -95,6 +108,14 @@ type StoragePoolStatus struct {
 	Phase          PoolPhase `json:"phase"`
 	AllocatedBytes int64     `json:"allocatedBytes,omitempty"`
 	Message        string    `json:"message,omitempty"`
+}
+
+// Validate reports whether the status carries a known observed phase.
+func (s StoragePoolStatus) Validate() error {
+	if !s.Phase.Valid() {
+		return fmt.Errorf("%w: phase %q", ErrInvalidStatus, s.Phase)
+	}
+	return nil
 }
 
 // StoragePool is a first-class storage pool API object.

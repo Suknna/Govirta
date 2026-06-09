@@ -58,6 +58,16 @@ const (
 	ImagePhaseFailed ImagePhase = "failed"
 )
 
+// Valid reports whether p is a known image phase.
+func (p ImagePhase) Valid() bool {
+	switch p {
+	case ImagePhasePending, ImagePhaseReady, ImagePhaseDeleting, ImagePhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // ImageSource is the explicit external byte source for an image.
 type ImageSource struct {
 	Type     ImageSourceType `json:"type"`
@@ -66,6 +76,9 @@ type ImageSource struct {
 
 // ErrInvalidSpec is returned when an ImageSpec is not internally valid.
 var ErrInvalidSpec = errors.New("image: invalid spec")
+
+// ErrInvalidStatus is returned when an ImageStatus is not internally valid.
+var ErrInvalidStatus = errors.New("image: invalid status")
 
 // ImageSpec is the desired state of an image.
 type ImageSpec struct {
@@ -100,6 +113,14 @@ type ImageStatus struct {
 	Phase          ImagePhase `json:"phase"`
 	LocalSizeBytes int64      `json:"localSizeBytes,omitempty"`
 	Message        string     `json:"message,omitempty"`
+}
+
+// Validate reports whether the status carries a known observed phase.
+func (s ImageStatus) Validate() error {
+	if !s.Phase.Valid() {
+		return fmt.Errorf("%w: phase %q", ErrInvalidStatus, s.Phase)
+	}
+	return nil
 }
 
 // Image is a first-class image API object. The caller provides ObjectMeta.Name

@@ -44,3 +44,18 @@ func TestNetworkSpecValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestNetworkStatusValidateAcceptsKnownPhase(t *testing.T) {
+	status := NetworkStatus{Phase: NetworkPhaseReady}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestNetworkStatusValidateRejectsUnknownPhase(t *testing.T) {
+	status := NetworkStatus{Phase: NetworkPhase("bogus")}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}

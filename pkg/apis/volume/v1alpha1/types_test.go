@@ -67,3 +67,18 @@ func TestVolumeSpecValidate(t *testing.T) {
 		}
 	})
 }
+
+func TestVolumeStatusValidateAcceptsKnownPhase(t *testing.T) {
+	status := VolumeStatus{Phase: VolumePhaseReady}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestVolumeStatusValidateRejectsUnknownPhase(t *testing.T) {
+	status := VolumeStatus{Phase: VolumePhase("bogus")}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}

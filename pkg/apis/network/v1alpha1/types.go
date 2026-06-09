@@ -23,8 +23,21 @@ const (
 	NetworkPhaseFailed NetworkPhase = "failed"
 )
 
+// Valid reports whether p is a known network phase.
+func (p NetworkPhase) Valid() bool {
+	switch p {
+	case NetworkPhasePending, NetworkPhaseReady, NetworkPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // ErrInvalidSpec is returned when a NetworkSpec is not internally valid.
 var ErrInvalidSpec = errors.New("network: invalid spec")
+
+// ErrInvalidStatus is returned when a NetworkStatus is not internally valid.
+var ErrInvalidStatus = errors.New("network: invalid status")
 
 // NetworkSpec is the desired state of a network segment (semantic intent only).
 // Addresses are strings on the wire; Validate parses them with net/netip.
@@ -87,6 +100,14 @@ func requireAddr(v, field string) error {
 type NetworkStatus struct {
 	Phase   NetworkPhase `json:"phase"`
 	Message string       `json:"message,omitempty"`
+}
+
+// Validate reports whether the status carries a known observed phase.
+func (s NetworkStatus) Validate() error {
+	if !s.Phase.Valid() {
+		return fmt.Errorf("%w: phase %q", ErrInvalidStatus, s.Phase)
+	}
+	return nil
 }
 
 // Network is a first-class network API object.

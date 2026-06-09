@@ -97,6 +97,53 @@ func TestVMStatusPowerFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestVMStatusValidateAcceptsKnownPhase(t *testing.T) {
+	status := VMStatus{
+		Phase:              VMPhaseRunning,
+		ObservedPowerState: ObservedPowerStateOn,
+		PowerTransition:    PowerTransitionNone,
+	}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestVMStatusValidateRejectsUnknownPhase(t *testing.T) {
+	status := VMStatus{
+		Phase:              VMPhase("bogus"),
+		ObservedPowerState: ObservedPowerStateOn,
+		PowerTransition:    PowerTransitionNone,
+	}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}
+
+func TestVMStatusValidateRejectsUnknownObservedPowerState(t *testing.T) {
+	status := VMStatus{
+		Phase:              VMPhaseRunning,
+		ObservedPowerState: ObservedPowerState("bogus"),
+		PowerTransition:    PowerTransitionNone,
+	}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}
+
+func TestVMStatusValidateRejectsUnknownPowerTransition(t *testing.T) {
+	status := VMStatus{
+		Phase:              VMPhaseRunning,
+		ObservedPowerState: ObservedPowerStateOn,
+		PowerTransition:    PowerTransition("bogus"),
+	}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}
+
 func TestVMSpecPowerStateRoundTrip(t *testing.T) {
 	spec := validVMSpec()
 	data, err := json.Marshal(spec)

@@ -59,3 +59,18 @@ func TestImageEnumsValid(t *testing.T) {
 		t.Error("registry should be invalid")
 	}
 }
+
+func TestImageStatusValidateAcceptsKnownPhase(t *testing.T) {
+	status := ImageStatus{Phase: ImagePhaseReady}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestImageStatusValidateRejectsUnknownPhase(t *testing.T) {
+	status := ImageStatus{Phase: ImagePhase("bogus")}
+	err := status.Validate()
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidStatus", err)
+	}
+}

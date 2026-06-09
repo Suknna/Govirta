@@ -39,8 +39,21 @@ const (
 	VolumePhaseFailed VolumePhase = "failed"
 )
 
+// Valid reports whether p is a known volume phase.
+func (p VolumePhase) Valid() bool {
+	switch p {
+	case VolumePhasePending, VolumePhaseReady, VolumePhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // ErrInvalidSpec is returned when a VolumeSpec is not internally valid.
 var ErrInvalidSpec = errors.New("volume: invalid spec")
+
+// ErrInvalidStatus is returned when a VolumeStatus is not internally valid.
+var ErrInvalidStatus = errors.New("volume: invalid status")
 
 // VolumeSpec is the desired state of a block volume. ImageRef + ImageFilePoolRef
 // are required for a root volume (the source image and the file pool holding it)
@@ -94,6 +107,14 @@ type VolumeStatus struct {
 	Phase      VolumePhase `json:"phase"`
 	VolumePath string      `json:"volumePath,omitempty"`
 	Message    string      `json:"message,omitempty"`
+}
+
+// Validate reports whether the status carries a known observed phase.
+func (s VolumeStatus) Validate() error {
+	if !s.Phase.Valid() {
+		return fmt.Errorf("%w: phase %q", ErrInvalidStatus, s.Phase)
+	}
+	return nil
 }
 
 // Volume is a first-class block volume API object.
