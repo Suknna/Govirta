@@ -1,0 +1,6 @@
+{
+  "apiVersion": "govirta.io/v1alpha1",
+  "kind": "Snapshot",
+  "metadata": { "name": "snap-e2e", "uid": "snap-e2e-001" },
+  "spec": { "vmRef": "vm-e2e" }
+}

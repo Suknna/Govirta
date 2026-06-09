@@ -92,6 +92,13 @@ func TestDistributedSpineClosure(t *testing.T) {
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Off")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
 
+	// Cold-snapshot segment: the VM has just converged to Off/stopped, which is
+	// the cold precondition for taking and deleting an integral snapshot. Run the
+	// full snapshot closure here, before teardownSpine deletes the VM, because the
+	// reverse-reference edge (VM ← Snapshot.vmRef) pins the VM while the snapshot
+	// is alive.
+	snapshotColdCycle(ctx, t, ctl, server, manifests)
+
 	expectShutdownCreateRejected(ctx, t, ctl, server, manifests, tmpDir)
 
 	// Reverse segment: tear the spine down and prove the deletion lifecycle.
@@ -133,6 +140,33 @@ func expectShutdownCreateRejected(ctx context.Context, t *testing.T, ctl, server
 		t.Fatalf("create VM Shutdown rejection should include admission error, got:\n%s", out)
 	}
 	t.Logf("create VM with powerState Shutdown correctly rejected: %s", strings.TrimSpace(out))
+}
+
+// snapshotColdCycle drives the full cold-snapshot closure against a VM that has
+// already converged to Off/stopped: apply the snapshot and wait for it to reach
+// ready (the node ran qemu-img against the now-cold disks), prove the
+// reverse-reference edge (deleting the VM is refused with a 409 while the
+// snapshot pins it via spec.vmRef), then delete the snapshot and poll it to 404.
+// Running build+delete here keeps the scenario self-contained so the later
+// teardownSpine, which deletes the VM first, is not blocked by a live snapshot.
+func snapshotColdCycle(ctx context.Context, t *testing.T, ctl, server, manifests string) {
+	t.Helper()
+
+	path := filepath.Join(manifests, "08-snapshot.json")
+	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
+	if err != nil {
+		t.Fatalf("apply 08-snapshot.json failed: %v\noutput:\n%s", err, out)
+	}
+	t.Logf("applied 08-snapshot.json: %s", strings.TrimSpace(out))
+
+	waitObjectPhase(ctx, t, ctl, server, "Snapshot", "snap-e2e", "ready", 2*time.Minute)
+
+	// The snapshot pins the VM through spec.vmRef, so the VM must not be
+	// deletable while the snapshot is alive — proving the reverse-reference edge
+	// (VM ← Snapshot.vmRef) is enforced at admission.
+	expectReferencedRejection(ctx, t, ctl, server, "VM", vmName)
+
+	deleteAndWaitGone(ctx, t, ctl, server, "Snapshot", "snap-e2e", 2*time.Minute)
 }
 
 func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState string) string {
