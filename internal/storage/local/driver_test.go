@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -625,8 +626,62 @@ func TestSnapshotAndDeleteSnapshotHonorCanceledContext(t *testing.T) {
 	}
 }
 
-func TestResizeUnsupportedAfterContextCheck(t *testing.T) {
-	driver, _ := newTestDriver(t)
+func TestDriverResizeGrowsWhenLiveBelowTarget(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
+	// live virtual-size 小于目标 → driver 必须真的执行 qemu-img resize。
+	runner.infoVirtualSize = 1024
+
+	resized, err := driver.Resize(context.Background(), vol, block.ResizeRequest{CapacityBytes: 2048})
+	if err != nil {
+		t.Fatalf("Resize() error = %v, want nil", err)
+	}
+	if resized.CapacityBytes != 2048 {
+		t.Fatalf("resized capacity = %d, want 2048", resized.CapacityBytes)
+	}
+	calls := runner.args()
+	if len(calls) != 2 {
+		t.Fatalf("qemu-img calls = %#v, want info then resize", calls)
+	}
+	if calls[0][0] != "info" {
+		t.Fatalf("first call = %#v, want info", calls[0])
+	}
+	wantResize := []string{"resize", "-f", "qcow2", path, "2048"}
+	if !slices.Equal(calls[1], wantResize) {
+		t.Fatalf("resize argv = %#v, want %#v", calls[1], wantResize)
+	}
+}
+
+func TestDriverResizeIsIdempotentWhenLiveAtOrAboveTarget(t *testing.T) {
+	driver, runner := newTestDriver(t)
+	path := filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2")
+	writeFile(t, path, "qcow2")
+	vol := newVolumeWithPath(path)
+	// live virtual-size 已达到目标 → 跳过 resize，幂等成功。
+	runner.infoVirtualSize = 4096
+
+	resized, err := driver.Resize(context.Background(), vol, block.ResizeRequest{CapacityBytes: 4096})
+	if err != nil {
+		t.Fatalf("Resize() error = %v, want nil", err)
+	}
+	if resized.CapacityBytes != 4096 {
+		t.Fatalf("resized capacity = %d, want 4096", resized.CapacityBytes)
+	}
+	calls := runner.args()
+	if len(calls) != 1 {
+		t.Fatalf("qemu-img calls = %#v, want only the info call", calls)
+	}
+	for _, call := range calls {
+		if len(call) > 0 && call[0] == "resize" {
+			t.Fatalf("qemu-img calls = %#v, want no resize when live >= target", calls)
+		}
+	}
+}
+
+func TestDriverResizeHonorsCanceledContext(t *testing.T) {
+	driver, runner := newTestDriver(t)
 	vol := newVolumeWithPath(filepath.Join(driver.poolRoot, "vm-a", "vm-a-disk-0.qcow2"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -634,8 +689,20 @@ func TestResizeUnsupportedAfterContextCheck(t *testing.T) {
 	if _, err := driver.Resize(ctx, vol, block.ResizeRequest{CapacityBytes: 2048}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Resize(canceled) error = %v, want %v", err, context.Canceled)
 	}
-	if _, err := driver.Resize(context.Background(), vol, block.ResizeRequest{CapacityBytes: 2048}); !errors.Is(err, volume.ErrUnsupported) {
-		t.Fatalf("Resize() error = %v, want %v", err, volume.ErrUnsupported)
+	if calls := runner.args(); len(calls) != 0 {
+		t.Fatalf("qemu-img calls = %#v, want none", calls)
+	}
+}
+
+func TestDriverInfoReportsOfflineResizeCapability(t *testing.T) {
+	driver, _ := newTestDriver(t)
+
+	info, err := driver.DriverInfo(context.Background())
+	if err != nil {
+		t.Fatalf("DriverInfo() error = %v, want nil", err)
+	}
+	if !info.Capabilities.ResizeOffline {
+		t.Fatalf("DriverInfo() Capabilities.ResizeOffline = false, want true")
 	}
 }
 
@@ -1316,6 +1383,9 @@ type fakeRunner struct {
 	err                error
 	beforeReturn       func(args []string)
 	snapshotListStdout string
+	// infoVirtualSize 覆盖 fake `qemu-img info` 返回的 virtual-size；为 0 时
+	// 回退到默认 1024，让既有 Publish 等用例无需感知该字段。
+	infoVirtualSize int64
 }
 
 type readerFunc func([]byte) (int, error)
@@ -1353,7 +1423,11 @@ func (r *fakeRunner) Run(ctx context.Context, binary string, args []string) (qem
 	}
 	r.calls = append(r.calls, append([]string(nil), args...))
 	if len(args) > 0 && args[0] == "info" {
-		return qemuimg.RunResult{Stdout: `{"filename":"disk.qcow2","format":"qcow2","virtual-size":1024,"actual-size":512}`}, nil
+		virtualSize := r.infoVirtualSize
+		if virtualSize == 0 {
+			virtualSize = 1024
+		}
+		return qemuimg.RunResult{Stdout: fmt.Sprintf(`{"filename":"disk.qcow2","format":"qcow2","virtual-size":%d,"actual-size":512}`, virtualSize)}, nil
 	}
 	if len(args) > 0 && args[0] == "create" {
 		if err := os.WriteFile(args[len(args)-2], []byte("qcow2"), 0o600); err != nil {

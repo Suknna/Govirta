@@ -86,9 +86,10 @@ func (d *Driver) DriverInfo(ctx context.Context) (block.DriverInfo, error) {
 	return block.DriverInfo{
 		Name: driverName,
 		Capabilities: block.Capabilities{
-			CreateDelete: true,
-			Publish:      true,
-			Snapshot:     true,
+			CreateDelete:  true,
+			Publish:       true,
+			Snapshot:      true,
+			ResizeOffline: true,
 		},
 	}, nil
 }
@@ -427,12 +428,46 @@ func snapshotListContains(listing, name string) bool {
 	return false
 }
 
-// Resize is unsupported for the local driver until offline resize policy lands.
+// Resize grows the volume's qcow2 to req.CapacityBytes when the live virtual
+// size is below the target. 为什么在 driver 这一层读 live virtual size：qcow2
+// 文件本身是容量的唯一事实来源，以它判断幂等让 resize 天然可重入——live 已
+// >= 目标时直接视为成功的 no-op，于是 level-triggered 反复对账与崩溃重试都
+// 能收敛而不报错。缩容永远不会发生（admission 拒绝容量下降，且这里从不传
+// --shrink）。路径解析与 Delete/Snapshot/Publish 一致：pathFromVolume +
+// ensureExistingOwnedDir + ensurePublishableImage，绝不裸信 Context[PathKey]。
 func (d *Driver) Resize(ctx context.Context, vol volume.Volume, req block.ResizeRequest) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
-	return volume.Volume{}, volume.ErrUnsupported
+	if req.CapacityBytes <= 0 {
+		return volume.Volume{}, volume.ErrInvalidRequest
+	}
+	path, volumeDir, err := d.pathFromVolume(vol)
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	if err := d.ensureExistingOwnedDir(volumeDir); err != nil {
+		return volume.Volume{}, err
+	}
+	if err := ensurePublishableImage(path); err != nil {
+		return volume.Volume{}, err
+	}
+	info, err := d.qemuimg.QCOW2().Info().Path(path).Do(ctx)
+	if err != nil {
+		return volume.Volume{}, fmt.Errorf("resize volume %q: read live size: %w", vol.Name, err)
+	}
+	// 幂等：live 已达到或超过目标，接受为 no-op，返回声明后的容量。
+	if info.VirtualSize >= req.CapacityBytes {
+		resized := vol
+		resized.CapacityBytes = req.CapacityBytes
+		return resized, nil
+	}
+	if err := d.qemuimg.QCOW2().Resize().Path(path).SizeBytes(req.CapacityBytes).Do(ctx); err != nil {
+		return volume.Volume{}, fmt.Errorf("resize volume %q to %d: %w", vol.Name, req.CapacityBytes, err)
+	}
+	resized := vol
+	resized.CapacityBytes = req.CapacityBytes
+	return resized, nil
 }
 
 func ensureCreateTargetAvailable(path string) error {
