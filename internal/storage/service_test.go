@@ -319,8 +319,8 @@ func TestVolumeServiceResize(t *testing.T) {
 	t.Run("pool required", func(t *testing.T) {
 		service, driver := newTestVolumeService(t)
 		err := service.ResizeVolume(context.Background(), ResizeVolumeRequest{VolumeID: "vol-a", CapacityBytes: 20})
-		if !errors.Is(err, ErrInvalidRequest) {
-			t.Fatalf("ResizeVolume() error = %v, want %v", err, ErrInvalidRequest)
+		if !errors.Is(err, ErrPoolRequired) {
+			t.Fatalf("ResizeVolume() error = %v, want %v", err, ErrPoolRequired)
 		}
 		if driver.resizeCalls != 0 {
 			t.Fatalf("resize driver calls = %d, want 0", driver.resizeCalls)

@@ -243,7 +243,10 @@ func (s *VolumeService) ResizeVolume(ctx context.Context, req ResizeVolumeReques
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if req.PoolName == "" || req.VolumeID == "" || req.CapacityBytes <= 0 {
+	if req.PoolName == "" {
+		return pool.ErrPoolRequired
+	}
+	if req.VolumeID == "" || req.CapacityBytes <= 0 {
 		return volume.ErrInvalidRequest
 	}
 	if _, err := s.pools.ResizeVolume(ctx, req.PoolName, req.VolumeID, req.CapacityBytes); err != nil {
