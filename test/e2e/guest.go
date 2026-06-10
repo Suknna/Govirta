@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -308,6 +309,46 @@ func (g *Guest) AssertNoRuntimeDir(ctx context.Context, vmUID string) {
 	g.assertGuestPathAbsent(ctx, dir,
 		fmt.Sprintf("runtime dir %q", dir),
 		fmt.Sprintf("VM runtime dir still present: %q", dir))
+}
+
+// --- 卷容量 live 实况（刀 5 冷扩容落地）---
+
+// QcowVirtualSize 在 guest 内跑 `sudo qemu-img info --output=json <path>`，解析
+// JSON 里的 `virtual-size` 返回 int64。之所以读 qcow2 的 virtual-size 而非信
+// master 的 status 投影：冷扩容真正落地与否的唯一权威是 qcow2 自身（决策 3 不加
+// 容量 status 字段），这正是「上下一致铁律」要求的下层实况验证。
+// 用 --output=json 而非解析人类可读文本，是因为 qemu-img info 的文本格式跨版本
+// 不稳定（带单位、本地化），JSON 的 virtual-size 字段是稳定的字节数契约。
+func (g *Guest) QcowVirtualSize(ctx context.Context, qcowPath string) (int64, error) {
+	stdout, stderr, code, err := g.Exec(ctx, "sudo qemu-img info --output=json "+shellQuote(qcowPath))
+	if err != nil {
+		return 0, err
+	}
+	if code != 0 {
+		return 0, fmt.Errorf("qemu-img info --output=json %q exit %d: %s", qcowPath, code, stderr)
+	}
+	// 只取 virtual-size：guest 的 qemu-img 版本可能带其它字段，匿名结构体按需解码。
+	var info struct {
+		VirtualSize int64 `json:"virtual-size"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &info); err != nil {
+		return 0, fmt.Errorf("decode qemu-img info JSON for %q: %w (raw: %s)", qcowPath, err, stdout)
+	}
+	return info.VirtualSize, nil
+}
+
+// AssertQcowVirtualSize 断言 guest qcow2 的 virtual-size 恰等于 want，否则 t.Fatalf。
+// 这是冷扩容端到端的 live 铁证：master 报 Volume 仍 Ready 之外，下层 qcow2 的真实
+// 虚拟容量必须已等于新目标值，才证明 resize 真落到磁盘（不只信 status 投影）。
+func (g *Guest) AssertQcowVirtualSize(ctx context.Context, qcowPath string, want int64) {
+	g.t.Helper()
+	got, err := g.QcowVirtualSize(ctx, qcowPath)
+	if err != nil {
+		g.t.Fatalf("read qcow virtual size %q: %v", qcowPath, err)
+	}
+	if got != want {
+		g.t.Fatalf("qcow %q virtual size = %d, want %d (cold resize not reflected in live qcow2)", qcowPath, got, want)
+	}
 }
 
 // shellQuote single-quotes a path for safe `sh -c` interpolation.

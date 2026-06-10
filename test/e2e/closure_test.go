@@ -48,6 +48,17 @@ const (
 	nicIndex     = 0              // 06-nic.json single nicRef, fixed index 0 (TAP + anti-spoof chain suffix)
 )
 
+// 冷扩容容量契约（刀 5）。volBaseCapacityBytes 必须等于 04-volume.json 的
+// spec.capacityBytes（1 GiB），是 live qcow2 virtual-size 的初始权威；扩容目标取
+// 2× = 2 GiB，远低于 01-storagepool-block.json 的 pool 容量 10 GiB（预分配记账
+// 不会触 ErrPoolCapacityExceeded）。缩容用 volShrinkCapacityBytes（< 基准）触发
+// admission 「只增不减」拒绝（ReasonConflict → HTTP 409）。
+const (
+	volBaseCapacityBytes   int64 = 1073741824 // 1 GiB，与 04-volume.json spec.capacityBytes 一致
+	volGrownCapacityBytes  int64 = 2147483648 // 2 GiB = 旧值 2×（冷扩容目标）
+	volShrinkCapacityBytes int64 = 536870912  // 512 MiB < 基准，负向缩容用例
+)
+
 // applyOrder is the dependency order the controllers gate on: pools first, then
 // image (needs file pool), volume (needs block pool + image), network, and NIC
 // (needs network). The VM is applied separately so the test can drive explicit
@@ -64,6 +75,11 @@ var dependencyApplyOrder = []string{
 const vmManifestName = "07-vm.json"
 
 const snapshotManifestName = "08-snapshot.json"
+
+// volumeManifestName 是 04-volume.json 的基线 Volume manifest；冷扩容/缩容用例在
+// 它之上改 spec.capacityBytes 渲染到 tmpDir，基线文件本身保持不变（与
+// writeVMManifestVariant 同款：测试侧渲染变体，不污染受测 manifest）。
+const volumeManifestName = "04-volume.json"
 
 // TestDistributedSpineClosure drives the full lifecycle against the real
 // three-node topology: apply the spine in dependency order, wait for the VM to
@@ -119,6 +135,11 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// reverse-reference edge (VM ← Snapshot.vmRef) pins the VM while the snapshot
 	// is alive.
 	snapshotColdCycle(ctx, t, ctl, server, manifests, g)
+
+	// Cold-resize segment: still in the same Off/cold window (resize 的前提是 VM
+	// stopped/defined)。放在 snapshotColdCycle 之后是有意为之——彼时内部快照已被
+	// deleteAndVerify 删净，qcow2 不带内部快照，扩容路径不与快照交互。
+	coldResizeVolume(ctx, t, ctl, server, manifests, tmpDir, g)
 
 	expectShutdownCreateRejected(ctx, t, ctl, server, manifests, tmpDir)
 
@@ -187,6 +208,141 @@ func snapshotColdCycle(ctx context.Context, t *testing.T, ctl, server, manifests
 			g.AssertQcowNoSnapshot(ctx, qcow, snapUID)
 		},
 	})
+}
+
+// coldResizeVolume 验证刀 5 冷扩容端到端：VM 已 Off（冷窗口）时 apply 改大的
+// Volume capacityBytes，断言卷仍 Ready 且 guest 内 qcow2 的真实 virtual-size 收敛
+// 到新目标；再 apply 缩小值断言被 apiserver admission 拒绝（只增不减契约）。
+func coldResizeVolume(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir string, g *Guest) {
+	t.Helper()
+	// qcow2 root = block StoragePool spec.storageRoot（与 snapshotColdCycle 同源）。
+	qcow := guestQcowPath(guestBlockStorageRoot, poolBlock, vmUID, vmName, diskIndex)
+
+	// 漂移守卫：扩容目标是「基准 2×」，而基准的唯一权威是 04-volume.json 的
+	// spec.capacityBytes。若有人改了 manifest 却没同步常量，下面的 live virtual-size
+	// 断言会去追一个错误的目标值（且失败信息会误导）。这里读基准 manifest 钉死两件事：
+	// 基准 == volBaseCapacityBytes，目标 == 基准 2×。任一不符立即 Fatalf，把"测试常量
+	// 与 manifest 漂移"这种隐性 bug 在执行扩容前结构性挡掉。
+	assertVolumeCapacityContract(t, filepath.Join(manifests, volumeManifestName))
+
+	// 正向：apply 旧值 2× 的 Volume manifest。扩容是 A2 语义——phase 始终保持 Ready，
+	// 容量不进 status（决策 3），所以不能靠 phase 变化判定收敛。先确认 apply 被接受、
+	// 卷仍 Ready，再轮询 guest qcow2 的 live virtual-size 直到等于新目标（控制器的
+	// qemu-img resize 是异步收敛的，紧跟 apply 直接断言会与控制器竞争）。
+	grownPath := writeVolumeManifestVariant(t, filepath.Join(manifests, volumeManifestName), tmpDir, volGrownCapacityBytes)
+	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", grownPath)
+	if err != nil {
+		t.Fatalf("apply grown Volume capacityBytes=%d failed: %v\noutput:\n%s", volGrownCapacityBytes, err, out)
+	}
+	t.Logf("applied grown Volume capacityBytes=%d: %s", volGrownCapacityBytes, strings.TrimSpace(out))
+
+	// A2：phase 不变，卷仍 Ready（扩容失败也只是保持 Ready + 结构化日志 + 重试）。
+	waitObjectPhase(ctx, t, ctl, server, "Volume", volName, "ready", 2*time.Minute)
+
+	// live 铁证：guest 内读 qcow2 真实 virtual-size 收敛到新目标，证明 resize 真落到
+	// 磁盘（不只信 master 的 Ready 投影 — 上下一致铁律）。先轮询到收敛，再用语义化的
+	// AssertQcowVirtualSize 钉死最终值（最后一次断言把"恰等于"写进失败信息）。
+	waitQcowVirtualSize(ctx, t, g, qcow, volGrownCapacityBytes, 2*time.Minute)
+	g.AssertQcowVirtualSize(ctx, qcow, volGrownCapacityBytes)
+
+	// 负向：apply 缩小的 capacityBytes 必须被 apiserver admission 拒绝。admission
+	// fields.go 对 Volume update 的 capacityBytes 减少返回 ReasonConflict（→ HTTP 409），
+	// govirtctl 把非 2xx 映射成非零退出并在输出里带 admission 错误文本。
+	shrinkPath := writeVolumeManifestVariant(t, filepath.Join(manifests, volumeManifestName), tmpDir, volShrinkCapacityBytes)
+	out, err = runCtl(ctx, ctl, "apply", "--server", server, "-f", shrinkPath)
+	if err == nil {
+		t.Fatalf("apply shrunk Volume capacityBytes=%d must be rejected (只增不减契约), but it was accepted:\n%s", volShrinkCapacityBytes, out)
+	}
+	if !strings.Contains(out, "capacityBytes cannot decrease") {
+		t.Fatalf("shrink rejection must carry the admission 只增不减 reason (%q), got:\n%s", "capacityBytes cannot decrease", out)
+	}
+	t.Logf("shrink Volume capacityBytes=%d correctly rejected (409): %s", volShrinkCapacityBytes, strings.TrimSpace(out))
+}
+
+// waitQcowVirtualSize 轮询 guest qcow2 的 live virtual-size 直到等于 want 或超时。
+// 扩容是异步收敛的且 phase 不变（A2），没有 master 侧信号可等，所以以 guest 实况为准
+// 轮询（与 waitObjectPhase/waitGone 同款 deadline 循环）。连接层错误（limactl 失败 /
+// ctx 取消）立即 Fatalf，绝不当成"未收敛"重试，避免把探针失效误读为容量不对。
+func waitQcowVirtualSize(ctx context.Context, t *testing.T, g *Guest, qcowPath string, want int64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last int64
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("context ended before qcow %q virtual size reached %d: %v (last: %d)", qcowPath, want, err, last)
+		}
+		got, err := g.QcowVirtualSize(ctx, qcowPath)
+		if err != nil {
+			t.Fatalf("read qcow virtual size %q: %v", qcowPath, err)
+		}
+		last = got
+		if got == want {
+			t.Logf("qcow %q virtual size converged to %d", qcowPath, want)
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("qcow %q virtual size did not reach %d before deadline (last: %d)", qcowPath, want, last)
+}
+
+// assertVolumeCapacityContract 读基准 Volume manifest，钉死冷扩容用例的两条不变式：
+// 基准 spec.capacityBytes == volBaseCapacityBytes，且扩容目标 volGrownCapacityBytes
+// 恰为基准 2×。manifest 是基准容量的唯一权威，常量是 live virtual-size 断言追的目标；
+// 二者漂移会让断言去追错误值并给出误导性失败信息，所以执行扩容前结构性挡掉。
+func assertVolumeCapacityContract(t *testing.T, basePath string) {
+	t.Helper()
+	body, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read Volume manifest %q: %v", basePath, err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatalf("decode Volume manifest %q: %v", basePath, err)
+	}
+	spec := objectMap(t, manifest, "spec")
+	// JSON number 解码进 map[string]any 是 float64；容量字节数在 2^53 内，float64
+	// 表示精确，转回 int64 不丢精度。
+	raw, ok := spec["capacityBytes"].(float64)
+	if !ok {
+		t.Fatalf("Volume manifest %q spec.capacityBytes must be a JSON number, got %T", basePath, spec["capacityBytes"])
+	}
+	base := int64(raw)
+	if base != volBaseCapacityBytes {
+		t.Fatalf("Volume manifest %q spec.capacityBytes=%d drifted from test constant volBaseCapacityBytes=%d", basePath, base, volBaseCapacityBytes)
+	}
+	if volGrownCapacityBytes != base*2 {
+		t.Fatalf("cold-resize target volGrownCapacityBytes=%d must be 2× the base %d", volGrownCapacityBytes, base)
+	}
+}
+
+// writeVolumeManifestVariant 读取基准 Volume manifest，仅改写 spec.capacityBytes，
+// 渲染到 tmpDir。复用 writeVMManifestVariant 的「读基准→改字段→写临时文件」模式，
+// 不重抄 manifest 内容（基准是 04-volume.json 的唯一权威）。
+func writeVolumeManifestVariant(t *testing.T, basePath, tmpDir string, capacityBytes int64) string {
+	t.Helper()
+	body, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read Volume manifest %q: %v", basePath, err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatalf("decode Volume manifest %q: %v", basePath, err)
+	}
+	spec := objectMap(t, manifest, "spec")
+	// JSON number 落进 map[string]any 是 float64，但这里直接覆盖成目标字节数；
+	// MarshalIndent 会按 Go 类型重新编码，int64 写出为无小数点的整数（容量字节数
+	// 在 2^53 内，float64/int64 表示均精确，不丢精度）。
+	spec["capacityBytes"] = capacityBytes
+
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode Volume manifest variant capacityBytes=%d: %v", capacityBytes, err)
+	}
+	path := filepath.Join(tmpDir, fmt.Sprintf("%s-cap-%d.json", volName, capacityBytes))
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write Volume manifest variant %q: %v", path, err)
+	}
+	return path
 }
 
 func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState string) string {
