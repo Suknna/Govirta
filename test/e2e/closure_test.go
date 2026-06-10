@@ -25,14 +25,26 @@ const (
 // manifests under test/e2e/manifests; the teardown drives govirtctl with these
 // exact names, so a drift here would delete the wrong object (or nothing).
 const (
-	vmName    = "vm-e2e"       // 07-vm.json
+	vmName    = "vm-e2e"       // 07-vm.json metadata.name
 	nicName   = "nic-e2e"      // 06-nic.json
 	netName   = "net-e2e"      // 05-network.json
 	volName   = "vol-e2e-root" // 04-volume.json
 	imageName = "image-cirros" // 03-image.json
 	poolBlock = "pool-block"   // 01-storagepool-block.json
 	poolFile  = "pool-file"    // 02-storagepool-file.json
-	snapName  = "snap-e2e"     // 08-snapshot.json
+	snapName  = "snap-e2e"     // 08-snapshot.json metadata.name
+)
+
+// Non-name identifiers the guest-side live assertions key off. Unlike the object
+// names above (which drive govirtctl), these are the manifest fields that decide
+// the guest's on-disk/kernel layout — so they MUST match the manifests exactly,
+// and are the single source of truth shared by the apply calls and the Guest
+// probes (a drift here would assert against the wrong qcow2/bridge and mask leaks).
+const (
+	vmUID        = "vm-e2e-001"   // 07-vm.json metadata.uid (qcow2 dir + runtime dir + identity derivations)
+	snapUID      = "snap-e2e-001" // 08-snapshot.json metadata.uid (internal qcow2 snapshot tag)
+	orphanBridge = "govirta0"     // 05-network.json spec.bridgeName (non-derived, asserted by name)
+	diskIndex    = 0              // 04-volume.json spec.diskIndex (qcow2 file suffix)
 )
 
 // applyOrder is the dependency order the controllers gate on: pools first, then
@@ -77,22 +89,26 @@ func TestDistributedSpineClosure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 
+	// Guest handle for guest-side live verification (上下一致: assert lower-layer
+	// reality, not just the master's API projection).
+	g := newGuest(t)
+
 	// Forward segment: apply dependencies first, define the VM while powered Off,
 	// then drive declared power intent through On, Shutdown, and Off updates.
 	applySpineDependencies(ctx, t, ctl, server, manifests)
 	waitObjectPhase(ctx, t, ctl, server, "NIC", nicName, "ready", 3*time.Minute)
 
 	tmpDir := t.TempDir()
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Off")
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
 
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "On")
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On")
 	waitVMOnRunning(ctx, t, ctl, server)
 
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Shutdown")
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Shutdown")
 	waitVMShutdownRequestedOrOff(ctx, t, ctl, server, 2*time.Minute)
 
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, "vm-e2e-001", "Off")
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
 
 	// Cold-snapshot segment: the VM has just converged to Off/stopped, which is
@@ -100,12 +116,12 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// full snapshot closure here, before teardownSpine deletes the VM, because the
 	// reverse-reference edge (VM ← Snapshot.vmRef) pins the VM while the snapshot
 	// is alive.
-	snapshotColdCycle(ctx, t, ctl, server, manifests)
+	snapshotColdCycle(ctx, t, ctl, server, manifests, g)
 
 	expectShutdownCreateRejected(ctx, t, ctl, server, manifests, tmpDir)
 
 	// Reverse segment: tear the spine down and prove the deletion lifecycle.
-	teardownSpine(ctx, t, ctl, server)
+	teardownSpine(ctx, t, ctl, server, g)
 }
 
 // applySpineDependencies applies the non-VM spine manifests in dependency order,
@@ -145,31 +161,30 @@ func expectShutdownCreateRejected(ctx context.Context, t *testing.T, ctl, server
 	t.Logf("create VM with powerState Shutdown correctly rejected: %s", strings.TrimSpace(out))
 }
 
-// snapshotColdCycle drives the full cold-snapshot closure against a VM that has
-// already converged to Off/stopped: apply the snapshot and wait for it to reach
-// ready (the node ran qemu-img against the now-cold disks), prove the
-// reverse-reference edge (deleting the VM is refused with a 409 while the
-// snapshot pins it via spec.vmRef), then delete the snapshot and poll it to 404.
-// Running build+delete here keeps the scenario self-contained so the later
-// teardownSpine, which deletes the VM first, is not blocked by a live snapshot.
-func snapshotColdCycle(ctx context.Context, t *testing.T, ctl, server, manifests string) {
+func snapshotColdCycle(ctx context.Context, t *testing.T, ctl, server, manifests string, g *Guest) {
 	t.Helper()
+	// qcow2 root = block StoragePool spec.storageRoot (01-storagepool-block.json).
+	qcow := guestQcowPath(guestBlockStorageRoot, poolBlock, vmUID, vmName, diskIndex)
 
-	path := filepath.Join(manifests, snapshotManifestName)
-	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
-	if err != nil {
-		t.Fatalf("apply %s failed: %v\noutput:\n%s", snapshotManifestName, err, out)
-	}
-	t.Logf("applied %s: %s", snapshotManifestName, strings.TrimSpace(out))
+	applyAndVerify(ctx, t, ctl, server, manifests, resourceLifecycle{
+		manifest: snapshotManifestName, kind: "Snapshot", name: snapName,
+		waitPhase: "ready", waitFor: 2 * time.Minute,
+		afterReady: func(ctx context.Context) {
+			// items 2/5: post-create the node really ran qemu-img snapshot -c.
+			g.AssertQcowHasSnapshot(ctx, qcow, snapUID)
+		},
+	})
 
-	waitObjectPhase(ctx, t, ctl, server, "Snapshot", snapName, "ready", 2*time.Minute)
-
-	// The snapshot pins the VM through spec.vmRef, so the VM must not be
-	// deletable while the snapshot is alive — proving the reverse-reference edge
-	// (VM ← Snapshot.vmRef) is enforced at admission.
+	// reverse-reference edge: deleting the VM is refused while the snapshot pins it.
 	expectReferencedRejection(ctx, t, ctl, server, "VM", vmName)
 
-	deleteAndWaitGone(ctx, t, ctl, server, "Snapshot", snapName, 2*time.Minute)
+	deleteAndVerify(ctx, t, ctl, server, resourceLifecycle{
+		kind: "Snapshot", name: snapName, waitFor: 2 * time.Minute,
+		afterGone: func(ctx context.Context) {
+			// items 2/5: post-delete the node really ran qemu-img snapshot -d.
+			g.AssertQcowNoSnapshot(ctx, qcow, snapUID)
+		},
+	})
 }
 
 func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState string) string {
@@ -314,7 +329,7 @@ func decodeVMStatus(t *testing.T, out string) vmStatusSnapshot {
 // object can only be deleted once the object referencing it is gone — VM first
 // (nothing references it), then its NIC and Volume, then the Network and Image
 // they reference, then the pools.
-func teardownSpine(ctx context.Context, t *testing.T, ctl, server string) {
+func teardownSpine(ctx context.Context, t *testing.T, ctl, server string, g *Guest) {
 	t.Helper()
 
 	// 1. Reference protection: while the VM is alive it pins its Volume, and the
@@ -334,6 +349,27 @@ func teardownSpine(ctx context.Context, t *testing.T, ctl, server string) {
 	deleteAndWaitGone(ctx, t, ctl, server, "Image", imageName, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "StoragePool", poolBlock, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "StoragePool", poolFile, 2*time.Minute)
+
+	// 3. The apiserver reports every object as 404, but a 404 only proves the API
+	// projection is gone — not that the live kernel/QEMU/disk resources the node
+	// owned were torn down. Cross the layer boundary and prove the guest itself
+	// has no orphaned VM/TAP/bridge/nftables/qcow2 残留 (上下一致铁律).
+	assertNoOrphans(ctx, t, g)
+}
+
+// 迁移自 e2e.sh verify_no_orphans：teardown 后证明 guest 内无 live 残留
+// （上下一致：API 404 不等于 live 资源真没了）。
+func assertNoOrphans(ctx context.Context, t *testing.T, g *Guest) {
+	t.Helper()
+	g.AssertNoQEMUProcess(ctx, vmUID)
+	g.AssertNoRuntimeDir(ctx, vmUID)
+	g.AssertNoLink(ctx, guestTAPName(vmUID, 0))
+	g.AssertNoNftablesChain(ctx, guestAntiSpoofChain(vmUID, 0))
+	g.AssertNoLink(ctx, orphanBridge)
+	g.AssertNoNftablesChain(ctx, guestMasqueradeChain(netName))
+	g.AssertNoNftablesChain(ctx, guestForwardChain(netName))
+	g.AssertNoQcow2(ctx, guestQcowPath(guestBlockStorageRoot, poolBlock, vmUID, vmName, diskIndex))
+	t.Logf("host-side orphan check passed: no live VM/TAP/bridge/nftables/qcow2 resources remain")
 }
 
 // expectReferencedRejection asserts that deleting kind/name is refused because it
