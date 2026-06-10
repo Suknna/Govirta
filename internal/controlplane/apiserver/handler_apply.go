@@ -220,7 +220,86 @@ func (s *Server) decodeAndAdmitApply(ctx context.Context, kind metav1.Kind, name
 	if err := admission.PreApplyChain(s.store).Validate(ctx, req); err != nil {
 		return nil, admission.Request{}, admissionToAPIError(err)
 	}
-	return obj, req, nil
+
+	// status 是 node 经 PatchStatus 子资源独占的 live 投影（上下一致 + k8s
+	// spec/status 子资源分离）。一次 apply 改的是 spec，绝不能动 status——但
+	// 调用方提交的 manifest 通常不带 status，decode 后 status 是零值。若直接落库
+	// 会把已存在对象的 status 清空（如 Volume.status.phase=ready → ""），控制器
+	// 据 status 分流的逻辑就会误判（Volume 误走创建路径 → ErrVolumeConflict）。
+	// 故 update 时从旧对象保留 status，create 时保持调用方提交的零值 status。
+	preserved, aerr := preserveUpdateStatus(req, obj)
+	if aerr != nil {
+		return nil, admission.Request{}, aerr
+	}
+	req.NewObject = preserved
+	return preserved, req, nil
+}
+
+// preserveUpdateStatus copies the stored object's status onto the submitted
+// object on update, so an apply that changes spec never clobbers the
+// node-owned status projection. On create it returns obj unchanged (the
+// caller-submitted zero-value status stands). All seven kinds carry a typed
+// Status field; the type switch mirrors decodeObjectByKind.
+func preserveUpdateStatus(req admission.Request, obj any) (any, *apiError) {
+	if req.Operation != admission.OperationUpdate {
+		return obj, nil
+	}
+	mismatch := func() *apiError {
+		return internalErr(fmt.Errorf("apiserver: existing %s %q has type %T, want %T", req.Kind, req.Name, req.OldObject, obj))
+	}
+	switch newObj := obj.(type) {
+	case storagepoolv1.StoragePool:
+		old, ok := req.OldObject.(storagepoolv1.StoragePool)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	case imagev1.Image:
+		old, ok := req.OldObject.(imagev1.Image)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	case volumev1.Volume:
+		old, ok := req.OldObject.(volumev1.Volume)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	case networkv1.Network:
+		old, ok := req.OldObject.(networkv1.Network)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	case nicv1.NIC:
+		old, ok := req.OldObject.(nicv1.NIC)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	case vmv1.VM:
+		old, ok := req.OldObject.(vmv1.VM)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	case snapshotv1.Snapshot:
+		old, ok := req.OldObject.(snapshotv1.Snapshot)
+		if !ok {
+			return nil, mismatch()
+		}
+		newObj.Status = old.Status
+		return newObj, nil
+	default:
+		return nil, internalErr(fmt.Errorf("apiserver: preserve status for unsupported kind %q (%T)", req.Kind, obj))
+	}
 }
 
 // injectFinalizer 在对象持久化前注入默认 node-teardown finalizer（仅当 Finalizers 为空），

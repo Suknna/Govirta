@@ -1034,3 +1034,52 @@ func storedVolume(t *testing.T, st store.Store, name string) volumev1.Volume {
 	}
 	return stored
 }
+
+// TestApplyUpdatePreservesNodeOwnedStatus is the regression for the cold-resize
+// bug found in e2e: an apply that changes spec (e.g. Volume.capacityBytes) must
+// never clobber the node-owned status projection. The caller's manifest carries
+// no status, so without preservation the stored status.phase=ready would reset
+// to "" and the Volume controller would mis-route to the create path
+// (ErrVolumeConflict). status is a PatchStatus-owned subresource (k8s
+// spec/status separation + 上下一致): apply touches spec only.
+func TestApplyUpdatePreservesNodeOwnedStatus(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validVolume()
+	if rec := doApply(t, srv, metav1.KindVolume, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Node reports a ready status through the PatchStatus subresource.
+	reported := volumev1.VolumeStatus{
+		Phase:      volumev1.VolumePhaseReady,
+		VolumePath: "/var/lib/govirta/pool/pool-block/vm-e2e-001/vm-e2e-disk-0.qcow2",
+	}
+	statusBody, err := json.Marshal(reported)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	if rec := doPatchStatus(t, srv, metav1.KindVolume, obj.Name, statusBody); rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A spec-only apply update (grow capacity) that omits status must not reset
+	// the node-reported ready status.
+	created := storedVolume(t, st, obj.Name)
+	update := validVolume()
+	update.Spec.CapacityBytes = created.Spec.CapacityBytes * 2
+	if rec := doApply(t, srv, metav1.KindVolume, update.Name, update); rec.Code != http.StatusCreated {
+		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored := storedVolume(t, st, obj.Name)
+	if stored.Status.Phase != volumev1.VolumePhaseReady {
+		t.Fatalf("stored status.phase = %q, want preserved %q", stored.Status.Phase, volumev1.VolumePhaseReady)
+	}
+	if stored.Status.VolumePath != reported.VolumePath {
+		t.Fatalf("stored status.volumePath = %q, want preserved %q", stored.Status.VolumePath, reported.VolumePath)
+	}
+	if stored.Spec.CapacityBytes != update.Spec.CapacityBytes {
+		t.Fatalf("stored spec.capacityBytes = %d, want updated %d", stored.Spec.CapacityBytes, update.Spec.CapacityBytes)
+	}
+}
