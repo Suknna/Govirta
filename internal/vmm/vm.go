@@ -48,13 +48,29 @@ func (p IntendedPhase) Valid() bool {
 	}
 }
 
-// SpecSummary 是落盘的不可变 VM spec 摘要（上报用，非运行态权威，spec §5）。
+// SpecSummary 是落盘的 VM 配置权威描述（spec §5）。argv 由它确定性派生，
+// 它是 json→qemu flag 单向映射的唯一来源（无第二份 argv 配置）。
 type SpecSummary struct {
-	Arch      string   `json:"arch"`
-	VCPUs     int      `json:"vcpus"`
-	MemoryMiB int      `json:"memory_mib"`
-	DiskPaths []string `json:"disk_paths"`
-	TapNames  []string `json:"tap_names"`
+	Name      string     `json:"name"`
+	Arch      string     `json:"arch"`
+	VCPUs     int        `json:"vcpus"`
+	MemoryMiB int        `json:"memory_mib"`
+	CPUModel  string     `json:"cpu_model"`
+	Disks     []DiskSpec `json:"disks"`
+	NICs      []NICSpec  `json:"nics"`
+}
+
+// DiskSpec 是一块已解析的物理盘配置。Path 由控制器从 Volume.status.VolumePath
+// 解析；NodeName/Frontend 是 vmm 派生时的内部约定常量，不属于配置描述。
+type DiskSpec struct {
+	Path string `json:"path"`
+}
+
+// NICSpec 是一张已解析的物理网卡配置。TapName 来自 NIC.status.TapName，
+// MAC 是控制面分配的 NIC.spec.MAC，原样贯穿到 qemu argv（memory 698）。
+type NICSpec struct {
+	TapName string `json:"tap_name"`
+	MAC     string `json:"mac"`
 }
 
 // RuntimePaths 是运行时目录内各文件的绝对路径集（vmm 私有布局产物，spec §5）。

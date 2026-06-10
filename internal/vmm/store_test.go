@@ -13,11 +13,13 @@ func TestEncodeDecodeStateRoundTrip(t *testing.T) {
 	want := persistedState{
 		UUID: "vm-1",
 		Spec: SpecSummary{
+			Name:      "vm-test",
 			Arch:      "x86_64",
 			VCPUs:     4,
 			MemoryMiB: 2048,
-			DiskPaths: []string{"/disk/root.qcow2"},
-			TapNames:  []string{"tap0"},
+			CPUModel:  "host",
+			Disks:     []DiskSpec{{Path: "/d.qcow2"}},
+			NICs:      []NICSpec{{TapName: "gvtap0", MAC: "02:00:00:00:00:01"}},
 		},
 		Paths:    runtimePathsFor("/var/lib/govirtlet", "vm-1"),
 		Argv:     []string{"qemu-system-x86_64", "-daemonize"},
@@ -37,6 +39,15 @@ func TestEncodeDecodeStateRoundTrip(t *testing.T) {
 	}
 	if got.Spec.Arch != want.Spec.Arch || got.Spec.VCPUs != want.Spec.VCPUs {
 		t.Fatalf("decodeState() spec = %+v, want %+v", got.Spec, want.Spec)
+	}
+	if got.Spec.Name != want.Spec.Name || got.Spec.CPUModel != want.Spec.CPUModel || got.Spec.MemoryMiB != want.Spec.MemoryMiB {
+		t.Fatalf("decodeState() spec = %+v, want %+v", got.Spec, want.Spec)
+	}
+	if len(got.Spec.Disks) != len(want.Spec.Disks) || got.Spec.Disks[0].Path != want.Spec.Disks[0].Path {
+		t.Fatalf("decodeState() disks = %+v, want %+v", got.Spec.Disks, want.Spec.Disks)
+	}
+	if len(got.Spec.NICs) != len(want.Spec.NICs) || got.Spec.NICs[0].TapName != want.Spec.NICs[0].TapName || got.Spec.NICs[0].MAC != want.Spec.NICs[0].MAC {
+		t.Fatalf("decodeState() nics = %+v, want %+v", got.Spec.NICs, want.Spec.NICs)
 	}
 	if len(got.Argv) != len(want.Argv) || got.Argv[0] != want.Argv[0] {
 		t.Fatalf("decodeState() argv = %v, want %v", got.Argv, want.Argv)
