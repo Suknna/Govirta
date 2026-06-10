@@ -36,7 +36,7 @@ type persistedState struct {
 
 argv 派生分两段：
 
-1. **VM 控制器 `buildVM`**（`internal/node/controllers/vm.go`）：构造 base builder——`mapArch(arch)` → `qemu.NewBuilder(arch).WithMachine(profile).WithCPU(cpuModel).WithSMP(...).WithMemoryMiB(...)` + 逐个 `WithBlockDevice(qcow2 disk)` + 逐个 `WithNetDevice(tap)`。
+1. **VM 控制器 `buildVM`**（`internal/node/controllers/vm.go`）：构造 base builder——`mapArch(arch)` → `qemu.NewVM(arch).Name(name).Machine(profile).CPU(c.cpu).SMP(...).Memory(...)` + 逐个 `AddBlockdev(qcow2)+AddDevice(VirtioBlkPCI)` + 逐个 `AddNetdev(Tap)+AddDevice(VirtioNetPCI)`。
 2. **vmm `injectFacilityFlags`**（`internal/vmm/facility.go`）：向 base builder 注入运行时设施 flag（pidfile / QMP chardev+monitor / serial / vnc / daemonize）后 `Build()` → `Argv()`。
 
 `CreateRequest` 双输入：`Builder *qemu.Builder`（控制器构造完段 1）+ `Spec SpecSummary`（控制器另行构造）。
@@ -51,9 +51,9 @@ type SpecSummary struct {
     TapNames  []string `json:"tap_names"`
 }
 ```
-无 `CPUModel`（在控制器 `c.cpuModel` 持有）、无 MAC。
+无 `CPUModel`（在控制器 `c.cpu` 持有）、无 MAC。
 
-**MAC 缺陷** [已验证]：`buildVM` 给 `netdev.Tap` 设 `MAC: ""` 占位，注释写「下方按 NIC ref 顺序填真实 MAC」，但函数直接 return，MAC 永远没被填（全文件唯一 MAC 引用就是这个占位）。控制面分配的 `NIC.Spec.MAC` 未透传到 qemu argv，违反 memory 698（control-plane 分配的 MAC 应原样贯穿）。当前 e2e 能跑通仅因 DHCP 静态绑定按 TAP 而非 guest 网卡 MAC 工作。
+**MAC 缺陷** [已验证]：`buildVM`（`internal/node/controllers/vm.go`）对每张网卡构造 `AddNetdev(netdev.Tap{...})` + `AddDevice(device.VirtioNetPCI{ID, Netdev, RomFile})`——`device.VirtioNetPCI` 有 `Mac MAC` 字段，但 buildVM **从不设它**（`netdev.Tap` 本身无 MAC 字段；MAC 属于 device 前端而非 netdev 后端）。结果控制面分配的 `NIC.Spec.MAC` 从未透传到 qemu argv（`-device virtio-net-pci` 的 `mac=` 被 `qopt.Optional` 在空值时省略），违反 memory 698（control-plane 分配的 MAC 应原样贯穿）。当前 e2e 能跑通仅因 DHCP 静态绑定按 TAP 而非 guest 网卡 MAC 工作。
 
 ## 4. 整顿方案
 
@@ -107,12 +107,12 @@ type CreateRequest struct {
 
 - `gatherDependencies` 扩展：读 NIC 对象时除 `status.TapName` 外，**还解析 `spec.MAC`**，返回每张卡的 `{TapName, MAC}`；读 Volume 同样返回每块盘的 path。
 - 控制器构造完整 `SpecSummary`（Arch/VCPUs/MemoryMiB/CPUModel + Disks + NICs(含 MAC)）传给 `vmm.Create`，不再构造 `qemu.Builder`。
-- 控制器移除 `buildVM` / `mapArch`（已下沉 vmm）。`c.cpuModel` 仍由控制器持有并写入 SpecSummary.CPUModel（控制器是 CPUModel 的注入点，但它现在通过 SpecSummary 传递而非直接构造 builder）。
+- 控制器移除 `buildVM` / `mapArch`（已下沉 vmm）。`c.cpu` 仍由控制器持有并写入 SpecSummary.CPUModel（控制器是 CPUModel 的注入点，但它现在通过 SpecSummary 传递而非直接构造 builder）。
 - 边界清晰：**控制器解析「逻辑 ref → 物理资源」**（读 etcd Volume/NIC status），**vmm 翻译「物理配置 → qemu flag」**（不读 etcd、不解析 ref）。
 
 ## 5. 行为变更声明（非纯结构整顿）
 
-本修复**不是纯行为保持重构**——MAC 透传修复会改变 argv 内容：`netdev.Tap` 的 MAC 从空占位（`mac=`）变为填入控制面分配的真实 MAC（`mac=02:00:00:00:00:01`）。这是 SpecSummary 成为**完整**配置权威的必然结果（残缺的 NIC 配置不能算权威），与结构整顿不可分割，故一并修复。
+本修复**不是纯行为保持重构**——MAC 透传修复会改变 argv 内容：`-device virtio-net-pci` 的 `mac=` 从空（被 `qopt.Optional` 省略）变为填入控制面分配的真实 MAC（`mac=02:00:00:00:00:01`）。这是 SpecSummary 成为**完整**配置权威的必然结果（残缺的 NIC 配置不能算权威），与结构整顿不可分割，故一并修复。
 
 argv 的其余内容（arch/machine/cpu/smp/mem/disks/设施 flag）保持不变——只是构造位置从控制器移到 vmm。
 
