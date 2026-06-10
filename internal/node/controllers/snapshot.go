@@ -13,7 +13,6 @@ import (
 	"github.com/suknna/govirta/internal/node/controller"
 	"github.com/suknna/govirta/internal/storage"
 	"github.com/suknna/govirta/internal/storage/volume"
-	"github.com/suknna/govirta/internal/vmm"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
@@ -302,19 +301,9 @@ func (c *SnapshotController) targetVM(ctx context.Context, vmName string) (vmv1.
 // critical on the delete path where the VM object still exists but its runtime is
 // already gone (otherwise teardown would requeue forever). See spec §5.0.
 func (c *SnapshotController) vmIsCold(ctx context.Context, vm vmv1.VM) (bool, error) {
-	live, err := c.vmm.Status(ctx, vm.UID)
-	if err != nil {
-		if errors.Is(err, vmm.ErrNotFound) {
-			return true, nil
-		}
-		return false, fmt.Errorf("snapshot controller: read VM %q live phase: %w", vm.Name, err)
-	}
-	switch live.Phase {
-	case vmm.PhaseStopped, vmm.PhaseDefined:
-		return true, nil
-	default:
-		return false, nil
-	}
+	// 委托给包级共享助手（coldgate.go），与 VolumeController 复用同款冷门禁。
+	// c.vmm 是 VMRunner，满足 VMStatusReader（只读 Status）。
+	return vmIsCold(ctx, c.vmm, vm)
 }
 
 // patchStatus marshals desired and PATCHes it to the master's /status
