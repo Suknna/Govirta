@@ -351,32 +351,40 @@ func (g *Guest) AssertQcowVirtualSize(ctx context.Context, qcowPath string, want
 	}
 }
 
-// GuestNICMAC 在 guest 内读指定网卡的 MAC（/sys/class/net/<iface>/address 是稳定的
-// 小写无前缀字节契约，跨发行版一致）。读 live guest 实况验证控制面分配的 MAC 真正
-// 贯穿到 qemu argv（整顿前 argv 是 mac= 空占位，guest 会拿到 QEMU 随机 MAC）。
-func (g *Guest) GuestNICMAC(ctx context.Context, iface string) (string, error) {
-	stdout, stderr, code, err := g.Exec(ctx, "cat /sys/class/net/"+shellQuote(iface)+"/address")
-	if err != nil {
-		return "", err
-	}
-	if code != 0 {
-		return "", fmt.Errorf("read %s MAC exit %d: %s", iface, code, stderr)
-	}
-	return strings.TrimSpace(stdout), nil
-}
-
-// AssertGuestNICMAC 断言 guest 网卡 MAC 恰等于 want（大小写不敏感：guest 的
-// /sys/class/net/<iface>/address 是小写，控制面分配值大小写可能不同）。这是 MAC
-// 透传端到端的 live 铁证：master 报 NIC.spec.MAC 之外，guest 内真实网卡 MAC 必须
-// 等于它，才证明控制面分配的 MAC 真正落到 qemu argv（不只信 master 投影）。
-func (g *Guest) AssertGuestNICMAC(ctx context.Context, iface, want string) {
+// AssertRunningQEMUArgvHasMAC 断言 Lima VM 内正在运行的 QEMU 进程（本 VM 的，按
+// runtime dir 定位）命令行携带 mac=<want>。这是「控制面分配的 MAC 贯穿到 qemu argv」
+// 修复的 live 铁证：直接验实际在跑的进程命令行（比读 vm.json 更强），证明 MAC 真正
+// 进了 QEMU 启动参数。
+//
+// 注意层级：limactl shell 进的是 Lima VM，QEMU 在 Lima VM 内运行，所以 pgrep 抓得到
+// QEMU 进程及其 argv；但 Lima VM 内 QEMU 再 spawn 的 CirrOS 嵌套 guest 的网卡 MAC
+// 不在 Lima VM（要走串口/QMP 才可达），不能用 /sys/class/net 读 —— 那会读到 Lima VM
+// 自己的网卡。故在 QEMU argv 这一层断言 MAC，既是修复的真实落点又是 limactl 可达层。
+//
+// 复用三态探针（PRESENT/ABSENT/PROBEERR）模式杜绝假阴性静默 PASS：整体 exit 0，结论
+// 写进 stdout。mac=<want> 大小写按 qemu argv 实际渲染（deriveBuilder 原样透传分配值）。
+func (g *Guest) AssertRunningQEMUArgvHasMAC(ctx context.Context, vmUID, want string) {
 	g.t.Helper()
-	got, err := g.GuestNICMAC(ctx, iface)
+	runtimeDir := guestRuntimeDir(vmUID)
+	macToken := "mac=" + want
+	probe := "command -v pgrep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"command -v grep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"line=$(pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " 2>/dev/null); " +
+		"if [ -z \"$line\" ]; then echo PROBEERR; exit 0; fi; " +
+		"printf '%s' \"$line\" | grep -F " + shellQuote(macToken) + " >/dev/null 2>&1; " +
+		"case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
+	stdout, stderr, code, err := g.Exec(ctx, probe)
 	if err != nil {
-		g.t.Fatalf("read guest %s MAC: %v", iface, err)
+		g.t.Fatalf("probe running QEMU argv for VM uid %q MAC: %v\nstderr: %s", vmUID, err, stderr)
 	}
-	if !strings.EqualFold(got, want) {
-		g.t.Fatalf("guest %s MAC = %q, want %q (control-plane MAC not threaded into qemu argv)", iface, got, want)
+	got := strings.TrimSpace(stdout)
+	switch got {
+	case "PRESENT":
+		return
+	case "ABSENT":
+		g.t.Fatalf("running QEMU for VM uid %q does not carry %q in argv (control-plane MAC not threaded into qemu argv); exit=%d", vmUID, macToken, code)
+	default:
+		g.t.Fatalf("probe for VM uid %q QEMU argv MAC was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", vmUID, got, code, stderr)
 	}
 }
 

@@ -123,12 +123,14 @@ func TestDistributedSpineClosure(t *testing.T) {
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On")
 	waitVMOnRunning(ctx, t, ctl, server)
 
-	// MAC 透传 live 铁证：guest 网卡 MAC 必须等于控制面分配的 NIC.spec.MAC，证明
-	// MAC 真正贯穿到 qemu argv（整顿前 device.VirtioNetPCI.Mac 从不设置，guest 会拿
-	// 到 QEMU 随机生成的 MAC）。MAC 由 apiserver admission 分配（06-nic.json 不含
-	// mac），故动态从 master 读分配值，不硬编码（上下一致 + memory 698）。
+	// MAC 透传 live 铁证：正在运行的 QEMU 进程 argv 必须携带控制面分配的 NIC.spec.MAC，
+	// 证明 MAC 真正贯穿到 qemu argv（整顿前 device.VirtioNetPCI.Mac 从不设置）。MAC 由
+	// apiserver admission 分配（06-nic.json 不含 mac），故动态从 master 读分配值，不硬编码
+	// （上下一致 + memory 698）。断言落在 QEMU argv 层而非 CirrOS guest 内网卡：limactl
+	// shell 进的是 Lima VM，QEMU 在其中运行（argv 可达），但 QEMU 再 spawn 的 CirrOS
+	// 嵌套 guest 网卡不在 Lima VM（读 /sys/class/net 只会读到 Lima VM 自己的网卡）。
 	assignedMAC := readNICMAC(ctx, t, ctl, server, nicName)
-	g.AssertGuestNICMAC(ctx, "eth0", assignedMAC)
+	g.AssertRunningQEMUArgvHasMAC(ctx, vmUID, assignedMAC)
 
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Shutdown")
 	waitVMShutdownRequestedOrOff(ctx, t, ctl, server, 2*time.Minute)
