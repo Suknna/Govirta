@@ -45,6 +45,7 @@ const (
 	snapUID      = "snap-e2e-001" // 08-snapshot.json metadata.uid (internal qcow2 snapshot tag)
 	orphanBridge = "govirta0"     // 05-network.json spec.bridgeName (non-derived, asserted by name)
 	diskIndex    = 0              // 04-volume.json spec.diskIndex (qcow2 file suffix)
+	nicIndex     = 0              // 06-nic.json single nicRef, fixed index 0 (TAP + anti-spoof chain suffix)
 )
 
 // applyOrder is the dependency order the controllers gate on: pools first, then
@@ -73,8 +74,9 @@ const snapshotManifestName = "08-snapshot.json"
 // apiserver's reference-protection (409 while still referenced), the
 // finalizer two-phase (delete stamps deletionTimestamp, the node tears down the
 // live resource, the finalizer is dropped, the apiserver truly removes the
-// object → 404). Host-side proof that no live kernel/QEMU resources leak is the
-// job of scripts/e2e.sh verify_no_orphans, which inspects the guest directly.
+// object → 404). Guest-side proof that no live kernel/QEMU resources leak is the
+// job of this test's own assertNoOrphans, called after teardown to inspect the
+// guest directly (via the Guest handle) and confirm no live residue remains.
 func TestDistributedSpineClosure(t *testing.T) {
 	if os.Getenv(e2eEnabledEnv) != "1" {
 		t.Skipf("set %s=1 (via scripts/e2e.sh) to run the e2e closure test", e2eEnabledEnv)
@@ -363,8 +365,8 @@ func assertNoOrphans(ctx context.Context, t *testing.T, g *Guest) {
 	t.Helper()
 	g.AssertNoQEMUProcess(ctx, vmUID)
 	g.AssertNoRuntimeDir(ctx, vmUID)
-	g.AssertNoLink(ctx, guestTAPName(vmUID, 0))
-	g.AssertNoNftablesChain(ctx, guestAntiSpoofChain(vmUID, 0))
+	g.AssertNoLink(ctx, guestTAPName(vmUID, nicIndex))
+	g.AssertNoNftablesChain(ctx, guestAntiSpoofChain(vmUID, nicIndex))
 	g.AssertNoLink(ctx, orphanBridge)
 	g.AssertNoNftablesChain(ctx, guestMasqueradeChain(netName))
 	g.AssertNoNftablesChain(ctx, guestForwardChain(netName))
