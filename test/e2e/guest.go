@@ -64,6 +64,24 @@ func (g *Guest) Exec(ctx context.Context, cmd string) (stdout, stderr string, ex
 	var outBuf, errBuf bytes.Buffer
 	c.Stdout, c.Stderr = &outBuf, &errBuf
 	runErr := c.Run()
+	exitCode, err = classifyExecResult(ctx.Err(), runErr)
+	return outBuf.String(), errBuf.String(), exitCode, err
+}
+
+// classifyExecResult maps the raw (ctxErr, runErr) of a guest exec into the
+// (exitCode, err) contract: connection-layer failures (limactl itself failed,
+// or ctx cancelled mid-flight) surface as err; a guest command's own non-zero
+// exit is exitCode with err==nil, so the caller can distinguish "could not reach
+// the guest" from "reached it, command reported absent/present".
+//
+// ctx cancellation takes priority because a mid-flight kill returns
+// *exec.ExitError{ExitCode()==-1}: when ctx 到期/取消，limactl 被信号杀死，
+// c.Run() 返回的 *exec.ExitError 会被 errors.As 命中、当成 guest 命令退出码
+// (err 本会保持 nil)，从而**丢弃 ctx.Err()**——下游布尔探针就会把一个被杀死的
+// 探针的 -1 读成 "资源不存在" 而静默 PASS (I-1: 见 commit 7050d25 / fdaeaa0)。
+// 因此只要 ctxErr!=nil 就无条件覆盖为连接层 err。这不会误伤 guest 命令的正常
+// 非零退出：那种情况 ctxErr==nil，仍走 exitCode 路径 (exitCode!=0, err==nil)。
+func classifyExecResult(ctxErr, runErr error) (exitCode int, err error) {
 	var exitErr *exec.ExitError
 	switch {
 	case runErr == nil:
@@ -73,16 +91,10 @@ func (g *Guest) Exec(ctx context.Context, cmd string) (stdout, stderr string, ex
 	default:
 		err = runErr // limactl failure (connection layer)
 	}
-	// ctx 取消/超时优先判为连接层失败。当 ctx 到期时 limactl 被信号杀死，c.Run()
-	// 返回的是 *exec.ExitError（ExitCode()==-1），会被上面的 switch 误当成 guest
-	// 命令退出码（err 保持 nil），从而**丢弃 ctx.Err()**——下游布尔探针就会把一个
-	// 被杀死的探针的 -1 读成 "资源不存在" 而静默 PASS。这里在 return 前覆盖：只要
-	// ctx.Err()!=nil 就归为连接层 err，无条件优先。注意这不会误伤 guest 命令的正常
-	// 非零退出：那种情况 ctx.Err()==nil，仍走 exitCode 路径（exitCode!=0, err==nil）。
-	if ctxErr := ctx.Err(); ctxErr != nil {
+	if ctxErr != nil {
 		err = ctxErr
 	}
-	return outBuf.String(), errBuf.String(), exitCode, err
+	return exitCode, err
 }
 
 // --- 快照 live 实况（items 2/5 落地）---
