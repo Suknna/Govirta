@@ -111,7 +111,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 	list := []controller.Controller{
 		controllers.NewStoragePoolController(poolSvc, master),
 		controllers.NewImageController(imageSvc, master, nil, cfg.ImageSourceRoot),
-		controllers.NewVolumeController(volumeSvc, imageSvc, master),
+		controllers.NewVolumeController(volumeSvc, imageSvc, vmmSvc, master),
 		controllers.NewNetworkController(networkSvc, master),
 		controllers.NewNICController(nicSvc, master, cfg.OwnerUID, cfg.OwnerGID),
 		controllers.NewVMController(vmmSvc, master, cfg.GuestCPU),

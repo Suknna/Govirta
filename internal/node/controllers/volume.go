@@ -27,6 +27,10 @@ import (
 type RootVolumeCreator interface {
 	CreateRootVolumeFromReader(ctx context.Context, req storage.CreateRootVolumeFromReaderRequest) (volume.Volume, error)
 	DeleteVolume(ctx context.Context, req storage.DeleteVolumeRequest) error
+	// ResizeVolume declares an absolute target capacity on the volume's live
+	// qcow2 (cold-resize convergence, 刀5). The driver decides idempotently
+	// whether a grow is needed; the controller never reads/compares live size.
+	ResizeVolume(ctx context.Context, req storage.ResizeVolumeRequest) error
 }
 
 // ImageGetter is the narrow slice of the image service the controller needs:
@@ -66,13 +70,16 @@ var (
 type VolumeController struct {
 	volumes RootVolumeCreator
 	images  ImageGetter
+	vmm     VMStatusReader
 	client  DependencyReader
 }
 
 // NewVolumeController wires a VolumeController against the volume service, the
-// image service, and the master dependency/status client.
-func NewVolumeController(volumes RootVolumeCreator, images ImageGetter, client DependencyReader) *VolumeController {
-	return &VolumeController{volumes: volumes, images: images, client: client}
+// image service, the VM process manager (for the live cold gate on resize), and
+// the master dependency/status client. The runner parameter sits after images
+// and before client, mirroring NewSnapshotController(volumes, runner, client).
+func NewVolumeController(volumes RootVolumeCreator, images ImageGetter, runner VMStatusReader, client DependencyReader) *VolumeController {
+	return &VolumeController{volumes: volumes, images: images, vmm: runner, client: client}
 }
 
 // Kind is the apis kind this controller watches.
@@ -133,8 +140,11 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	// status patch, so the controller would spin forever (the same blind-spot
 	// loop the image controller had). The early return breaks it because the
 	// failure happens in create, not in patch.
+	// Ready volume: drive cold-resize convergence instead of an unconditional
+	// no-op. A grown spec.capacityBytes is applied once the owning VM is cold
+	// (上下一致: gate on live phase, not the VM's status projection). 见刀5 spec §6.
 	if vol.Status.Phase == volumev1.VolumePhaseReady {
-		return controller.Done(), nil
+		return c.reconcileResize(ctx, vol)
 	}
 
 	img, ready, err := c.gate(ctx, vol)

@@ -14,9 +14,11 @@ import (
 	"github.com/suknna/govirta/internal/storage"
 	"github.com/suknna/govirta/internal/storage/diskformat"
 	"github.com/suknna/govirta/internal/storage/volume"
+	"github.com/suknna/govirta/internal/vmm"
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
+	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
 
@@ -35,6 +37,10 @@ type fakeRootVolumeCreator struct {
 	deleteErr    error
 	deleteCalls  int
 	gotDeleteReq storage.DeleteVolumeRequest
+
+	resizeErr    error
+	resizeCalls  int
+	gotResizeReq storage.ResizeVolumeRequest
 }
 
 func (f *fakeRootVolumeCreator) CreateRootVolumeFromReader(ctx context.Context, req storage.CreateRootVolumeFromReaderRequest) (volume.Volume, error) {
@@ -65,6 +71,38 @@ func (f *fakeRootVolumeCreator) DeleteVolume(ctx context.Context, req storage.De
 	f.deleteCalls++
 	f.gotDeleteReq = req
 	return f.deleteErr
+}
+
+// ResizeVolume records the cold-resize request and returns a canned error so a
+// test can assert the controller declared the absolute target capacity against
+// the right (derived id, pool). It honours ctx cancellation, faithful to
+// *storage.VolumeService.
+func (f *fakeRootVolumeCreator) ResizeVolume(ctx context.Context, req storage.ResizeVolumeRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.resizeCalls++
+	f.gotResizeReq = req
+	return f.resizeErr
+}
+
+// fakeVMStatusReader is the narrow VMStatusReader the resize cold gate needs: it
+// returns a configurable live phase or error (so a test can model vmm.ErrNotFound
+// = runtime absent = cold). It honours ctx cancellation, faithful to the vmm
+// runtime read path.
+type fakeVMStatusReader struct {
+	phase     vmm.Phase
+	statusErr error
+}
+
+func (f *fakeVMStatusReader) Status(ctx context.Context, uuid string) (vmm.VM, error) {
+	if err := ctx.Err(); err != nil {
+		return vmm.VM{}, err
+	}
+	if f.statusErr != nil {
+		return vmm.VM{}, f.statusErr
+	}
+	return vmm.VM{UUID: uuid, Phase: f.phase}, nil
 }
 
 // trackingReadCloser wraps a reader and records whether Close was called. It lets
@@ -216,28 +254,30 @@ func storagePoolWithPhase(name string, phase storagepoolv1.PoolPhase) storagepoo
 	return sp
 }
 
-// TestVolumeReconcileReadyVolumeIsNoOp guards the level-triggered idempotence
-// fix: a volume already Ready must not be re-created. Re-reconciling (e.g. on the
-// MODIFIED event the ready-patch itself produced) would otherwise call
-// CreateRootVolumeFromReader again, hit ErrVolumeAlreadyExists before reaching
-// the no-op-guarded status patch, and spin the controller forever — the same
-// blind-spot loop the image controller had. A ready volume reconcile must touch
-// neither the creator nor the image getter.
-func TestVolumeReconcileReadyVolumeIsNoOp(t *testing.T) {
+// TestVolumeReconcileReadyVolumeDoesNotRecreate guards the level-triggered
+// idempotence fix: a volume already Ready must not be re-created. Re-reconciling
+// (e.g. on the MODIFIED event the ready-patch itself produced) would otherwise
+// call CreateRootVolumeFromReader again, hit ErrVolumeAlreadyExists, and spin
+// the controller forever — the same blind-spot loop the image controller had.
+// A ready volume reconcile must touch neither the creator-create path nor the
+// image getter; instead it drives cold-resize convergence (see the resize tests
+// below). Here the owning VM is cold and already at the target capacity, so the
+// driver's no-op guard converges (Done) without re-creating or re-streaming.
+func TestVolumeReconcileReadyVolumeDoesNotRecreate(t *testing.T) {
 	vol := rootVolumeObject("vol-a")
 	vol.Status.Phase = volumev1.VolumePhaseReady
 
 	creator := &fakeRootVolumeCreator{}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
-	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
-	c := NewVolumeController(creator, getter, dep)
+	dep := readyDepsWithColdVM(t, vol)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if result.Requeue {
-		t.Fatalf("Reconcile() result.Requeue = true, want false on a ready no-op")
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want Done on a converged ready volume", result)
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times on ready volume, want 0", creator.createCalls)
@@ -305,7 +345,7 @@ func TestVolumeReconcileAllReadyCreatesRootVolume(t *testing.T) {
 	}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader(imageBytes)}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -389,7 +429,7 @@ func TestVolumeReconcileRawImageFormatPropagates(t *testing.T) {
 	}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("raw-bytes")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatRaw)
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -413,7 +453,7 @@ func TestVolumeReconcileImageNotReadyRequeues(t *testing.T) {
 	img.Status.Phase = imagev1.ImagePhasePending
 	dep.objects[depKey(string(metav1.KindImage), vol.Spec.ImageRef)] = mustMarshal(t, img)
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -442,7 +482,7 @@ func TestVolumeReconcileImageNotFoundRequeues(t *testing.T) {
 	delete(dep.objects, depKey(string(metav1.KindImage), vol.Spec.ImageRef))
 	dep.notFound = map[string]bool{depKey(string(metav1.KindImage), vol.Spec.ImageRef): true}
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -467,7 +507,7 @@ func TestVolumeReconcileBlockPoolNotReadyRequeues(t *testing.T) {
 	dep.objects[depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef)] =
 		mustMarshal(t, storagePoolWithPhase(vol.Spec.PoolRef, storagepoolv1.PoolPhasePending))
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -495,7 +535,7 @@ func TestVolumeReconcileImageFilePoolNotReadyRequeues(t *testing.T) {
 	dep.objects[depKey(string(metav1.KindStoragePool), vol.Spec.ImageFilePoolRef)] =
 		mustMarshal(t, storagePoolWithPhase(vol.Spec.ImageFilePoolRef, storagepoolv1.PoolPhaseFailed))
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -520,7 +560,7 @@ func TestVolumeReconcileCreateFailureRequeues(t *testing.T) {
 	getter := &fakeImageGetter{reader: reader}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil {
@@ -557,7 +597,7 @@ func TestVolumeReconcileGetImageFailureRequeues(t *testing.T) {
 	getter := &fakeImageGetter{getErr: getErr}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil || !errors.Is(err, getErr) {
@@ -583,7 +623,7 @@ func TestVolumeReconcileUnsupportedFormatIsPermanentFailure(t *testing.T) {
 	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormat("vmdk"))
 	dep.objects[depKey(string(metav1.KindImage), vol.Spec.ImageRef)] = mustMarshal(t, img)
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -612,7 +652,7 @@ func TestVolumeReconcileDependencyReadErrorRequeuesWithoutPatch(t *testing.T) {
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	dep.getErr = map[string]error{depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef): readErr}
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil || !errors.Is(err, readErr) {
@@ -637,7 +677,7 @@ func TestVolumeReconcileMissingHostPathRequeues(t *testing.T) {
 	getter := &fakeImageGetter{reader: reader}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil {
@@ -656,7 +696,7 @@ func TestVolumeReconcileDeletedIsNoOp(t *testing.T) {
 	creator := &fakeRootVolumeCreator{}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventDeleted, vol))
 	if err != nil {
@@ -678,7 +718,7 @@ func TestVolumeReconcileContextCancelledPropagates(t *testing.T) {
 	creator := &fakeRootVolumeCreator{}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -727,7 +767,7 @@ func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	creator := &fakeRootVolumeCreator{}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	vol := deletingVolume("vol-del")
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
@@ -773,7 +813,7 @@ func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 	creator := &fakeRootVolumeCreator{deleteErr: volume.ErrVolumeNotFound}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	vol := deletingVolume("vol-gone")
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
@@ -805,7 +845,7 @@ func TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing
 	creator := &fakeRootVolumeCreator{deleteErr: volume.ErrVolumeInUse}
 	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, dep)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
 
 	vol := deletingVolume("vol-busy")
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
@@ -822,5 +862,165 @@ func TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing
 	}
 	if dep.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when teardown conflicts (finalizer kept)", dep.removeFinalizerCalls)
+	}
+}
+
+// vmObject builds a VM object owning vol (UID = vol.Spec.VMRef, the identity the
+// cold gate reads live phase by; Name = vol.Spec.VMName, the key the resize path
+// Gets it under). The object's stored phase is irrelevant — 上下一致: the cold
+// gate trusts the live vmm phase (fakeVMStatusReader), never this projection.
+func vmObject(vol volumev1.Volume) vmv1.VM {
+	return vmv1.VM{
+		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindVM},
+		ObjectMeta: metav1.ObjectMeta{Name: vol.Spec.VMName, UID: vol.Spec.VMRef},
+	}
+}
+
+// readyDepsWithColdVM wires a dependency reader carrying the owning VM object so
+// the resize path's client.Get(KindVM, vmName) resolves. The live cold/warm
+// decision is the fakeVMStatusReader's job, not this object — so this helper just
+// makes the VM object resolvable for any resize test that should get past the
+// 404 gate.
+func readyDepsWithColdVM(t *testing.T, vol volumev1.Volume) *fakeDependencyReader {
+	t.Helper()
+	return &fakeDependencyReader{
+		objects: map[string][]byte{
+			depKey(string(metav1.KindVM), vol.Spec.VMName): mustMarshal(t, vmObject(vol)),
+		},
+	}
+}
+
+// TestVolumeReconcileResizeVMNotFoundRequeues proves the orphan-volume guard
+// (决策6): a ready volume whose owning VM object is gone (client.ErrNotFound) must
+// wait (RequeueAfter) and must NOT resize — never grow a qcow2 for a VM that no
+// longer exists.
+func TestVolumeReconcileResizeVMNotFoundRequeues(t *testing.T) {
+	vol := rootVolumeObject("vol-orphan")
+	vol.Status.Phase = volumev1.VolumePhaseReady
+
+	creator := &fakeRootVolumeCreator{}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	// No VM object registered → fakeDependencyReader.Get returns client.ErrNotFound.
+	dep := &fakeDependencyReader{}
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil when owning VM not found", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("Reconcile() result = %+v, want RequeueAfter when owning VM object missing", result)
+	}
+	if creator.resizeCalls != 0 {
+		t.Errorf("ResizeVolume called %d times, want 0 for an orphan volume", creator.resizeCalls)
+	}
+	if dep.patchCalls != 0 {
+		t.Errorf("PatchStatus called %d times, want 0 (volume stays Ready, just waits)", dep.patchCalls)
+	}
+}
+
+// TestVolumeReconcileResizeVMNotColdDefers proves the cold gate (决策1): a ready
+// volume whose owning VM is live-running is deferred (RequeueAfter) without
+// resizing — the spec change is accepted but only lands once the VM is cold. The
+// gate keys on the live vmm phase, not the VM object's status projection.
+func TestVolumeReconcileResizeVMNotColdDefers(t *testing.T) {
+	vol := rootVolumeObject("vol-warm")
+	vol.Status.Phase = volumev1.VolumePhaseReady
+
+	creator := &fakeRootVolumeCreator{}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := readyDepsWithColdVM(t, vol)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseRunning}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil when VM not cold", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("Reconcile() result = %+v, want RequeueAfter when owning VM is running", result)
+	}
+	if creator.resizeCalls != 0 {
+		t.Errorf("ResizeVolume called %d times, want 0 while VM is running", creator.resizeCalls)
+	}
+	if dep.patchCalls != 0 {
+		t.Errorf("PatchStatus called %d times, want 0 (volume stays Ready, deferred)", dep.patchCalls)
+	}
+}
+
+// TestVolumeReconcileResizeColdConverges proves the convergence path (决策2): a
+// ready volume whose owning VM is cold declares the absolute target capacity
+// (spec.CapacityBytes) against the SERVER-DERIVED volume id + spec PoolRef, then
+// reports Done. The controller never reads/compares live size — it hands the
+// driver the absolute target and lets the driver decide idempotently.
+func TestVolumeReconcileResizeColdConverges(t *testing.T) {
+	vol := rootVolumeObject("vol-grow")
+	vol.Status.Phase = volumev1.VolumePhaseReady
+
+	creator := &fakeRootVolumeCreator{}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := readyDepsWithColdVM(t, vol)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on converged resize", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want Done after a cold resize converged", result)
+	}
+	if creator.resizeCalls != 1 {
+		t.Fatalf("ResizeVolume called %d times, want 1 on a cold volume", creator.resizeCalls)
+	}
+	got := creator.gotResizeReq
+	if got.PoolName != vol.Spec.PoolRef {
+		t.Errorf("ResizeVolume PoolName = %q, want %q", got.PoolName, vol.Spec.PoolRef)
+	}
+	if wantID := deriveVolumeID(vol.Spec); got.VolumeID != wantID {
+		t.Errorf("ResizeVolume VolumeID = %q, want %q (derived <VMRef>-<role>-<DiskIndex>)", got.VolumeID, wantID)
+	}
+	if got.CapacityBytes != vol.Spec.CapacityBytes {
+		t.Errorf("ResizeVolume CapacityBytes = %d, want %d (absolute target)", got.CapacityBytes, vol.Spec.CapacityBytes)
+	}
+	// 决策2: 控制器不读 live、不创建、不重新流式喂入。
+	if creator.createCalls != 0 || getter.getCalls != 0 {
+		t.Errorf("create/getImage touched on resize path: create=%d get=%d, want 0/0", creator.createCalls, getter.getCalls)
+	}
+	if dep.patchCalls != 0 {
+		t.Errorf("PatchStatus called %d times, want 0 (already Ready, no-op guard)", dep.patchCalls)
+	}
+}
+
+// TestVolumeReconcileResizeFailureKeepsReady proves the A2 failure semantics
+// (决策5): a resize failure on a cold volume keeps phase=Ready (the volume is
+// still usable — a failed grow does not negate the achieved availability), surfaces
+// the error, and requeues for retry. It must NOT flip the volume to Failed.
+func TestVolumeReconcileResizeFailureKeepsReady(t *testing.T) {
+	vol := rootVolumeObject("vol-grow-fail")
+	vol.Status.Phase = volumev1.VolumePhaseReady
+
+	resizeErr := errors.New("qemu-img resize: no space left on device")
+	creator := &fakeRootVolumeCreator{resizeErr: resizeErr}
+	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
+	dep := readyDepsWithColdVM(t, vol)
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
+	if err == nil || !errors.Is(err, resizeErr) {
+		t.Fatalf("Reconcile() error = %v, want wrapped %v", err, resizeErr)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("Reconcile() result = %+v, want RequeueAfter to retry the failed resize", result)
+	}
+	if creator.resizeCalls != 1 {
+		t.Fatalf("ResizeVolume called %d times, want 1", creator.resizeCalls)
+	}
+	// A2: 卷仍可用 → 不翻 Failed，不 patch status。
+	for _, p := range dep.patches {
+		if p.status.Phase == volumev1.VolumePhaseFailed {
+			t.Errorf("volume flipped to Failed on resize failure; want it to stay Ready (A2)")
+		}
+	}
+	if dep.patchCalls != 0 {
+		t.Errorf("PatchStatus called %d times, want 0 (Ready unchanged on resize failure)", dep.patchCalls)
 	}
 }
