@@ -97,12 +97,17 @@ metrics / 节点资源汇报通道（可观测性规约本就规定指标从 liv
 求和下次自动反映新值——**没有「账本与 map 脱节」的泄漏风险**（账本即 map 求和）。
 无需也不存在 `addAllocated`/`releaseAllocated` 累加器。
 
-### 3.5 失败语义 A2：保持 Ready + Message + 重试（决策 5/A2）
+### 3.5 失败语义 A2：保持 Ready + 结构化日志 + 重试（决策 5/A2）
 
-resize 失败时 **phase 保持 `Ready`** + Message 记原因 + `RequeueAfter` 重试。
-理由：扩容是 ready 卷上的增量收敛，失败不该否定「卷可用」这个已达成的事实
-（卷扩容前已 Ready、能正常挂载用，没扩成不等于卷坏了）。phase 仍 Ready 表达
-「卷可用」底座，Message + 持续 requeue 表达「扩容未完成、在重试」。
+resize 失败时 **phase 保持 `Ready`**（不 patch status）+ 结构化日志记原因 +
+`RequeueAfter` 重试。理由：扩容是 ready 卷上的增量收敛，失败不该否定「卷可用」
+这个已达成的事实（卷扩容前已 Ready、能正常挂载用，没扩成不等于卷坏了）。phase
+仍 Ready 表达「卷可用」底座，持续 requeue 表达「扩容未完成、在重试」。
+
+**为什么不 patch status Message**：失败/暂缓是每轮 requeue 反复进入的瞬时态，
+若每轮 patch 一条 Message 会制造 status 抖动（MODIFIED→reconcile→再 patch），
+违反 no-op status guard（决策见 6.3）。失败原因走 `zerolog` 结构化日志（可观测性
+规约的日志支柱），不进 status——status 只反映「卷可用」这个稳定事实。
 
 与 snapshot 的「失败退 Failed」不同——snapshot 失败就是真失败（无部分可用态），
 volume 扩容失败是「可用卷没扩成」，不污染 Ready 底座。
@@ -110,7 +115,7 @@ volume 扩容失败是「可用卷没扩成」，不污染 Ready 底座。
 ### 3.6 VM 对象 404：RequeueAfter 等待（决策 6/A）
 
 卷的 `client.Get(KindVM, vmName)` 返回 404（owning VM 对象被删、留下悬空 vmRef 卷）时，
-**RequeueAfter 等待 + Message"等待 owning VM"**，不对孤儿卷擅自扩容。理由：owning VM
+**RequeueAfter 等待**（结构化日志记"等待 owning VM"，不 patch status），不对孤儿卷擅自扩容。理由：owning VM
 不存在的卷是异常状态，用户应删掉它；控制器持续等待（而非给一个没有 VM 的卷扩容）
 是更保守正确的姿态。
 
@@ -209,13 +214,13 @@ agent.go 装配处补注入 vmm。
 ```
 ready 卷 reconcile：
 1. client.Get(KindVM, vol.Spec.VMName)
-     └─ 404 → RequeueAfter + Message"等待 owning VM"（决策 6）
+     └─ 404 → RequeueAfter（决策 6；结构化日志记原因，不 patch status）
 2. vmIsCold(ctx, vm)?
-     ├─ 否（VM 运行中）→ patch Message"等待 VM 停机后扩容" + RequeueAfter（cold-mutable 暂缓）
+     ├─ 否（VM 运行中）→ RequeueAfter（cold-mutable 暂缓；结构化日志记原因，不 patch status）
      └─ ErrNotFound / Stopped / Defined → cold=true，proceed
 3. cold → VolumeService.ResizeVolume(target=spec.CapacityBytes)（强制收敛 C′）
      ├─ 成功 → driver 幂等收敛；phase 保持 Ready，no-op guard 防 PATCH 抖动
-     └─ 失败 → phase 保持 Ready + Message 记原因 + RequeueAfter 重试（决策 5/A2）
+     └─ 失败 → phase 保持 Ready + 结构化日志记原因 + RequeueAfter 重试（决策 5/A2）
 ```
 
 ### 6.3 关键正确性细节
