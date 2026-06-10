@@ -351,6 +351,35 @@ func (g *Guest) AssertQcowVirtualSize(ctx context.Context, qcowPath string, want
 	}
 }
 
+// GuestNICMAC 在 guest 内读指定网卡的 MAC（/sys/class/net/<iface>/address 是稳定的
+// 小写无前缀字节契约，跨发行版一致）。读 live guest 实况验证控制面分配的 MAC 真正
+// 贯穿到 qemu argv（整顿前 argv 是 mac= 空占位，guest 会拿到 QEMU 随机 MAC）。
+func (g *Guest) GuestNICMAC(ctx context.Context, iface string) (string, error) {
+	stdout, stderr, code, err := g.Exec(ctx, "cat /sys/class/net/"+shellQuote(iface)+"/address")
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return "", fmt.Errorf("read %s MAC exit %d: %s", iface, code, stderr)
+	}
+	return strings.TrimSpace(stdout), nil
+}
+
+// AssertGuestNICMAC 断言 guest 网卡 MAC 恰等于 want（大小写不敏感：guest 的
+// /sys/class/net/<iface>/address 是小写，控制面分配值大小写可能不同）。这是 MAC
+// 透传端到端的 live 铁证：master 报 NIC.spec.MAC 之外，guest 内真实网卡 MAC 必须
+// 等于它，才证明控制面分配的 MAC 真正落到 qemu argv（不只信 master 投影）。
+func (g *Guest) AssertGuestNICMAC(ctx context.Context, iface, want string) {
+	g.t.Helper()
+	got, err := g.GuestNICMAC(ctx, iface)
+	if err != nil {
+		g.t.Fatalf("read guest %s MAC: %v", iface, err)
+	}
+	if !strings.EqualFold(got, want) {
+		g.t.Fatalf("guest %s MAC = %q, want %q (control-plane MAC not threaded into qemu argv)", iface, got, want)
+	}
+}
+
 // shellQuote single-quotes a path for safe `sh -c` interpolation.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

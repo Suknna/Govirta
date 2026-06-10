@@ -123,6 +123,13 @@ func TestDistributedSpineClosure(t *testing.T) {
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On")
 	waitVMOnRunning(ctx, t, ctl, server)
 
+	// MAC 透传 live 铁证：guest 网卡 MAC 必须等于控制面分配的 NIC.spec.MAC，证明
+	// MAC 真正贯穿到 qemu argv（整顿前 device.VirtioNetPCI.Mac 从不设置，guest 会拿
+	// 到 QEMU 随机生成的 MAC）。MAC 由 apiserver admission 分配（06-nic.json 不含
+	// mac），故动态从 master 读分配值，不硬编码（上下一致 + memory 698）。
+	assignedMAC := readNICMAC(ctx, t, ctl, server, nicName)
+	g.AssertGuestNICMAC(ctx, "eth0", assignedMAC)
+
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Shutdown")
 	waitVMShutdownRequestedOrOff(ctx, t, ctl, server, 2*time.Minute)
 
@@ -468,6 +475,31 @@ type vmStatusSnapshot struct {
 	Phase              string `json:"phase"`
 	ObservedPowerState string `json:"observedPowerState"`
 	PowerTransition    string `json:"powerTransition"`
+}
+
+// readNICMAC reads the apiserver-assigned MAC from the NIC object's spec. The
+// MAC is NOT hardcoded in 06-nic.json — the control plane allocates it at
+// admission time, so the e2e must read the assigned value back rather than
+// assume a fixed one. json.Decoder reads only the first JSON value, ignoring the
+// trailing "phase: <x>" line govirtctl get appends.
+func readNICMAC(ctx context.Context, t *testing.T, ctl, server, name string) string {
+	t.Helper()
+	out, err := runCtl(ctx, ctl, "get", "--server", server, "NIC", name)
+	if err != nil {
+		t.Fatalf("get NIC %q for MAC: %v\noutput:\n%s", name, err, out)
+	}
+	var obj struct {
+		Spec struct {
+			MAC string `json:"mac"`
+		} `json:"spec"`
+	}
+	if derr := json.NewDecoder(strings.NewReader(out)).Decode(&obj); derr != nil {
+		t.Fatalf("decode NIC %q spec.mac: %v\noutput:\n%s", name, derr, out)
+	}
+	if obj.Spec.MAC == "" {
+		t.Fatalf("NIC %q spec.mac is empty (control plane must have allocated it)\noutput:\n%s", name, out)
+	}
+	return obj.Spec.MAC
 }
 
 func decodeVMStatus(t *testing.T, out string) vmStatusSnapshot {
