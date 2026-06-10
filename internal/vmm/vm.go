@@ -2,8 +2,6 @@ package vmm
 
 import (
 	"time"
-
-	"github.com/suknna/govirta/pkg/virt/qemu"
 )
 
 // Phase 是对外观测的 VM 运行态（由 IntendedPhase + live 探测派生，spec §4）。
@@ -105,10 +103,9 @@ type VM struct {
 	Phase    Phase // live 派生，不落盘
 }
 
-// CreateRequest 是 Create 的输入。Builder 为「配置好但未 Build」的 builder
-// （Q6-A + Q70）：上层设 cpu/内存/machine/磁盘/tap，vmm 注入设施 flag 后 Build。
+// CreateRequest 是 Create 的输入。Spec 是唯一配置权威；vmm 据它确定性派生 argv，
+// 不再接收外部 Builder（杜绝 argv↔Spec 漂移）。
 type CreateRequest struct {
-	UUID    string        // 调用方显式提供，vmm 不生成
-	Builder *qemu.Builder // 配置好但未 Build；vmm 收尾注入设施 flag + Build
-	Spec    SpecSummary   // 上报用只读摘要
+	UUID string      // 调用方显式提供，vmm 不生成
+	Spec SpecSummary // 唯一配置权威
 }

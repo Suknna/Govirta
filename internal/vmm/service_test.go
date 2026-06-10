@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-
-	"github.com/suknna/govirta/pkg/virt/qemu"
 )
 
 // newTestService 构造一个注入 fake 依赖的 VMMService，供生命周期单测使用。
@@ -18,12 +16,16 @@ func newTestService(t *testing.T, fc *fakeController, qc *fakeQMPClient) *VMMSer
 	return svc
 }
 
-// newCreateRequest 构造一个最小但可 Build 的 CreateRequest（facility 注入后能成功渲染）。
+// newCreateRequest 构造一个完整的 CreateRequest：Spec 是唯一配置权威，
+// vmm 据它确定性派生 argv（facility 注入后能成功渲染）。
 func newCreateRequest(uuid string) CreateRequest {
 	return CreateRequest{
-		UUID:    uuid,
-		Builder: qemu.NewVM(qemu.ArchX86_64),
-		Spec:    SpecSummary{Arch: "x86_64", VCPUs: 1, MemoryMiB: 512},
+		UUID: uuid,
+		Spec: SpecSummary{
+			Name: "vm-test", Arch: "aarch64", VCPUs: 1, MemoryMiB: 256, CPUModel: "host",
+			Disks: []DiskSpec{{Path: "/d.qcow2"}},
+			NICs:  []NICSpec{{TapName: "gvtap0", MAC: "02:00:00:00:00:01"}},
+		},
 	}
 }
 
@@ -96,6 +98,32 @@ func TestCreatePersistsArgvAndDefinedIntent(t *testing.T) {
 	}
 }
 
+func TestCreatePersistsArgvMatchingSpecDerivation(t *testing.T) {
+	fc := newFakeController()
+	svc := newTestService(t, fc, &fakeQMPClient{})
+	req := newCreateRequest("vm-derive")
+	if _, err := svc.Create(context.Background(), req); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 独立派生一份 argv，证明落盘 argv == Spec 的确定性派生（无漂移）。
+	b, err := deriveBuilder(req.Spec)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	paths := runtimePathsFor(svc.runtimeRoot, req.UUID)
+	want, err := injectFacilityFlags(b, paths)
+	if err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	st, err := svc.loadState(context.Background(), req.UUID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !sameArgv(st.Argv, want) {
+		t.Fatalf("persisted argv drifted from Spec derivation:\nstored=%v\nwant =%v", st.Argv, want)
+	}
+}
+
 func TestCreateRejectsDuplicateUUID(t *testing.T) {
 	fc := newFakeController()
 	svc := newTestService(t, fc, &fakeQMPClient{})
@@ -115,8 +143,8 @@ func TestCreateRejectsInvalidRequest(t *testing.T) {
 		name string
 		req  CreateRequest
 	}{
-		{name: "empty_uuid", req: CreateRequest{Builder: qemu.NewVM(qemu.ArchX86_64)}},
-		{name: "nil_builder", req: CreateRequest{UUID: "vm-1"}},
+		{name: "empty_uuid", req: CreateRequest{Spec: SpecSummary{Arch: "aarch64", VCPUs: 1, MemoryMiB: 256}}},
+		{name: "unknown_arch", req: CreateRequest{UUID: "vm-1", Spec: SpecSummary{Arch: "sparc", VCPUs: 1, MemoryMiB: 256}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

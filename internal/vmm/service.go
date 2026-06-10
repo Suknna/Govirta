@@ -51,9 +51,6 @@ func (s *VMMService) Create(ctx context.Context, req CreateRequest) (VM, error) 
 	if req.UUID == "" {
 		return VM{}, fmt.Errorf("%w: uuid is required", ErrInvalidRequest)
 	}
-	if req.Builder == nil {
-		return VM{}, fmt.Errorf("%w: builder is required", ErrInvalidRequest)
-	}
 	paths := runtimePathsFor(s.runtimeRoot, req.UUID)
 
 	// 重复检测：vm.json 已存在即拒绝（不覆盖）。
@@ -63,7 +60,11 @@ func (s *VMMService) Create(ctx context.Context, req CreateRequest) (VM, error) 
 		return VM{}, fmt.Errorf("vmm: probe existing state for %s: %w", req.UUID, err)
 	}
 
-	argv, err := injectFacilityFlags(req.Builder, paths)
+	builder, err := deriveBuilder(req.Spec)
+	if err != nil {
+		return VM{}, err
+	}
+	argv, err := injectFacilityFlags(builder, paths)
 	if err != nil {
 		return VM{}, err
 	}
