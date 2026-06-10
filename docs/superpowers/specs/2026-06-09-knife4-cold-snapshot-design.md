@@ -53,18 +53,18 @@ type SnapshotSpec struct {
 type SnapshotPhase string
 
 const (
-    SnapshotPhasePending  SnapshotPhase = "Pending"  // 等待 VM stopped 或扇出进行中
-    SnapshotPhaseReady    SnapshotPhase = "Ready"    // 所有盘快照已建立
-    SnapshotPhaseDeleting SnapshotPhase = "Deleting" // 删除中（等 VM stopped / 扇出删除中）
-    SnapshotPhaseFailed   SnapshotPhase = "Failed"   // 扇出失败（已回滚已建的，可重试）
+    SnapshotPhasePending  SnapshotPhase = "pending"  // 等待 VM stopped 或扇出进行中
+    SnapshotPhaseReady    SnapshotPhase = "ready"    // 所有盘快照已建立
+    SnapshotPhaseDeleting SnapshotPhase = "deleting" // 删除中（等 VM stopped / 扇出删除中）
+    SnapshotPhaseFailed   SnapshotPhase = "failed"   // 扇出失败（已回滚已建的，可重试）
 )
 
 // DiskSnapshotState 是单块盘的快照结果（状态机枚举）。
 type DiskSnapshotState string
 
 const (
-    DiskSnapshotStateCreated DiskSnapshotState = "Created"
-    DiskSnapshotStateFailed  DiskSnapshotState = "Failed"
+    DiskSnapshotStateCreated DiskSnapshotState = "created"
+    DiskSnapshotStateFailed  DiskSnapshotState = "failed"
 )
 
 type DiskSnapshotResult struct {
@@ -111,8 +111,9 @@ apply Snapshot → 读 spec.vmRef 对应的 VM 对象 → 取 VM.metadata.nodeNa
 ```
 
 用户不填、也不应该填 nodeName——它是 vmRef 的 VM 落点的确定性派生（单一事实源）。
-node watch 用 `?nodeName=` 过滤到自己。这个 vmRef→VM 的查询与 ReferenceValidator
-（aply 侧校验 vmRef 存在）是同一次 store 读，可复用。
+node watch 用 `?nodeName=` 过滤到自己。ReferenceValidator（apply 侧）读一次 VM 校验
+vmRef 存在；handler 的 nodeName 注入再读一次 VM 取 nodeName——两次独立 store 读，
+apply 路径对单个对象多读一次 VM 开销可忽略，未做复用。
 
 注入逻辑放在 apply handler 的 mutation 阶段（与 NIC MAC / VM bind 同位置），
 **不在 admission validator 内**（admission 只校验不变更，刀 3 已确立的边界）。

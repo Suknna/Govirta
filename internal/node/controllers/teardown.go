@@ -1,7 +1,7 @@
 package controllers
 
-// teardown.go 提供 finalizer 两阶段删除模型里「控制器无关」的共享物，供 6 个
-// 下层控制器（VM/Volume/Image/StoragePool/Network/NIC）在接拆除分支时复用：
+// teardown.go 提供 finalizer 两阶段删除模型里「控制器无关」的共享物，供 7 个
+// 下层控制器（VM/Volume/Image/StoragePool/Network/NIC/Snapshot）在接拆除分支时复用：
 //
 //   - isDeleting：判断对象是否带 deletionTimestamp（删除中）。
 //   - FinalizerRemover：控制器对 master 摘除 finalizer 的窄依赖（最小接口，

@@ -112,15 +112,15 @@ type SnapshotPhase string
 const (
 	// SnapshotPhasePending means the snapshot object exists but the fan-out has
 	// not completed (waiting for VM stopped, or fan-out in progress).
-	SnapshotPhasePending SnapshotPhase = "Pending"
+	SnapshotPhasePending SnapshotPhase = "pending"
 	// SnapshotPhaseReady means every disk's internal snapshot has been created.
-	SnapshotPhaseReady SnapshotPhase = "Ready"
+	SnapshotPhaseReady SnapshotPhase = "ready"
 	// SnapshotPhaseDeleting means teardown is in progress (waiting for VM
 	// stopped, or per-disk delete in progress).
-	SnapshotPhaseDeleting SnapshotPhase = "Deleting"
+	SnapshotPhaseDeleting SnapshotPhase = "deleting"
 	// SnapshotPhaseFailed means the fan-out failed and already-created disk
 	// snapshots were rolled back; the snapshot can be retried.
-	SnapshotPhaseFailed SnapshotPhase = "Failed"
+	SnapshotPhaseFailed SnapshotPhase = "failed"
 )
 
 // Valid reports whether p is a known snapshot phase.
@@ -138,9 +138,9 @@ type DiskSnapshotState string
 
 const (
 	// DiskSnapshotStateCreated means the disk's internal snapshot was created.
-	DiskSnapshotStateCreated DiskSnapshotState = "Created"
+	DiskSnapshotStateCreated DiskSnapshotState = "created"
 	// DiskSnapshotStateFailed means the disk's internal snapshot creation failed.
-	DiskSnapshotStateFailed DiskSnapshotState = "Failed"
+	DiskSnapshotStateFailed DiskSnapshotState = "failed"
 )
 
 // Valid reports whether s is a known disk snapshot state.

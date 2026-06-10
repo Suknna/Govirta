@@ -313,7 +313,7 @@ func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Vo
 // running VM) is a real conflict: it is returned so the finalizer is kept and the
 // reconcile requeued, letting the referencing VM tear down first.
 func (c *VolumeController) teardown(ctx context.Context, vol volumev1.Volume) error {
-	volID := volume.ID(fmt.Sprintf("%s-%s-%d", vol.Spec.VMRef, mapVolumeRole(vol.Spec.Role), vol.Spec.DiskIndex))
+	volID := deriveVolumeID(vol.Spec)
 	if err := c.volumes.DeleteVolume(ctx, storage.DeleteVolumeRequest{
 		VolumeID: volID,
 		PoolName: vol.Spec.PoolRef,
@@ -340,6 +340,18 @@ func mapVolumeRole(r volumev1.VolumeRole) volume.Role {
 		// conversion so an unexpected role still yields a deterministic key.
 		return volume.Role(string(r))
 	}
+}
+
+// deriveVolumeID reconstructs the SERVER-DERIVED storage key for a volume object:
+// volume.ID(fmt.Sprintf("%s-%s-%d", VMRef, role, DiskIndex)). This is the single
+// source of how the storage layer keys a volume (storage.VolumeService stores it
+// under this id on the create path); both the volume controller teardown and the
+// snapshot controller's volume resolution MUST derive it identically or they miss
+// the qcow2 the object owns. Centralizing it here keeps the derivation from being
+// re-spelled per controller (a drifted formula would silently target the wrong
+// file with no compile error).
+func deriveVolumeID(spec volumev1.VolumeSpec) volume.ID {
+	return volume.ID(fmt.Sprintf("%s-%s-%d", spec.VMRef, mapVolumeRole(spec.Role), spec.DiskIndex))
 }
 
 // reportFailure patches a failed status carrying cause's message, skipping the

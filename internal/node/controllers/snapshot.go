@@ -66,8 +66,8 @@ const snapshotRequeueDelay = 5 * time.Second
 // Reconcile drives one Snapshot event toward its desired state.
 //
 // DELETED is a no-op: the apiserver sends deletion intent as a normal object
-// carrying deletionTimestamp/finalizers, so teardown is driven by that戳, not by
-// the DELETED event. For ADDED/MODIFIED it decodes the object, resolves the
+// carrying deletionTimestamp/finalizers, so teardown is driven by that stamp, not
+// by the DELETED event. For ADDED/MODIFIED it decodes the object, resolves the
 // target VM (object + live cold phase), and dispatches to the create or delete
 // path.
 func (c *SnapshotController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
@@ -250,9 +250,9 @@ func (c *SnapshotController) reconcileDelete(ctx context.Context, snap snapshotv
 }
 
 // volumeTarget is a resolved (pool, derived volume id) pair for one of the VM's
-// volumeRefs. The volume id MUST be derived the same way the storage layer keys
-// it (VMRef-role-diskIndex) — the same derivation the volume controller teardown
-// uses (mapVolumeRole lives in volume.go, same package).
+// volumeRefs. The volume id is derived via deriveVolumeID (volume.go, same
+// package) so the snapshot controller and the volume controller teardown key the
+// qcow2 identically.
 type volumeTarget struct {
 	poolName string
 	volumeID volume.ID
@@ -270,8 +270,7 @@ func (c *SnapshotController) resolveVolumeTarget(ctx context.Context, volName st
 	if err := json.Unmarshal(raw, &vol); err != nil {
 		return volumeTarget{}, fmt.Errorf("snapshot controller: decode Volume %q: %w", volName, err)
 	}
-	id := volume.ID(fmt.Sprintf("%s-%s-%d", vol.Spec.VMRef, mapVolumeRole(vol.Spec.Role), vol.Spec.DiskIndex))
-	return volumeTarget{poolName: vol.Spec.PoolRef, volumeID: id}, nil
+	return volumeTarget{poolName: vol.Spec.PoolRef, volumeID: deriveVolumeID(vol.Spec)}, nil
 }
 
 // targetVM reads the named VM object from the master. A client.ErrNotFound is
