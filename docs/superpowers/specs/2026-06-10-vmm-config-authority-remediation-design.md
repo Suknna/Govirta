@@ -63,6 +63,7 @@ type SpecSummary struct {
 
 ```go
 type SpecSummary struct {
+    Name      string      `json:"name"`       // VM 名，渲染为 qemu -name（控制器从 VM.metadata.name 传入）
     Arch      string      `json:"arch"`
     VCPUs     int         `json:"vcpus"`
     MemoryMiB int         `json:"memory_mib"`
