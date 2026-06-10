@@ -15,19 +15,8 @@ import (
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
-	"github.com/suknna/govirta/pkg/virt/qemu"
-	"github.com/suknna/govirta/pkg/virt/qemu/blockdev"
 	"github.com/suknna/govirta/pkg/virt/qemu/cpu"
-	"github.com/suknna/govirta/pkg/virt/qemu/device"
-	"github.com/suknna/govirta/pkg/virt/qemu/machine"
-	"github.com/suknna/govirta/pkg/virt/qemu/netdev"
-	"github.com/suknna/govirta/pkg/virt/qemu/qflag"
 )
-
-// errUnsupportedArch marks a VM spec whose arch cannot be mapped to a supported
-// QEMU machine profile. It is a permanent (config) error: a requeue cannot fix
-// an unknown arch, so the object is reported failed and not re-enqueued.
-var errUnsupportedArch = errors.New("vm controller: unsupported arch")
 
 // VMRunner is the narrow slice of the VM process manager the controller needs:
 // create a daemonized QEMU from a configured builder, start or gracefully stop
@@ -54,8 +43,9 @@ var (
 
 // VMController reconciles VM objects. It gates on every referenced Volume and
 // NIC being live Ready, reads the root disk host path from the Volume status and
-// the host TAP name from the NIC status, assembles a typed qemu.Builder, and
-// drives the VM process through vmm.Create + vmm.Start. It then reads the live
+// the host TAP name + control-plane MAC from the NIC, assembles the full
+// vmm.SpecSummary config authority, and drives the VM process through vmm.Create
+// (which deterministically derives the argv) + vmm.Start. It then reads the live
 // vmm phase and patches it up to the master.
 //
 // The controller threads the live phase on every reconcile — including watch
@@ -180,8 +170,8 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 		return controller.Done(), nil
 	}
 
-	// Gate on dependencies and collect the disk paths + tap names they expose.
-	diskPaths, tapNames, ready, err := c.gatherDependencies(ctx, obj)
+	// Gate on dependencies and collect the resolved disk + NIC config they expose.
+	disks, nics, ready, err := c.gatherDependencies(ctx, obj)
 	if err != nil {
 		// Dependency read transport error: transient, wait and retry.
 		return controller.RequeueAfter(vmDependencyRequeueDelay), fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
@@ -192,30 +182,30 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 		return controller.RequeueAfter(vmDependencyRequeueDelay), nil
 	}
 
-	builder, err := c.buildVM(obj, diskPaths, tapNames)
-	if err != nil {
-		// Bad spec (e.g. unsupported arch) is permanent: requeue cannot fix it.
-		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
-			return controller.Done(), fmt.Errorf("vm controller: build %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
-		}
-		logger := zerolog.Ctx(ctx)
-		logger.Error().Err(err).Str("key", key).Msg("vm spec rejected permanently (config error); not requeuing")
-		return controller.Done(), nil
+	// Assemble the full SpecSummary config authority and hand it to vmm, which
+	// deterministically derives the argv (arch validation, builder, MAC passthrough)
+	// — the controller no longer constructs a qemu.Builder itself.
+	spec := vmm.SpecSummary{
+		Name:      obj.Name,
+		Arch:      obj.Spec.Arch,
+		VCPUs:     obj.Spec.VCPUs,
+		MemoryMiB: obj.Spec.MemoryMiB,
+		CPUModel:  string(c.cpu),
+		Disks:     disks,
+		NICs:      nics,
 	}
 
-	create := vmm.CreateRequest{
-		UUID:    obj.UID,
-		Builder: builder,
-		Spec: vmm.SpecSummary{
-			Arch:      obj.Spec.Arch,
-			VCPUs:     obj.Spec.VCPUs,
-			MemoryMiB: obj.Spec.MemoryMiB,
-			DiskPaths: diskPaths,
-			TapNames:  tapNames,
-		},
-	}
+	create := vmm.CreateRequest{UUID: obj.UID, Spec: spec}
 	created, err := c.vmm.Create(ctx, create)
 	if err != nil && !errors.Is(err, vmm.ErrAlreadyExists) {
+		if errors.Is(err, vmm.ErrInvalidRequest) {
+			// Permanent config error (e.g. unsupported arch): a requeue cannot fix it.
+			if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+				return controller.Done(), fmt.Errorf("vm controller: invalid spec %q and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			zerolog.Ctx(ctx).Error().Err(err).Str("key", key).Msg("vm spec rejected permanently; not requeuing")
+			return controller.Done(), nil
+		}
 		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
 			return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: create %q failed and status report failed: %w", obj.Name, errors.Join(err, perr))
 		}
@@ -377,11 +367,13 @@ func (c *VMController) logUnknownPhase(ctx context.Context, key, uuid string, ph
 }
 
 // gatherDependencies reads every referenced Volume and NIC object's live status.
-// It returns the ordered root disk host paths (from Volume status.VolumePath) and
-// host tap names (from NIC status.TapName). ready is false when any dependency is
-// missing or not yet Ready (a wait, not an error). A non-nil error is a transport
-// failure reading a dependency, which the caller treats as transient.
-func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (diskPaths, tapNames []string, ready bool, err error) {
+// It returns the ordered resolved disks (from Volume status.VolumePath) and NICs
+// (host tap name from NIC status.TapName + control-plane assigned MAC from NIC
+// spec.MAC). ready is false when any dependency is missing or not yet Ready (a
+// wait, not an error). A non-nil error is a transport failure reading a
+// dependency, which the caller treats as transient — except a Ready NIC missing
+// its allocated MAC, which is a real (non-transient) decode error.
+func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (disks []vmm.DiskSpec, nics []vmm.NICSpec, ready bool, err error) {
 	for _, ref := range obj.Spec.VolumeRefs {
 		raw, gerr := c.client.Get(ctx, string(metav1.KindVolume), ref)
 		if gerr != nil {
@@ -397,7 +389,7 @@ func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (dis
 		if vol.Status.Phase != volumev1.VolumePhaseReady || vol.Status.VolumePath == "" {
 			return nil, nil, false, nil
 		}
-		diskPaths = append(diskPaths, vol.Status.VolumePath)
+		disks = append(disks, vmm.DiskSpec{Path: vol.Status.VolumePath})
 	}
 
 	for _, ref := range obj.Spec.NICRefs {
@@ -415,78 +407,13 @@ func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (dis
 		if nic.Status.Phase != nicv1.NICPhaseReady || nic.Status.TapName == "" {
 			return nil, nil, false, nil
 		}
-		tapNames = append(tapNames, nic.Status.TapName)
+		if nic.Spec.MAC == "" {
+			return nil, nil, false, fmt.Errorf("NIC %q ready but spec.MAC empty", ref)
+		}
+		nics = append(nics, vmm.NICSpec{TapName: nic.Status.TapName, MAC: nic.Spec.MAC})
 	}
 
-	return diskPaths, tapNames, true, nil
-}
-
-// buildVM assembles a configured-but-not-built qemu.Builder from the VM spec and
-// the resolved dependency host resources. Per the vmm.CreateRequest contract the
-// controller sets only domain config (arch/cpu/smp/memory/machine/disk/tap);
-// vmm injects the facility flags (QMP, pidfile, daemonize) and calls Build.
-func (c *VMController) buildVM(obj vmv1.VM, diskPaths, tapNames []string) (*qemu.Builder, error) {
-	arch, profile, err := mapArch(obj.Spec.Arch)
-	if err != nil {
-		return nil, err
-	}
-
-	b := qemu.NewVM(arch).
-		Name(obj.Name).
-		Machine(profile).
-		CPU(c.cpu).
-		SMP(qemu.SMP{CPUs: obj.Spec.VCPUs, Cores: obj.Spec.VCPUs, Threads: 1, Sockets: 1}).
-		Memory(qemu.MiB(obj.Spec.MemoryMiB))
-
-	for i, path := range diskPaths {
-		node := fmt.Sprintf("disk%d", i)
-		b = b.AddBlockdev(blockdev.Qcow2{
-			NodeName: node,
-			File:     blockdev.FileProtocol{Filename: path},
-			Cache:    blockdev.Cache{Direct: qemu.Off},
-			AIO:      blockdev.AIOThreads,
-		}).AddDevice(device.VirtioBlkPCI{
-			ID:    fmt.Sprintf("blk%d", i),
-			Drive: blockdev.Ref(node),
-		})
-	}
-
-	for i, tap := range tapNames {
-		netID := fmt.Sprintf("net%d", i)
-		b = b.AddNetdev(netdev.Tap{
-			ID:         netID,
-			IfName:     tap,
-			Script:     netdev.ScriptNo,
-			DownScript: netdev.ScriptNo,
-			Vhost:      qemu.On,
-		}).AddDevice(device.VirtioNetPCI{
-			ID:     fmt.Sprintf("nic%d", i),
-			Netdev: netdev.Ref(netID),
-			// Explicitly disable the PXE/network-boot option ROM (romfile=).
-			// This project does not support PXE boot: a cold-boot guest boots
-			// from its disk, and leaving the default would require the host
-			// QEMU install to ship efi-virtio.rom, making spawn fail wherever
-			// that file is absent. The decision is made here in the controller
-			// rather than defaulted in the builder (显式优于隐式).
-			RomFile: qflag.String(""),
-		})
-	}
-
-	return b, nil
-}
-
-// mapArch maps an apis VM spec arch string to a typed qemu.Arch and the supported
-// KVM machine profile for it. An unknown arch is a permanent config error. It is
-// an explicit switch over the supported set (项目铁律: 禁止裸 string 推断).
-func mapArch(arch string) (qemu.Arch, machine.Profile, error) {
-	switch arch {
-	case "x86_64":
-		return qemu.ArchX86_64, machine.ProfileX86_64Q35KVM, nil
-	case "aarch64":
-		return qemu.ArchAArch64, machine.ProfileAArch64VirtKVM, nil
-	default:
-		return "", "", fmt.Errorf("%w: %q", errUnsupportedArch, arch)
-	}
+	return disks, nics, true, nil
 }
 
 // mapVMPhase maps the live vmm.Phase to the apis VMPhase. Both enums mirror each

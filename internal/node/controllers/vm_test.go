@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -210,6 +211,7 @@ func readyNIC(name, tap string) nicv1.NIC {
 	return nicv1.NIC{
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindNIC},
 		ObjectMeta: metav1.ObjectMeta{Name: name, UID: "uid-" + name},
+		Spec:       nicv1.NICSpec{MAC: "02:00:00:00:00:01"},
 		Status:     nicv1.NICStatus{Phase: nicv1.NICPhaseReady, TapName: tap},
 	}
 }
@@ -270,19 +272,22 @@ func TestVMReconcileAllReadyCreatesAndStarts(t *testing.T) {
 		t.Fatalf("startCalls = %d, want 1", runner.startCalls)
 	}
 
-	// The builder must carry the dependency-resolved disk path and tap name in the
-	// summary spec.
-	if got := runner.lastCreate.Spec.DiskPaths; len(got) != 1 || got[0] != "/var/lib/govirta/vol-a.qcow2" {
-		t.Fatalf("create DiskPaths = %v, want [/var/lib/govirta/vol-a.qcow2]", got)
+	// The create request must carry the dependency-resolved disk path and the NIC
+	// {TapName, MAC} in the full SpecSummary, plus the node CPU model and VM name.
+	if got := runner.lastCreate.Spec.Disks; len(got) != 1 || got[0].Path != "/var/lib/govirta/vol-a.qcow2" {
+		t.Fatalf("create Spec.Disks = %v, want [{Path:/var/lib/govirta/vol-a.qcow2}]", got)
 	}
-	if got := runner.lastCreate.Spec.TapNames; len(got) != 1 || got[0] != "gvabc1234.0" {
-		t.Fatalf("create TapNames = %v, want [gvabc1234.0]", got)
+	if got := runner.lastCreate.Spec.NICs; len(got) != 1 || got[0].TapName != "gvabc1234.0" || got[0].MAC != "02:00:00:00:00:01" {
+		t.Fatalf("create Spec.NICs = %v, want [{TapName:gvabc1234.0 MAC:02:00:00:00:00:01}]", got)
+	}
+	if got := runner.lastCreate.Spec.CPUModel; got != string(cpu.ModelHost) {
+		t.Fatalf("create Spec.CPUModel = %q, want %q", got, cpu.ModelHost)
+	}
+	if got := runner.lastCreate.Spec.Name; got != "vm-a" {
+		t.Fatalf("create Spec.Name = %q, want vm-a", got)
 	}
 	if runner.lastCreate.UUID != "uid-vm-a" {
 		t.Fatalf("create UUID = %q, want uid-vm-a", runner.lastCreate.UUID)
-	}
-	if runner.lastCreate.Builder == nil {
-		t.Fatalf("create Builder is nil; controller must pass a configured builder")
 	}
 
 	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseRunning {
@@ -767,10 +772,14 @@ func TestVMReconcileCreateFailureRequeues(t *testing.T) {
 	}
 }
 
-func TestVMReconcileUnsupportedArchIsPermanentFailure(t *testing.T) {
+func TestVMReconcileInvalidSpecIsPermanentFailure(t *testing.T) {
+	// Arch validation now lives in vmm: an unsupported arch (or any other invalid
+	// spec) surfaces as vmm.ErrInvalidRequest from Create. The controller must
+	// treat it as a permanent config error — patch Failed and NOT requeue, since a
+	// requeue cannot fix a bad spec.
 	obj := validVMObject()
 	obj.Spec.Arch = "riscv64"
-	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
+	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound, createErr: fmt.Errorf("%w: unsupported arch %q", vmm.ErrInvalidRequest, "riscv64")}
 	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
 
@@ -778,11 +787,11 @@ func TestVMReconcileUnsupportedArchIsPermanentFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: unexpected error: %v", err)
 	}
-	if result.Requeue {
-		t.Fatalf("result.Requeue = true, want false for a permanent arch config error")
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("result = %+v, want no requeue for a permanent config error", result)
 	}
-	if runner.createCalls != 0 {
-		t.Fatalf("createCalls = %d, want 0 for unsupported arch", runner.createCalls)
+	if runner.startCalls != 0 {
+		t.Fatalf("startCalls = %d, want 0 when create rejected the spec", runner.startCalls)
 	}
 	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseFailed {
 		t.Fatalf("patched phase = %q, want failed", phase)
