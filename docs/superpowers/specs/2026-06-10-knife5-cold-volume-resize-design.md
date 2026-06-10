@@ -272,7 +272,7 @@ ready 卷 reconcile：
   CapacityBytes 更新、delta==0 仍下沉 driver、卷不存在 ErrVolumeNotFound）
 - **service**：`VolumeService.ResizeVolume` 显式字段校验
 - **controller**：resize 路径全分支（VM 404→RequeueAfter、VM 运行中→暂缓、cold→ResizeVolume、
-  resize 失败→Ready+Message+requeue、已收敛→Done no-op、no-op status guard）
+  resize 失败→Ready+结构化日志+requeue（不 patch status）、已收敛→Done no-op、no-op status guard）
 
 ### 7.4 验证铁证
 
