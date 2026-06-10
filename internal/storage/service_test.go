@@ -315,6 +315,70 @@ func TestSnapshotVolumeCanceledContextDoesNotCallDriver(t *testing.T) {
 	}
 }
 
+func TestVolumeServiceResize(t *testing.T) {
+	t.Run("pool required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.ResizeVolume(context.Background(), ResizeVolumeRequest{VolumeID: "vol-a", CapacityBytes: 20})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("ResizeVolume() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.resizeCalls != 0 {
+			t.Fatalf("resize driver calls = %d, want 0", driver.resizeCalls)
+		}
+	})
+	t.Run("volume id required", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.ResizeVolume(context.Background(), ResizeVolumeRequest{PoolName: "pool-a", CapacityBytes: 20})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("ResizeVolume() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.resizeCalls != 0 {
+			t.Fatalf("resize driver calls = %d, want 0", driver.resizeCalls)
+		}
+	})
+	t.Run("capacity positive", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		err := service.ResizeVolume(context.Background(), ResizeVolumeRequest{PoolName: "pool-a", VolumeID: "vol-a", CapacityBytes: 0})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("ResizeVolume() error = %v, want %v", err, ErrInvalidRequest)
+		}
+		if driver.resizeCalls != 0 {
+			t.Fatalf("resize driver calls = %d, want 0", driver.resizeCalls)
+		}
+	})
+	t.Run("forwards to pool", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		vol := createRootVolume(t, service)
+
+		if err := service.ResizeVolume(context.Background(), ResizeVolumeRequest{PoolName: "pool-a", VolumeID: vol.ID, CapacityBytes: 50}); err != nil {
+			t.Fatalf("ResizeVolume() error = %v, want nil", err)
+		}
+		if driver.resizeCalls != 1 {
+			t.Fatalf("resize driver calls = %d, want 1", driver.resizeCalls)
+		}
+		if driver.lastResizeVol.ID != vol.ID {
+			t.Fatalf("resize volume id = %q, want %q", driver.lastResizeVol.ID, vol.ID)
+		}
+		if driver.lastResizeVol.PoolName != "pool-a" {
+			t.Fatalf("resize pool = %q, want pool-a", driver.lastResizeVol.PoolName)
+		}
+		if driver.lastResize.CapacityBytes != 50 {
+			t.Fatalf("resize capacity = %d, want 50", driver.lastResize.CapacityBytes)
+		}
+	})
+	t.Run("propagates pool error", func(t *testing.T) {
+		service, driver := newTestVolumeService(t)
+		vol := createRootVolume(t, service)
+		resizeErr := errors.New("resize failed")
+		driver.resizeErr = resizeErr
+
+		err := service.ResizeVolume(context.Background(), ResizeVolumeRequest{PoolName: "pool-a", VolumeID: vol.ID, CapacityBytes: 50})
+		if !errors.Is(err, resizeErr) {
+			t.Fatalf("ResizeVolume() error = %v, want %v", err, resizeErr)
+		}
+	})
+}
+
 func TestCanceledContextDoesNotCallDriver(t *testing.T) {
 	service, driver := newTestVolumeService(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -607,14 +671,18 @@ type storageLifecycleDriver struct {
 	unpublishCalls        int
 	snapshotCalls         int
 	deleteSnapshotCalls   int
+	resizeCalls           int
 	lastCreate            block.CreateRequest
 	lastCreateFromReader  block.CreateFromReaderRequest
 	lastSnapshot          block.SnapshotRequest
 	lastDeleteSnapshot    block.DeleteSnapshotRequest
+	lastResize            block.ResizeRequest
+	lastResizeVol         volume.Volume
 	createErr             error
 	createFromReaderErr   error
 	snapshotErr           error
 	deleteSnapshotErr     error
+	resizeErr             error
 }
 
 func (d *storageLifecycleDriver) DriverInfo(ctx context.Context) (block.DriverInfo, error) {
@@ -725,7 +793,15 @@ func (d *storageLifecycleDriver) Resize(ctx context.Context, vol volume.Volume, 
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
-	return volume.Volume{}, volume.ErrUnsupported
+	d.resizeCalls++
+	d.lastResize = req
+	d.lastResizeVol = vol
+	if d.resizeErr != nil {
+		return volume.Volume{}, d.resizeErr
+	}
+	resized := vol
+	resized.CapacityBytes = req.CapacityBytes
+	return resized, nil
 }
 
 type storageImageDriver struct {

@@ -224,6 +224,34 @@ func (s *VolumeService) DeleteVolume(ctx context.Context, req DeleteVolumeReques
 	return s.pools.DeleteVolume(ctx, req.PoolName, req.VolumeID)
 }
 
+// ResizeVolumeRequest carries the explicit pool, volume id, and new declared
+// capacity for an offline volume resize. Every field is required (显式优于隐式);
+// the storage layer never infers pool, volume, or target capacity.
+type ResizeVolumeRequest struct {
+	PoolName      string
+	VolumeID      volume.ID
+	CapacityBytes int64
+}
+
+// ResizeVolume grows an existing volume's declared capacity within its pool
+// (cold offline resize, increase-only). Convergence is declarative: callers
+// pass the absolute target capacity and the pool/driver layers make the live
+// qcow2 match it idempotently (driver reads live size; reaching the target is a
+// no-op). Pre-allocation accounting and the actual qemu-img resize live in
+// pool.Service.ResizeVolume.
+func (s *VolumeService) ResizeVolume(ctx context.Context, req ResizeVolumeRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.PoolName == "" || req.VolumeID == "" || req.CapacityBytes <= 0 {
+		return volume.ErrInvalidRequest
+	}
+	if _, err := s.pools.ResizeVolume(ctx, req.PoolName, req.VolumeID, req.CapacityBytes); err != nil {
+		return err
+	}
+	return nil
+}
+
 // SnapshotVolumeRequest identifies a volume and the internal snapshot name to create.
 type SnapshotVolumeRequest struct {
 	PoolName     string
