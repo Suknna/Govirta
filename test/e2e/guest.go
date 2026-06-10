@@ -71,7 +71,16 @@ func (g *Guest) Exec(ctx context.Context, cmd string) (stdout, stderr string, ex
 	case errors.As(runErr, &exitErr):
 		exitCode = exitErr.ExitCode() // guest command exit code; err stays nil
 	default:
-		err = runErr // limactl failure / ctx cancel (connection layer)
+		err = runErr // limactl failure (connection layer)
+	}
+	// ctx 取消/超时优先判为连接层失败。当 ctx 到期时 limactl 被信号杀死，c.Run()
+	// 返回的是 *exec.ExitError（ExitCode()==-1），会被上面的 switch 误当成 guest
+	// 命令退出码（err 保持 nil），从而**丢弃 ctx.Err()**——下游布尔探针就会把一个
+	// 被杀死的探针的 -1 读成 "资源不存在" 而静默 PASS。这里在 return 前覆盖：只要
+	// ctx.Err()!=nil 就归为连接层 err，无条件优先。注意这不会误伤 guest 命令的正常
+	// 非零退出：那种情况 ctx.Err()==nil，仍走 exitCode 路径（exitCode!=0, err==nil）。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
 	}
 	return outBuf.String(), errBuf.String(), exitCode, err
 }
@@ -134,18 +143,66 @@ func (g *Guest) AssertQcowNoSnapshot(ctx context.Context, qcowPath, tag string) 
 
 // --- orphan 检查（从 e2e.sh verify_no_orphans 迁移，逐项对应）---
 
+// assertGuestAbsent runs an existence probe and fails the test unless it reports
+// the resource is ABSENT. probe MUST be a command that always exits 0 and prints
+// exactly PRESENT or ABSENT on stdout (the `<check> && echo PRESENT || echo
+// ABSENT` shape). That explicit stdout marker — rather than a bare exit code —
+// is what separates "probe ran, resource is gone" from "probe never ran":
+//   - connection-layer err (limactl failed / ctx cancelled) → Fatalf
+//   - non-zero exit (the guest command always exits 0, so non-zero ⇒ limactl
+//     itself failed) → Fatalf
+//   - unrecognised stdout (probe did not run as written) → Fatalf
+//
+// so a dead probe can never be silently read as "absent" (the假阴性 this fixes).
+// label identifies the probe in failure messages; presentMsg is the Fatalf
+// message used when the resource is reported PRESENT.
+func (g *Guest) assertGuestAbsent(ctx context.Context, probe, label, presentMsg string) {
+	g.t.Helper()
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("probe %s: %v", label, err)
+	}
+	if code != 0 {
+		g.t.Fatalf("probe %s failed (exit %d): %s", label, code, stderr)
+	}
+	switch strings.TrimSpace(stdout) {
+	case "ABSENT":
+		return
+	case "PRESENT":
+		g.t.Fatalf("%s", presentMsg)
+	default:
+		g.t.Fatalf("probe %s returned unexpected output %q (probe did not run as written)", label, stdout)
+	}
+}
+
+// assertGuestPathAbsent fails the test unless path is gone from the guest
+// filesystem, probed with `sudo test -e`. Shared by the qcow2 and runtime-dir
+// checks (M2): both are pure existence probes, so the only difference is the
+// path and the failure wording. The probe always exits 0 and emits PRESENT or
+// ABSENT, so assertGuestAbsent can hard-fail a probe that never ran.
+func (g *Guest) assertGuestPathAbsent(ctx context.Context, path, label, presentMsg string) {
+	g.t.Helper()
+	probe := "sudo test -e " + shellQuote(path) + " && echo PRESENT || echo ABSENT"
+	g.assertGuestAbsent(ctx, probe, label, presentMsg)
+}
+
 // AssertNoQEMUProcess fails if a QEMU process keyed by the VM uid's runtime path
 // is still running. pgrep self-match 规避：探针经 `limactl shell -- sh -c` 执行，
 // cmd 字符串里已展开 runtimeDir，若用 `pgrep -af`（-f 匹配全 argv）会匹配探针 sh 自身、
 // 永远 fail。改用 `pgrep -a`（不带 -f，只按进程名 comm 匹配）——探针 comm 是 sh、不匹配
 // qemu-system，结构性排除自匹配；QEMU argv 仍嵌 runtimeDir 供 grep -F 过滤（spec M3）。
+// `|| true` 让 guest 命令整体 exit 0，于是 absent=stdout 空；任何连接层 err 或非零
+// exit（guest 命令恒 0，非零必是 limactl 失败）都判探针失败 → Fatalf，绝不静默 absent。
 func (g *Guest) AssertNoQEMUProcess(ctx context.Context, vmUID string) {
 	g.t.Helper()
 	runtimeDir := guestRuntimeDir(vmUID)
 	cmd := "pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " || true"
-	stdout, _, _, err := g.Exec(ctx, cmd)
+	stdout, stderr, code, err := g.Exec(ctx, cmd)
 	if err != nil {
 		g.t.Fatalf("probe QEMU process for %q: %v", vmUID, err)
+	}
+	if code != 0 {
+		g.t.Fatalf("probe QEMU process for %q failed (exit %d): %s", vmUID, code, stderr)
 	}
 	if strings.TrimSpace(stdout) != "" {
 		g.t.Fatalf("QEMU process still running for VM uid %q:\n%s", vmUID, stdout)
@@ -153,21 +210,27 @@ func (g *Guest) AssertNoQEMUProcess(ctx context.Context, vmUID string) {
 }
 
 // AssertNoLink fails if a network link (TAP or bridge) named linkName still
-// exists. `ip link show <name>` exits 0 when present, non-zero when absent.
+// exists. Rather than relying on `ip link show` 的退出码（present=0 / absent≠0），
+// 用整体 exit 0 的存在性探针把结论写进 stdout（PRESENT/ABSENT），这样"链确实不在"
+// 的正常非零退出与"探针根本没跑成"（连接层失败、limactl 非零退出）被彻底分开：前者
+// stdout=ABSENT 通过，后者落 err/非零 exit → Fatalf，消除假阴性静默 PASS。
 func (g *Guest) AssertNoLink(ctx context.Context, linkName string) {
 	g.t.Helper()
-	_, _, code, err := g.Exec(ctx, "ip link show "+shellQuote(linkName))
-	if err != nil {
-		g.t.Fatalf("probe link %q: %v", linkName, err)
-	}
-	if code == 0 {
-		g.t.Fatalf("network link still present: %q", linkName)
-	}
+	probe := "ip link show " + shellQuote(linkName) + " >/dev/null 2>&1 && echo PRESENT || echo ABSENT"
+	g.assertGuestAbsent(ctx, probe,
+		fmt.Sprintf("link %q", linkName),
+		fmt.Sprintf("network link still present: %q", linkName))
 }
 
 // AssertNoNftablesChain fails if chain still appears in the guest nftables
 // ruleset. Reading the ruleset must succeed: a probe that cannot read the
 // ruleset is a hard failure, never silently "absent" (spec M1, e2e.sh L385).
+//
+// M1: 此处用 strings.Contains（子串匹配）而非精确 token 拆分是有意为之，且方向偏安全。
+// 链名是由 VM identity 派生的（见 guest_paths.go 的 *Chain helpers），命名空间稀疏、
+// 碰撞概率极低；子串匹配的唯一失真方向是"把某条恰好把该名作为子串的无关行也算命中"，
+// 即偏向**误报 FAIL**（门禁更严）而非**漏报 PASS**（放过残留链）。对一个 orphan 门禁
+// 探针，宁可误报也绝不漏报，所以这里容忍子串匹配，不引入 nft -j json 解析的复杂度。
 func (g *Guest) AssertNoNftablesChain(ctx context.Context, chain string) {
 	g.t.Helper()
 	stdout, stderr, code, err := g.Exec(ctx, "sudo nft list ruleset")
@@ -182,30 +245,23 @@ func (g *Guest) AssertNoNftablesChain(ctx context.Context, chain string) {
 	}
 }
 
-// AssertNoQcow2 fails if the guest qcow2 file still exists. `sudo test -e`
-// exits 0 when present.
+// AssertNoQcow2 fails if the guest qcow2 file still exists, probed with
+// `sudo test -e` via the shared existence probe (M2).
 func (g *Guest) AssertNoQcow2(ctx context.Context, qcowPath string) {
 	g.t.Helper()
-	_, _, code, err := g.Exec(ctx, "sudo test -e "+shellQuote(qcowPath))
-	if err != nil {
-		g.t.Fatalf("probe qcow2 %q: %v", qcowPath, err)
-	}
-	if code == 0 {
-		g.t.Fatalf("block volume qcow2 still present: %q", qcowPath)
-	}
+	g.assertGuestPathAbsent(ctx, qcowPath,
+		fmt.Sprintf("qcow2 %q", qcowPath),
+		fmt.Sprintf("block volume qcow2 still present: %q", qcowPath))
 }
 
-// AssertNoRuntimeDir fails if the VM's runtime dir still exists.
+// AssertNoRuntimeDir fails if the VM's runtime dir still exists, probed with
+// `sudo test -e` via the shared existence probe (M2).
 func (g *Guest) AssertNoRuntimeDir(ctx context.Context, vmUID string) {
 	g.t.Helper()
 	dir := guestRuntimeDir(vmUID)
-	_, _, code, err := g.Exec(ctx, "sudo test -e "+shellQuote(dir))
-	if err != nil {
-		g.t.Fatalf("probe runtime dir %q: %v", dir, err)
-	}
-	if code == 0 {
-		g.t.Fatalf("VM runtime dir still present: %q", dir)
-	}
+	g.assertGuestPathAbsent(ctx, dir,
+		fmt.Sprintf("runtime dir %q", dir),
+		fmt.Sprintf("VM runtime dir still present: %q", dir))
 }
 
 // shellQuote single-quotes a path for safe `sh -c` interpolation.
