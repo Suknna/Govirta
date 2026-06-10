@@ -145,13 +145,23 @@ func (g *Guest) AssertQcowNoSnapshot(ctx context.Context, qcowPath, tag string) 
 
 // assertGuestAbsent runs an existence probe and fails the test unless it reports
 // the resource is ABSENT. probe MUST be a command that always exits 0 and prints
-// exactly PRESENT or ABSENT on stdout (the `<check> && echo PRESENT || echo
-// ABSENT` shape). That explicit stdout marker — rather than a bare exit code —
-// is what separates "probe ran, resource is gone" from "probe never ran":
+// exactly one of three markers on stdout — PRESENT / ABSENT / PROBEERR — produced
+// by mapping the underlying check's exit code through an explicit `case $?` (see
+// the callers). That explicit stdout marker, rather than a bare exit code or the
+// fragile `<check> && echo PRESENT || echo ABSENT` shape, is what separates
+// "probe ran, resource is gone" from "probe never ran". The old `&&/||` shape
+// folded *any* failure of the check command (sudo auth failure with no tty, a
+// missing test/ip binary → exit 126/127) into the `|| echo ABSENT` branch, i.e.
+// silently PASSed a probe that never executed (假阴性). The三态 markers close that:
 //   - connection-layer err (limactl failed / ctx cancelled) → Fatalf
 //   - non-zero exit (the guest command always exits 0, so non-zero ⇒ limactl
 //     itself failed) → Fatalf
-//   - unrecognised stdout (probe did not run as written) → Fatalf
+//   - PRESENT → Fatalf (resource still there)
+//   - PROBEERR → Fatalf (the check command itself failed inside the guest:
+//     missing binary, sudo auth failure, pipe error — NOT a "resource absent"
+//     signal, must never be read as ABSENT — 上下一致铁律)
+//   - ABSENT → pass
+//   - any other stdout (probe did not run as written) → Fatalf
 //
 // so a dead probe can never be silently read as "absent" (the假阴性 this fixes).
 // label identifies the probe in failure messages; presentMsg is the Fatalf
@@ -170,6 +180,9 @@ func (g *Guest) assertGuestAbsent(ctx context.Context, probe, label, presentMsg 
 		return
 	case "PRESENT":
 		g.t.Fatalf("%s", presentMsg)
+	case "PROBEERR":
+		g.t.Fatalf("probe %s could not run: the probe command itself failed inside the guest "+
+			"(missing binary, sudo auth failure, or pipe error); refusing to read this as ABSENT: %s", label, stderr)
 	default:
 		g.t.Fatalf("probe %s returned unexpected output %q (probe did not run as written)", label, stdout)
 	}
@@ -178,45 +191,66 @@ func (g *Guest) assertGuestAbsent(ctx context.Context, probe, label, presentMsg 
 // assertGuestPathAbsent fails the test unless path is gone from the guest
 // filesystem, probed with `sudo test -e`. Shared by the qcow2 and runtime-dir
 // checks (M2): both are pure existence probes, so the only difference is the
-// path and the failure wording. The probe always exits 0 and emits PRESENT or
-// ABSENT, so assertGuestAbsent can hard-fail a probe that never ran.
+// path and the failure wording. The probe always exits 0 and maps `test -e`'s
+// exit code to a三态 marker via `case $?`: 0 ⇒ exists (PRESENT), 1 ⇒ does not
+// exist (ABSENT), anything else ⇒ the probe could not run (PROBEERR) — sudo auth
+// failure with no tty, or test/sudo missing (exit 126/127). Mapping the "other"
+// bucket to PROBEERR (rather than the old `||`-folded ABSENT) lets
+// assertGuestAbsent hard-fail a probe that never ran instead of silently PASSing.
 func (g *Guest) assertGuestPathAbsent(ctx context.Context, path, label, presentMsg string) {
 	g.t.Helper()
-	probe := "sudo test -e " + shellQuote(path) + " && echo PRESENT || echo ABSENT"
+	// `sudo test -e <path>; case $? in ...`: test -e exit semantics — 0=present,
+	// 1=absent, 126/127/其它=探针本身没跑成（缺二进制 / sudo 鉴权失败）。
+	probe := "sudo test -e " + shellQuote(path) +
+		"; case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
 	g.assertGuestAbsent(ctx, probe, label, presentMsg)
 }
 
 // AssertNoQEMUProcess fails if a QEMU process keyed by the VM uid's runtime path
-// is still running. pgrep self-match 规避：探针经 `limactl shell -- sh -c` 执行，
-// cmd 字符串里已展开 runtimeDir，若用 `pgrep -af`（-f 匹配全 argv）会匹配探针 sh 自身、
-// 永远 fail。改用 `pgrep -a`（不带 -f，只按进程名 comm 匹配）——探针 comm 是 sh、不匹配
-// qemu-system，结构性排除自匹配；QEMU argv 仍嵌 runtimeDir 供 grep -F 过滤（spec M3）。
-// `|| true` 让 guest 命令整体 exit 0，于是 absent=stdout 空；任何连接层 err 或非零
-// exit（guest 命令恒 0，非零必是 limactl 失败）都判探针失败 → Fatalf，绝不静默 absent。
+// is still running. 早先版本用「空 stdout = absent」判定，但 pgrep/grep 缺失（127）
+// 或管道左侧失败经 `|| true` 归 0 后 stdout 同样为空 → 把「探针没跑成」误判为「无残留」
+// 静默 PASS。改成显式三态，把存在性结论写进 stdout：
+//
+// pgrep self-match 规避：探针经 `limactl shell -- sh -c` 执行，cmd 字符串里已展开
+// runtimeDir，若用 `pgrep -af`（-f 匹配全 argv）会匹配探针 sh 自身、永远 fail。改用
+// `pgrep -a`（不带 -f，只按进程名 comm 匹配）——探针 comm 是 sh、不匹配 qemu-system，
+// 结构性排除自匹配；QEMU argv 仍嵌 runtimeDir 供 grep -F 过滤（spec M3）。
+//
+// 退出码依据（POSIX sh / dash，无 pipefail）：管道整体退出码取最右侧 grep 的：
+//   - grep 0 ⇒ 匹配到 ⇒ PRESENT；
+//   - grep 1 ⇒ 无匹配（含 pgrep 无 qemu 进程时输出空、grep 读空 stdin 退 1）⇒ ABSENT；
+//   - grep ≥2 ⇒ grep 自身出错 ⇒ PROBEERR。
+//
+// 二进制缺失（127）会被「grep 读空 stdin 退 1」吞成 ABSENT，故先用 `command -v` 显式
+// 守卫 pgrep/grep 存在，缺失即 echo PROBEERR；这样「探针没跑成」结构性归 PROBEERR。
+// 整条命令恒 exit 0，经 assertGuestAbsent 裁决：PRESENT/PROBEERR/未知→Fatalf、
+// ABSENT→pass，绝不静默 absent。
 func (g *Guest) AssertNoQEMUProcess(ctx context.Context, vmUID string) {
 	g.t.Helper()
 	runtimeDir := guestRuntimeDir(vmUID)
-	cmd := "pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " || true"
-	stdout, stderr, code, err := g.Exec(ctx, cmd)
-	if err != nil {
-		g.t.Fatalf("probe QEMU process for %q: %v", vmUID, err)
-	}
-	if code != 0 {
-		g.t.Fatalf("probe QEMU process for %q failed (exit %d): %s", vmUID, code, stderr)
-	}
-	if strings.TrimSpace(stdout) != "" {
-		g.t.Fatalf("QEMU process still running for VM uid %q:\n%s", vmUID, stdout)
-	}
+	probe := "command -v pgrep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"command -v grep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " >/dev/null 2>&1; " +
+		"case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
+	g.assertGuestAbsent(ctx, probe,
+		fmt.Sprintf("QEMU process for VM uid %q", vmUID),
+		fmt.Sprintf("QEMU process still running for VM uid %q (runtime %q)", vmUID, runtimeDir))
 }
 
 // AssertNoLink fails if a network link (TAP or bridge) named linkName still
-// exists. Rather than relying on `ip link show` 的退出码（present=0 / absent≠0），
-// 用整体 exit 0 的存在性探针把结论写进 stdout（PRESENT/ABSENT），这样"链确实不在"
-// 的正常非零退出与"探针根本没跑成"（连接层失败、limactl 非零退出）被彻底分开：前者
-// stdout=ABSENT 通过，后者落 err/非零 exit → Fatalf，消除假阴性静默 PASS。
+// exists. Rather than relying on `ip link show` 的退出码直接当布尔，用整体 exit 0
+// 的三态探针把结论写进 stdout（PRESENT/ABSENT/PROBEERR），这样"链确实不在"的正常
+// 退出与"探针根本没跑成"被彻底分开：
+//   - ip link show <name>：0=链存在，1=链不存在（iproute2 在接口不存在时
+//     "Device does not exist" 退出 1），其它退出码（127=ip 缺失等）=探针错误。
+//   - 0 ⇒ PRESENT，1 ⇒ ABSENT，* ⇒ PROBEERR。
+//
+// PRESENT→Fatalf、ABSENT→pass、PROBEERR/未知→Fatalf，消除假阴性静默 PASS。
+// 注：exit 码语义依据 Linux iproute2 行为；macOS 无 ip，真实验证留 Task 6 e2e。
 func (g *Guest) AssertNoLink(ctx context.Context, linkName string) {
 	g.t.Helper()
-	probe := "ip link show " + shellQuote(linkName) + " >/dev/null 2>&1 && echo PRESENT || echo ABSENT"
+	probe := "ip link show " + shellQuote(linkName) +
+		" >/dev/null 2>&1; case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
 	g.assertGuestAbsent(ctx, probe,
 		fmt.Sprintf("link %q", linkName),
 		fmt.Sprintf("network link still present: %q", linkName))
