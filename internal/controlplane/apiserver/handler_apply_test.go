@@ -562,11 +562,12 @@ func TestApplyVMScheduleInjectsNodeTeardownFinalizer(t *testing.T) {
 	}
 }
 
-func TestApplyVMCreateRejectsShutdownPowerState(t *testing.T) {
+func TestApplyVMCreateRejectsOffMissingPowerOffMode(t *testing.T) {
 	srv, st := newTestServer(t)
 
 	obj := validVM()
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = ""
 
 	rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
 	if rec.Code != http.StatusBadRequest {
@@ -581,13 +582,21 @@ func TestApplyVMCreateRejectsShutdownPowerState(t *testing.T) {
 }
 
 func TestApplyVMCreateAcceptsOnAndOffPowerStates(t *testing.T) {
-	for _, powerState := range []vmv1.PowerState{vmv1.PowerStateOn, vmv1.PowerStateOff} {
-		t.Run(string(powerState), func(t *testing.T) {
+	cases := []struct {
+		powerState   vmv1.PowerState
+		powerOffMode vmv1.PowerOffMode
+	}{
+		{vmv1.PowerStateOn, ""},
+		{vmv1.PowerStateOff, vmv1.PowerOffModeAcpi},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.powerState), func(t *testing.T) {
 			srv, st := newTestServer(t)
 			obj := validVM()
-			obj.Name = "vm-" + string(powerState)
-			obj.UID = "uid-" + string(powerState)
-			obj.Spec.PowerState = powerState
+			obj.Name = "vm-" + string(tc.powerState)
+			obj.UID = "uid-" + string(tc.powerState)
+			obj.Spec.PowerState = tc.powerState
+			obj.Spec.PowerOffMode = tc.powerOffMode
 
 			rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
 			if rec.Code != http.StatusCreated {
@@ -595,32 +604,38 @@ func TestApplyVMCreateAcceptsOnAndOffPowerStates(t *testing.T) {
 			}
 
 			stored := storedVM(t, st, obj.Name)
-			if stored.Spec.PowerState != powerState {
-				t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, powerState)
+			if stored.Spec.PowerState != tc.powerState {
+				t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, tc.powerState)
+			}
+			if stored.Spec.PowerOffMode != tc.powerOffMode {
+				t.Fatalf("stored powerOffMode = %q, want %q", stored.Spec.PowerOffMode, tc.powerOffMode)
 			}
 		})
 	}
 }
 
-func TestApplyVMUpdateAllowsShutdownPowerState(t *testing.T) {
+func TestApplyVMUpdateAllowsOffPowerState(t *testing.T) {
 	srv, st := newTestServer(t)
 
 	obj := validVM()
-	obj.Spec.PowerState = vmv1.PowerStateOff
 	if rec := doApply(t, srv, metav1.KindVM, obj.Name, obj); rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
 	update := validVM()
-	update.Spec.PowerState = vmv1.PowerStateShutdown
+	update.Spec.PowerState = vmv1.PowerStateOff
+	update.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
 	stored := storedVM(t, st, obj.Name)
-	if stored.Spec.PowerState != vmv1.PowerStateShutdown {
-		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateShutdown)
+	if stored.Spec.PowerState != vmv1.PowerStateOff {
+		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateOff)
+	}
+	if stored.Spec.PowerOffMode != vmv1.PowerOffModeAcpi {
+		t.Fatalf("stored powerOffMode = %q, want %q", stored.Spec.PowerOffMode, vmv1.PowerOffModeAcpi)
 	}
 }
 
@@ -703,7 +718,8 @@ func TestApplyVMUpdatePreservesExistingNodeNameWhenOmitted(t *testing.T) {
 
 	update := validVM()
 	update.NodeName = ""
-	update.Spec.PowerState = vmv1.PowerStateShutdown
+	update.Spec.PowerState = vmv1.PowerStateOff
+	update.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
@@ -713,8 +729,8 @@ func TestApplyVMUpdatePreservesExistingNodeNameWhenOmitted(t *testing.T) {
 	if stored.NodeName != created.NodeName {
 		t.Fatalf("stored nodeName = %q, want preserved %q", stored.NodeName, created.NodeName)
 	}
-	if stored.Spec.PowerState != vmv1.PowerStateShutdown {
-		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateShutdown)
+	if stored.Spec.PowerState != vmv1.PowerStateOff {
+		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateOff)
 	}
 
 	var resp vmv1.VM
@@ -737,7 +753,8 @@ func TestApplyVMUpdateAllowsExplicitSameNodeName(t *testing.T) {
 
 	update := validVM()
 	update.NodeName = created.NodeName
-	update.Spec.PowerState = vmv1.PowerStateShutdown
+	update.Spec.PowerState = vmv1.PowerStateOff
+	update.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
@@ -760,7 +777,8 @@ func TestApplyVMUpdateRejectsDifferentNodeNameWithConflict(t *testing.T) {
 
 	update := validVM()
 	update.NodeName = "node-2"
-	update.Spec.PowerState = vmv1.PowerStateShutdown
+	update.Spec.PowerState = vmv1.PowerStateOff
+	update.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("update status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -837,7 +855,8 @@ func TestApplyVMUpdatePreservesServerOwnedMetadata(t *testing.T) {
 	}
 
 	update := validVM()
-	update.Spec.PowerState = vmv1.PowerStateShutdown
+	update.Spec.PowerState = vmv1.PowerStateOff
+	update.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	update.Finalizers = nil
 	update.DeletionTimestamp = ""
 	update.ResourceVersion = ""
@@ -861,8 +880,8 @@ func TestApplyVMUpdatePreservesServerOwnedMetadata(t *testing.T) {
 			t.Fatalf("stored finalizers = %v, want preserved %v", stored.Finalizers, created.Finalizers)
 		}
 	}
-	if stored.Spec.PowerState != vmv1.PowerStateShutdown {
-		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateShutdown)
+	if stored.Spec.PowerState != vmv1.PowerStateOff {
+		t.Fatalf("stored powerState = %q, want %q", stored.Spec.PowerState, vmv1.PowerStateOff)
 	}
 }
 
@@ -874,7 +893,8 @@ func TestApplyVMUpdateCorruptExistingReturnsInternalError(t *testing.T) {
 		t.Fatalf("seed corrupt VM: %v", err)
 	}
 
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	rec := doApply(t, srv, metav1.KindVM, obj.Name, obj)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("update status = %d, want 500; body=%s", rec.Code, rec.Body.String())

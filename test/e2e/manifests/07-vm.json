@@ -8,6 +8,7 @@
     "memoryMiB": 256,
     "volumeRefs": ["vol-e2e-root"],
     "nicRefs": ["nic-e2e"],
-    "powerState": "Off"
+    "powerState": "Off",
+    "powerOffMode": "Acpi"
   }
 }

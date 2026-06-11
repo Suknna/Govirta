@@ -24,7 +24,7 @@ import (
 // delete its persisted state. Deletion is a destroy intent (ESXi-aligned), so teardown
 // uses forced termination (QMP quit + SIGKILL fallback), not graceful ACPI
 // powerdown — a minimal guest (e.g. CirrOS) ignores ACPI and would otherwise
-// never converge. Graceful guest shutdown is a separate powerState=Shutdown concern.
+// never converge. Graceful guest shutdown is a separate powerState=Off + powerOffMode=Acpi concern.
 // *vmm.VMMService satisfies it (积木式 + 可测).
 type VMRunner interface {
 	Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error)
