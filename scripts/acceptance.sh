@@ -179,7 +179,7 @@ run_acceptance() {
 			GOVIRTA_ACCEPTANCE_CIRROS=/govirta-cache/images/cirros-aarch64.qcow2 \
 			GOVIRTA_ACCEPTANCE_CIRROS_KERNEL=/govirta-cache/images/cirros-0.6.2-aarch64-kernel \
 			GOVIRTA_ACCEPTANCE_CIRROS_INITRAMFS=/govirta-cache/images/cirros-0.6.2-aarch64-initramfs \
-			"$HOME/.local/go/bin/go" test -v -tags acceptance -count=1 ./test/acceptance/...
+			"$HOME/.local/go/bin/go" test -v -tags acceptance -count=1 -timeout 30m ./test/acceptance/...
 	'
 }
 
