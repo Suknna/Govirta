@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -385,6 +386,82 @@ func (g *Guest) AssertRunningQEMUArgvHasMAC(ctx context.Context, vmUID, want str
 		g.t.Fatalf("running QEMU for VM uid %q does not carry %q in argv (control-plane MAC not threaded into qemu argv); exit=%d", vmUID, macToken, code)
 	default:
 		g.t.Fatalf("probe for VM uid %q QEMU argv MAC was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", vmUID, got, code, stderr)
+	}
+}
+
+// AssertRunningQEMUArgvHasMemory 断言 Lima VM 内正在运行的 QEMU 进程（本 VM 的，按
+// runtime dir 定位）命令行携带内存 token `size=<wantMiB>`。这是「冷态改 memoryMiB →
+// Redefine 重派生 argv → 重启后 QEMU 真按新内存启动」的 live 铁证：直接验实际在跑的
+// 进程命令行，证明新内存值真正进了 QEMU 启动参数（比读 vm.json 更强）。
+//
+// token 形态以 pkg/virt/qemu/vm.go 的真实渲染为准：内存渲染为 `-m size=<MiB>`（两个
+// argv 元素 `-m` 与 `size=512`，见 vm_test.go），故 pgrep -a 的整行 argv 里出现
+// 子串 `size=<MiB>`。grep -F 该子串即可；容量字节数不进 argv，不与之碰撞。
+//
+// 复用 AssertRunningQEMUArgvHasMAC 同款三态探针（PRESENT/ABSENT/PROBEERR），整体
+// exit 0，结论写进 stdout，杜绝「探针没跑成」被误读为 ABSENT 的假阴性静默 PASS。
+func (g *Guest) AssertRunningQEMUArgvHasMemory(ctx context.Context, vmUID string, wantMiB int) {
+	g.t.Helper()
+	runtimeDir := guestRuntimeDir(vmUID)
+	memToken := "size=" + strconv.Itoa(wantMiB)
+	probe := "command -v pgrep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"command -v grep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"line=$(pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " 2>/dev/null); " +
+		"if [ -z \"$line\" ]; then echo PROBEERR; exit 0; fi; " +
+		"printf '%s' \"$line\" | grep -F " + shellQuote(memToken) + " >/dev/null 2>&1; " +
+		"case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("probe running QEMU argv for VM uid %q memory: %v\nstderr: %s", vmUID, err, stderr)
+	}
+	got := strings.TrimSpace(stdout)
+	switch got {
+	case "PRESENT":
+		return
+	case "ABSENT":
+		g.t.Fatalf("running QEMU for VM uid %q does not carry %q in argv (cold memory change not threaded into qemu argv); exit=%d", vmUID, memToken, code)
+	default:
+		g.t.Fatalf("probe for VM uid %q QEMU argv memory was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", vmUID, got, code, stderr)
+	}
+}
+
+// AssertRunningQEMUArgvDiskCount 断言 Lima VM 内正在运行的 QEMU 进程（本 VM 的，按
+// runtime dir 定位）命令行恰含 want 个 virtio-blk 磁盘设备。这是「冷态改 volumeRefs
+// 加第二块盘 → Redefine 重派生 argv → 重启后 QEMU 真挂两块盘」的 live 铁证。
+//
+// 计数 token 以 pkg/virt/qemu/device 的真实渲染为准：每块盘渲染为一个
+// `-device virtio-blk-pci,drive=disk<i>,id=blk<i>`（见 vm_test.go），故 argv 里
+// `virtio-blk-pci` 的出现次数 == 盘数。NIC 用 `virtio-net-pci`，不与之碰撞。
+//
+// 探针整体 exit 0，把结论写进 stdout：定位不到 QEMU 进程 → PROBEERR（绝不当 0 块盘
+// 静默 PASS）；定位到则 echo `COUNT=<n>`，Go 侧解析后与 want 精确比对。
+func (g *Guest) AssertRunningQEMUArgvDiskCount(ctx context.Context, vmUID string, want int) {
+	g.t.Helper()
+	runtimeDir := guestRuntimeDir(vmUID)
+	probe := "command -v pgrep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"command -v grep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"line=$(pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " 2>/dev/null); " +
+		"if [ -z \"$line\" ]; then echo PROBEERR; exit 0; fi; " +
+		"count=$(printf '%s' \"$line\" | grep -oF 'virtio-blk-pci' | wc -l | tr -d ' '); " +
+		"echo \"COUNT=$count\""
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("probe running QEMU argv for VM uid %q disk count: %v\nstderr: %s", vmUID, err, stderr)
+	}
+	got := strings.TrimSpace(stdout)
+	if got == "PROBEERR" {
+		g.t.Fatalf("probe for VM uid %q QEMU argv disk count could not run (could not locate the running QEMU process by runtime dir %q); exit=%d stderr=%s", vmUID, runtimeDir, code, stderr)
+	}
+	const prefix = "COUNT="
+	if !strings.HasPrefix(got, prefix) {
+		g.t.Fatalf("probe for VM uid %q QEMU argv disk count was inconclusive (got %q, want COUNT=<n>); exit=%d stderr=%s", vmUID, got, code, stderr)
+	}
+	n, perr := strconv.Atoi(strings.TrimPrefix(got, prefix))
+	if perr != nil {
+		g.t.Fatalf("probe for VM uid %q QEMU argv disk count returned unparsable count %q: %v", vmUID, got, perr)
+	}
+	if n != want {
+		g.t.Fatalf("running QEMU for VM uid %q has %d virtio-blk disk(s) in argv, want %d (cold volumeRefs change not threaded into qemu argv)", vmUID, n, want)
 	}
 }
 

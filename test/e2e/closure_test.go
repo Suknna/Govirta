@@ -59,6 +59,24 @@ const (
 	volShrinkCapacityBytes int64 = 536870912  // 512 MiB < 基准，负向缩容用例
 )
 
+// 刀 6 冷配置改契约。vmBaseMemoryMiB 必须等于 07-vm.json 的 spec.memoryMiB（256），
+// 是 live `-m size=<MiB>` argv 断言的初始权威；场景 1 把内存翻倍到 vmGrownMemoryMiB
+// （= 2×），场景 3 在它之上再翻倍到 vmRejectMemoryMiB（被 On 态门禁拒绝，不会落地）。
+// 三者由 assertVMBaseMemoryContract 在执行前结构性钉死，防 manifest 与常量漂移。
+const (
+	vmBaseMemoryMiB   = 256  // 与 07-vm.json spec.memoryMiB 一致
+	vmGrownMemoryMiB  = 512  // 256×2，场景 1 冷态翻倍目标
+	vmRejectMemoryMiB = 1024 // 512×2，场景 3 On 态改内存（期望被拒，不落地）
+)
+
+// 场景 2 加的第二块 data 盘。name/uid 与现有 vol-e2e-root 不同以避免冲突；
+// diskIndexData 必须与 09-volume-data.json 的 spec.diskIndex 一致（qcow2 文件后缀）。
+const (
+	volDataName         = "vol-e2e-data" // 09-volume-data.json metadata.name
+	volDataManifestName = "09-volume-data.json"
+	diskIndexData       = 1 // 09-volume-data.json spec.diskIndex（≠ root 盘的 0）
+)
+
 // applyOrder is the dependency order the controllers gate on: pools first, then
 // image (needs file pool), volume (needs block pool + image), network, and NIC
 // (needs network). The VM is applied separately so the test can drive explicit
@@ -164,6 +182,12 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// stopped/defined)。放在 snapshotColdCycle 之后是有意为之——彼时内部快照已被
 	// deleteAndVerify 删净，qcow2 不带内部快照，扩容路径不与快照交互。
 	coldResizeVolume(ctx, t, ctl, server, manifests, tmpDir, g)
+
+	// Cold-config-change segment（刀 6）：在 snapshotColdCycle + coldResizeVolume
+	// 之后——彼时 VM 仍 Off/cold。三场景会把 VM On 起来验证 Redefine 重派生的 argv，
+	// 故必须排在依赖「VM 持续冷态」的前两段之后；场景结束把第二块盘的引用与资源都清掉，
+	// 让随后的 teardownSpine（只删固定 vol-e2e-root）不留 orphan。
+	coldConfigChange(ctx, t, ctl, server, manifests, tmpDir, g)
 
 	expectPowerAdmissionRejections(ctx, t, ctl, server, manifests, tmpDir)
 
@@ -300,6 +324,204 @@ func coldResizeVolume(ctx context.Context, t *testing.T, ctl, server, manifests,
 		t.Fatalf("shrink rejection must carry the admission 只增不减 reason (%q), got:\n%s", "capacityBytes cannot decrease", out)
 	}
 	t.Logf("shrink Volume capacityBytes=%d correctly rejected (409): %s", volShrinkCapacityBytes, strings.TrimSpace(out))
+}
+
+// coldConfigChange 验证刀 6 冷配置改端到端（三场景），前提是进入时 VM 处于 Off/cold
+// （前序 coldResizeVolume 收敛到 Off）。每个场景把 VM On 起来后用 guest-side argv 实况
+// 断言新配置真正贯穿到 QEMU 启动参数（不只信 master 投影 — 上下一致铁律）：
+//
+//	场景 1 改标量：冷态把 memoryMiB 翻倍 → On → argv 含 `-m size=<新值>`。
+//	场景 2 增硬件：新建第二块 data Volume，冷态 volumeRefs 追加它 → On → argv 含两块
+//	         virtio-blk 盘；随后用「删硬件 = 先从 refs 移除再删独立资源」逆操作收尾，
+//	         让 teardownSpine（只删固定 vol-e2e-root）不留 orphan（选项 A）。
+//	场景 3 admission 拒绝：On 态改 memoryMiB → 被门禁 1 拒（错误信息含 powerState=Off）。
+func coldConfigChange(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir string, g *Guest) {
+	t.Helper()
+	base := filepath.Join(manifests, vmManifestName)
+
+	// 漂移守卫：场景常量必须与基线 manifest 对齐，否则 live argv 断言会去追错误的
+	// 内存目标且失败信息误导（与 assertVolumeCapacityContract 同款，执行前结构性挡掉）。
+	assertVMBaseMemoryContract(t, base)
+
+	rootOnly := []string{volName}
+	rootAndData := []string{volName, volDataName}
+
+	// --- 场景 1：改标量（内存翻倍）---
+	// VM 此刻 Off。冷态 apply memoryMiB 翻倍（volumeRefs 维持单盘），等仍收敛到 Off。
+	p := writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootOnly, powerState: "Off", powerOffMode: "Acpi",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario1 cold memory grow Off")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	// On 起来：内存不变（512==512，非 cold 变更，纯电源变更，门禁放行），等 Running。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootOnly, powerState: "On",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario1 power On")
+	waitVMOnRunning(ctx, t, ctl, server)
+
+	// live 铁证：正在运行的 QEMU argv 携带新内存 token `-m size=512`（Redefine 重派生）。
+	g.AssertRunningQEMUArgvHasMemory(ctx, vmUID, vmGrownMemoryMiB)
+
+	// --- 场景 2：增硬件（加第二块盘）---
+	// 先建第二块 data Volume，等 Ready（它 vmRef 指向本 VM uid；VM 尚未引用它，
+	// 刀 1 反向引用守卫放行其创建）。
+	applyAndVerify(ctx, t, ctl, server, manifests, resourceLifecycle{
+		manifest: volDataManifestName, kind: "Volume", name: volDataName,
+		waitPhase: "ready", waitFor: 2 * time.Minute,
+	})
+
+	// VM 当前 On → 先回冷态（仅电源变更）再加盘（cold 变更须 Off）。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootOnly, powerState: "Off", powerOffMode: "Acpi",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario2 power Off before add disk")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	// 冷态 volumeRefs 追加第二块盘，等收敛（仍 Off）。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootAndData, powerState: "Off", powerOffMode: "Acpi",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario2 cold add second disk Off")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	// On 起来（纯电源变更），等 Running。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootAndData, powerState: "On",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario2 power On with two disks")
+	waitVMOnRunning(ctx, t, ctl, server)
+
+	// live 铁证：QEMU argv 恰含两块 virtio-blk 盘（Redefine 重派生加盘）。
+	g.AssertRunningQEMUArgvDiskCount(ctx, vmUID, 2)
+
+	// 选项 A 收尾「删硬件 = 先从 refs 移除再删独立资源」：冷态把 volumeRefs 移除第二块盘，
+	// 等收敛，再删第二块 Volume 到 404（VM 已不引用 → 刀 1 反向引用守卫放行删除），并断言
+	// 其 guest qcow2 真消失。这让随后只删 vol-e2e-root 的 teardownSpine 不留 orphan。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootOnly, powerState: "Off", powerOffMode: "Acpi",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario2 cold remove second disk Off")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	dataQcow := guestQcowPath(guestBlockStorageRoot, poolBlock, vmUID, vmName, diskIndexData)
+	deleteAndVerify(ctx, t, ctl, server, resourceLifecycle{
+		kind: "Volume", name: volDataName, waitFor: 2 * time.Minute,
+		afterGone: func(ctx context.Context) {
+			g.AssertNoQcow2(ctx, dataQcow)
+		},
+	})
+
+	// --- 场景 3：admission 拒绝 ---
+	// VM 当前 Off（场景 2 收尾把它停下并移除了第二块盘）。On 态改 memoryMiB 必须被门禁 1
+	// 拒绝：cold-mutable 变更要求 powerState=Off。govirtctl 把非 2xx 映射成非零退出，
+	// 错误文本带 admission 的 powerState=Off 语义。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmRejectMemoryMiB, volumeRefs: rootOnly, powerState: "On",
+	})
+	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", p)
+	if err == nil {
+		t.Fatalf("apply cold memory change (memoryMiB=%d) with powerState=On must be rejected (门禁 1), but it was accepted:\n%s", vmRejectMemoryMiB, out)
+	}
+	if !strings.Contains(out, "powerState=Off") {
+		t.Fatalf("cold config change rejection must carry the admission powerState=Off requirement (%q), got:\n%s", "powerState=Off", out)
+	}
+	t.Logf("cold memory change (memoryMiB=%d) with powerState=On correctly rejected (4xx): %s", vmRejectMemoryMiB, strings.TrimSpace(out))
+}
+
+// applyVMManifest applies a pre-rendered VM manifest file, failing on rejection.
+// 与 applyVMVariant 同款，但接受已渲染的路径（冷配置改用 writeVMManifestColdVariant
+// 渲染富变体，故不复用按 powerState/powerOffMode 渲染的 applyVMVariant）。
+func applyVMManifest(ctx context.Context, t *testing.T, ctl, server, path, label string) {
+	t.Helper()
+	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
+	if err != nil {
+		t.Fatalf("apply VM (%s) failed: %v\noutput:\n%s", label, err, out)
+	}
+	t.Logf("applied VM (%s): %s", label, strings.TrimSpace(out))
+}
+
+// assertVMBaseMemoryContract 读基线 VM manifest，钉死冷配置改场景的内存不变式：
+// 基线 spec.memoryMiB == vmBaseMemoryMiB，且场景目标按 2× 链对齐
+// （grown == base×2，reject == grown×2）。manifest 是基线内存的唯一权威，常量是
+// live argv 断言追的目标；二者漂移会让断言去追错误值并给出误导性失败信息。
+func assertVMBaseMemoryContract(t *testing.T, basePath string) {
+	t.Helper()
+	body, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read VM manifest %q: %v", basePath, err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatalf("decode VM manifest %q: %v", basePath, err)
+	}
+	spec := objectMap(t, manifest, "spec")
+	// JSON number 解码进 map[string]any 是 float64；内存 MiB 远在 2^53 内，精确。
+	raw, ok := spec["memoryMiB"].(float64)
+	if !ok {
+		t.Fatalf("VM manifest %q spec.memoryMiB must be a JSON number, got %T", basePath, spec["memoryMiB"])
+	}
+	base := int(raw)
+	if base != vmBaseMemoryMiB {
+		t.Fatalf("VM manifest %q spec.memoryMiB=%d drifted from test constant vmBaseMemoryMiB=%d", basePath, base, vmBaseMemoryMiB)
+	}
+	if vmGrownMemoryMiB != base*2 {
+		t.Fatalf("cold-config grow target vmGrownMemoryMiB=%d must be 2× the base %d", vmGrownMemoryMiB, base)
+	}
+	if vmRejectMemoryMiB != vmGrownMemoryMiB*2 {
+		t.Fatalf("cold-config reject target vmRejectMemoryMiB=%d must be 2× the grown %d", vmRejectMemoryMiB, vmGrownMemoryMiB)
+	}
+}
+
+// vmColdVariant 是 writeVMManifestColdVariant 的覆写集：冷配置改场景需要在基线 VM
+// manifest 之上同时设置 memoryMiB / volumeRefs / 电源二维，故用结构体承载所有可变字段
+// （现有 writeVMManifestVariant 只改 powerState/powerOffMode，覆盖不到 cold-mutable
+// 字段）。name/uid 固定用 vmName/vmUID（同一 VM 的连续 update，不另起对象）。
+type vmColdVariant struct {
+	memoryMiB    int
+	volumeRefs   []string
+	powerState   string
+	powerOffMode string
+}
+
+// writeVMManifestColdVariant 读基线 VM manifest，覆写 memoryMiB / volumeRefs /
+// powerState / powerOffMode，渲染到 tmpDir。复用 writeVMManifestVariant 的
+// 「读基线→改字段→写临时文件」模式，不重抄 manifest（基线是 07-vm.json 的唯一权威）。
+// powerOffMode 空串删除该字段（powerState=On 的二维模型要求），非空则设置（Off 必填）。
+func writeVMManifestColdVariant(t *testing.T, basePath, tmpDir string, v vmColdVariant) string {
+	t.Helper()
+	body, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read VM manifest %q: %v", basePath, err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatalf("decode VM manifest %q: %v", basePath, err)
+	}
+	metadata := objectMap(t, manifest, "metadata")
+	metadata["name"] = vmName
+	metadata["uid"] = vmUID
+	spec := objectMap(t, manifest, "spec")
+	spec["memoryMiB"] = v.memoryMiB
+	// volumeRefs 写为 []string；MarshalIndent 按 Go 类型重新编码为 JSON 字符串数组。
+	spec["volumeRefs"] = v.volumeRefs
+	spec["powerState"] = v.powerState
+	if v.powerOffMode == "" {
+		delete(spec, "powerOffMode")
+	} else {
+		spec["powerOffMode"] = v.powerOffMode
+	}
+
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode VM manifest cold variant mem=%d disks=%d %s: %v", v.memoryMiB, len(v.volumeRefs), v.powerState, err)
+	}
+	path := filepath.Join(tmpDir, fmt.Sprintf("%s-cold-mem%d-disks%d-%s.json", vmName, v.memoryMiB, len(v.volumeRefs), v.powerState))
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write VM manifest cold variant %q: %v", path, err)
+	}
+	return path
 }
 
 // waitQcowVirtualSize 轮询 guest qcow2 的 live virtual-size 直到等于 want 或超时。
