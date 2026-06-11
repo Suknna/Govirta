@@ -136,9 +136,6 @@ func (v VMPowerStateValidator) Validate(ctx context.Context, req Request) error 
 	if !ok {
 		return nil
 	}
-	if req.Operation == OperationCreate && vm.Spec.PowerState == vmv1.PowerStateShutdown {
-		return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("%w: powerState Shutdown is only valid for VM updates", vmv1.ErrInvalidSpec))
-	}
 	if req.Operation != OperationUpdate || vm.NodeName == "" {
 		return nil
 	}

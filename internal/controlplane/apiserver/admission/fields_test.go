@@ -43,7 +43,8 @@ func TestFieldPolicyAllowsVMColdMutableChanges(t *testing.T) {
 	obj.Spec.VCPUs = 4
 	obj.Spec.VolumeRefs = []string{"vol-a", "vol-b"}
 	obj.Spec.NICRefs = []string{"nic-a", "nic-b"}
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 
 	err := validateFieldPolicyUpdate(metav1.KindVM, old.Name, old, obj)
 	if err != nil {

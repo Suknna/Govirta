@@ -54,35 +54,46 @@ func TestSpecValidatorChecksNetworkRangeConsistency(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonBadRequest)
 }
 
-func TestVMPowerStateValidatorRejectsCreateShutdown(t *testing.T) {
+// TestPreApplyChainRejectsCreateOffMissingPowerOffMode proves the On↔powerOffMode
+// conditional-required rule reaches callers through the real apply entry chain
+// (SpecValidator's VMSpec.Validate), not via VMPowerStateValidator, which no
+// longer does powerState value checks.
+func TestPreApplyChainRejectsCreateOffMissingPowerOffMode(t *testing.T) {
+	st := newReferenceTestStore(t)
 	obj := validAdmissionVM()
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = ""
 
-	err := VMPowerStateValidator{}.Validate(context.Background(), Request{
+	err := PreApplyChain(st).Validate(context.Background(), Request{
 		Operation: OperationCreate,
 		Kind:      metav1.KindVM,
 		Name:      obj.Name,
 		NewObject: obj,
 	})
 	assertAdmissionReason(t, err, ReasonBadRequest)
+	if !errors.Is(err, vmv1.ErrInvalidSpec) {
+		t.Fatalf("Validate() error = %v, want vm invalid spec cause", err)
+	}
 }
 
-func TestVMPowerStateValidatorAllowsUpdateShutdown(t *testing.T) {
-	old := validAdmissionVM()
-	old.NodeName = "node-1"
-	obj := old
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+// TestPreApplyChainRejectsCreateOnWithPowerOffMode proves the inverse half of the
+// conditional-required rule (powerOffMode must be empty when powerState is On)
+// is also enforced through the full apply chain.
+func TestPreApplyChainRejectsCreateOnWithPowerOffMode(t *testing.T) {
+	st := newReferenceTestStore(t)
+	obj := validAdmissionVM()
+	obj.Spec.PowerState = vmv1.PowerStateOn
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 
-	err := VMPowerStateValidator{}.Validate(context.Background(), Request{
-		Operation: OperationUpdate,
+	err := PreApplyChain(st).Validate(context.Background(), Request{
+		Operation: OperationCreate,
 		Kind:      metav1.KindVM,
 		Name:      obj.Name,
-		OldRaw:    []byte(`{}`),
-		OldObject: old,
 		NewObject: obj,
 	})
-	if err != nil {
-		t.Fatalf("Validate() error = %v, want nil", err)
+	assertAdmissionReason(t, err, ReasonBadRequest)
+	if !errors.Is(err, vmv1.ErrInvalidSpec) {
+		t.Fatalf("Validate() error = %v, want vm invalid spec cause", err)
 	}
 }
 
