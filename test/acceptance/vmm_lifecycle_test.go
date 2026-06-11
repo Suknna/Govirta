@@ -96,8 +96,10 @@ func TestVMMLifecycleEndToEnd(t *testing.T) {
 	if running.Phase != vmm.PhaseRunning {
 		t.Fatalf("after Start phase = %q, want Running", running.Phase)
 	}
-	// 等 guest 真正引导到 login（graceful powerdown 需要 guest ACPI 已就绪）。
-	waitForConsoleMarker(t, ctx, created.Paths.ConsoleLog, "login:")
+	// 等 guest acpid 就绪即可验证 QMP system_powerdown；这比等待 login 更精确。
+	// 无网卡的 CirrOS 会等待 metadata datasource 多轮重试，login marker 会被
+	// 169.254.169.254 超时拖慢，但 acpid 已经可以接收 ACPI power button。
+	waitForConsoleMarker(t, ctx, created.Paths.ConsoleLog, "Starting acpid: OK")
 
 	// Discover 应发现这台 Running VM。
 	vms, err := svc.Discover(ctx)
@@ -132,10 +134,9 @@ func TestVMMLifecycleEndToEnd(t *testing.T) {
 
 	// 优雅 Stop 是 best-effort（与 libvirt/Proxmox/kubevirt 一致）：QMP
 	// system_powerdown 只注入 ACPI 电源键事件并立即返回，是否真正关机取决于
-	// guest 是否响应。direct-kernel cirros aarch64 无 UEFI → 无 ACPI，guest 收不到
-	// 该事件，VM 会停在 Stopping。断言「请求被接受 + intent 落 Stopped + phase
-	// ∈ {Stopping, Stopped}」即可——不能要求 guest 真正退出（那需要 ACPI 协作，
-	// 或由上层在 grace-period 后升级到 Kill）。
+	// guest 是否响应。production disk boot + UEFI exposes ACPI, so CirrOS may
+	// converge to Stopped; still only assert request accepted + intent persisted
+	// + observed phase is in the graceful shutdown window.
 	if err := svc2.Stop(ctx, uuid); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
