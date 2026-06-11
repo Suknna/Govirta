@@ -250,8 +250,13 @@ start_lima_govirtlet() {
 		runtime_root="'"$guest_runtime_root"'"
 		guest_cirros="'"$guest_cirros"'"
 
+		i=0
+		while [ "$i" -lt 180 ] && [ ! -x "$HOME/.local/go/bin/go" ]; do
+			i=$((i + 1))
+			sleep 1
+		done
 		if [ ! -x "$HOME/.local/go/bin/go" ]; then
-			printf "missing guest go toolchain\n" >&2
+			printf "missing guest go toolchain after wait\n" >&2
 			exit 1
 		fi
 		for tool in ip nft; do

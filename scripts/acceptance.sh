@@ -156,8 +156,13 @@ run_acceptance() {
 			echo "nft command is required for hostnet firewall acceptance" >&2
 			exit 1
 		fi
+		i=0
+		while [ "$i" -lt 180 ] && [ ! -x "$HOME/.local/go/bin/go" ]; do
+			i=$((i + 1))
+			sleep 1
+		done
 		if [ ! -x "$HOME/.local/go/bin/go" ]; then
-			printf "missing required guest tool: %s\n" "$HOME/.local/go/bin/go" >&2
+			printf "missing required guest tool after wait: %s\n" "$HOME/.local/go/bin/go" >&2
 			exit 1
 		fi
 		old_ip_forward=$(sysctl -n net.ipv4.ip_forward)
