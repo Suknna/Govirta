@@ -171,16 +171,9 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 
 	// Assemble the full SpecSummary config authority and hand it to vmm, which
 	// deterministically derives the argv (arch validation, builder, MAC passthrough)
-	// — the controller no longer constructs a qemu.Builder itself.
-	spec := vmm.SpecSummary{
-		Name:      obj.Name,
-		Arch:      obj.Spec.Arch,
-		VCPUs:     obj.Spec.VCPUs,
-		MemoryMiB: obj.Spec.MemoryMiB,
-		CPUModel:  string(c.cpu),
-		Disks:     disks,
-		NICs:      nics,
-	}
+	// — the controller no longer constructs a qemu.Builder itself. buildSpecSummary
+	// is shared with the cold-state drift path so the assembly has a single authority.
+	spec := buildSpecSummary(obj, disks, nics, c.cpu)
 
 	create := vmm.CreateRequest{UUID: obj.UID, Spec: spec}
 	created, err := c.vmm.Create(ctx, create)
@@ -302,8 +295,10 @@ func (c *VMController) reconcileExistingVMOn(ctx context.Context, obj vmv1.VM, l
 func (c *VMController) reconcileExistingVMOff(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
 	obs := observePower(live.Phase, obj.Spec.PowerState, obj.Spec.PowerOffMode)
 	if obs.Observed != vmv1.ObservedPowerStateOn {
-		// Process is dead: already at Off. No-op convergence.
-		return c.patchLivePowerStatus(ctx, obj, live)
+		// Process is dead: truly cold. This is the one point where the config may
+		// have changed yet the process is stopped so argv can be safely rebuilt —
+		// detect spec drift and Redefine before the no-op power convergence.
+		return c.reconcileConfigDrift(ctx, obj, live)
 	}
 
 	switch obj.Spec.PowerOffMode {

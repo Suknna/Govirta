@@ -27,6 +27,7 @@ type fakeVMRunner struct {
 
 	statusErr   error
 	statusPhase vmm.Phase
+	statusSpec  vmm.SpecSummary
 
 	createErr  error
 	startErr   error
@@ -97,7 +98,7 @@ func (f *fakeVMRunner) Status(ctx context.Context, uuid string) (vmm.VM, error) 
 	if f.statusErr != nil {
 		return vmm.VM{}, f.statusErr
 	}
-	return vmm.VM{UUID: uuid, Phase: f.statusPhase}, nil
+	return vmm.VM{UUID: uuid, Spec: f.statusSpec, Phase: f.statusPhase}, nil
 }
 
 // Kill records the forced-destroy call the teardown state machine issues for
@@ -1185,5 +1186,194 @@ func TestVMReconcileTeardownStatusErrorRequeuesKeepingFinalizer(t *testing.T) {
 	}
 	if dep.removeFinalizerCalls != 0 {
 		t.Fatalf("RemoveFinalizer called %d times, want 0 when status read fails (finalizer kept)", dep.removeFinalizerCalls)
+	}
+}
+
+// coldDriftDesiredSpec returns the SpecSummary the controller assembles for a
+// cold validVMObject backed by readyVMDepReader (one ready Volume + one ready
+// NIC). Drift tests seed fakeVMRunner.statusSpec relative to this baseline so a
+// single field divergence is the only drift signal.
+func coldDriftDesiredSpec() vmm.SpecSummary {
+	return vmm.SpecSummary{
+		Name:      "vm-a",
+		Arch:      "x86_64",
+		VCPUs:     2,
+		MemoryMiB: 2048,
+		CPUModel:  string(cpu.ModelHost),
+		Disks:     []vmm.DiskSpec{{Path: "/var/lib/govirta/vol-a.qcow2"}},
+		NICs:      []vmm.NICSpec{{TapName: "gvabc1234.0", MAC: "02:00:00:00:00:01"}},
+	}
+}
+
+// coldVMObject returns a valid VM stamped powerState=Off so an existing-guest
+// reconcile lands in the cold-state branch where drift detection runs.
+func coldVMObject() vmv1.VM {
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
+	return obj
+}
+
+// TestVMReconcileColdNoDriftSkipsRedefine proves a cold guest whose live persisted
+// Spec already matches the desired SpecSummary is converged as a no-op: Redefine
+// is NOT called and the status settles to Stopped/Off/None.
+func TestVMReconcileColdNoDriftSkipsRedefine(t *testing.T) {
+	obj := coldVMObject()
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: coldDriftDesiredSpec()}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.redefineCalls != 0 {
+		t.Fatalf("Redefine called %d times, want 0 when live Spec already matches desired", runner.redefineCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseStopped || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Stopped/Off/None", status)
+	}
+}
+
+// TestVMReconcileColdMemoryDriftCallsRedefine proves a cold guest whose live
+// memoryMiB diverges from desired triggers Redefine with the full desired spec,
+// then converges the status normally (Redefine is pure disk, phase unchanged).
+func TestVMReconcileColdMemoryDriftCallsRedefine(t *testing.T) {
+	obj := coldVMObject()
+	live := coldDriftDesiredSpec()
+	live.MemoryMiB = 1024 // diverges from desired 2048
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: live}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.redefineCalls != 1 {
+		t.Fatalf("Redefine called %d times, want 1 on memoryMiB drift", runner.redefineCalls)
+	}
+	if runner.lastRedefine.MemoryMiB != 2048 {
+		t.Fatalf("Redefine spec MemoryMiB = %d, want 2048 (desired)", runner.lastRedefine.MemoryMiB)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseStopped || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Stopped/Off/None after redefine", status)
+	}
+}
+
+// TestVMReconcileColdVolumeAdditionCallsRedefine proves adding a volumeRef (a
+// second ready Volume) widens the desired Disks slice past the live persisted
+// Spec, which the slice-aware drift check detects and converges via Redefine.
+func TestVMReconcileColdVolumeAdditionCallsRedefine(t *testing.T) {
+	obj := coldVMObject()
+	obj.Spec.VolumeRefs = []string{"vol-a", "vol-b"}
+	dep := readyVMDepReader(obj)
+	dep.volumes["vol-b"] = readyVolume("vol-b", "/var/lib/govirta/vol-b.qcow2")
+	// Live persisted Spec only has the original single disk.
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: coldDriftDesiredSpec()}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.redefineCalls != 1 {
+		t.Fatalf("Redefine called %d times, want 1 on volumeRefs addition", runner.redefineCalls)
+	}
+	if got := runner.lastRedefine.Disks; len(got) != 2 || got[1].Path != "/var/lib/govirta/vol-b.qcow2" {
+		t.Fatalf("Redefine spec Disks = %v, want two disks including vol-b", got)
+	}
+}
+
+// TestVMReconcileColdDependencyNotReadyRequeuesWithoutRedefine proves a cold guest
+// whose dependency is not yet Ready requeues to wait WITHOUT calling Redefine —
+// argv must never be rebuilt against an unresolved dependency.
+func TestVMReconcileColdDependencyNotReadyRequeuesWithoutRedefine(t *testing.T) {
+	obj := coldVMObject()
+	pending := readyVolume("vol-a", "/p")
+	pending.Status.Phase = volumev1.VolumePhasePending
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: coldDriftDesiredSpec()}
+	dep := &fakeVMDepReader{
+		volumes: map[string]volumev1.Volume{"vol-a": pending},
+		nics:    map[string]nicv1.NIC{"nic-a": readyNIC("nic-a", "gvabc1234.0")},
+		vms:     map[string]vmv1.VM{obj.Name: obj},
+	}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.RequeueAfter != vmDependencyRequeueDelay {
+		t.Fatalf("result.RequeueAfter = %s, want %s when a dependency is not ready", result.RequeueAfter, vmDependencyRequeueDelay)
+	}
+	if runner.redefineCalls != 0 {
+		t.Fatalf("Redefine called %d times, want 0 while a dependency is not ready", runner.redefineCalls)
+	}
+}
+
+// TestVMReconcileColdRedefineSucceedsConvergesStatus proves a successful Redefine
+// (live phase unchanged because it is a pure disk op) flows into normal status
+// convergence: Stopped/Off/None, no requeue.
+func TestVMReconcileColdRedefineSucceedsConvergesStatus(t *testing.T) {
+	obj := coldVMObject()
+	live := coldDriftDesiredSpec()
+	live.VCPUs = 1 // diverges from desired 2
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: live, redefinePhase: vmm.PhaseStopped}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue after a successful redefine", result)
+	}
+	if runner.redefineCalls != 1 {
+		t.Fatalf("Redefine called %d times, want 1 on vcpus drift", runner.redefineCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseStopped || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Stopped/Off/None", status)
+	}
+}
+
+// TestVMReconcileColdRedefineInvalidRequestIsPermanentFailure proves a Redefine
+// rejected with vmm.ErrInvalidRequest (e.g. an unsupported arch that should have
+// been caught by Knife 3 immutable admission) is a permanent config error: patch
+// Failed and do NOT requeue, since a retry cannot fix a bad spec.
+func TestVMReconcileColdRedefineInvalidRequestIsPermanentFailure(t *testing.T) {
+	obj := coldVMObject()
+	live := coldDriftDesiredSpec()
+	live.MemoryMiB = 1024 // force drift so Redefine is attempted
+	redefineErr := fmt.Errorf("%w: unsupported arch", vmm.ErrInvalidRequest)
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: live, redefineErr: redefineErr}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (permanent failure is reported via status, not returned)", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue for a permanent config error", result)
+	}
+	if runner.redefineCalls != 1 {
+		t.Fatalf("Redefine called %d times, want 1", runner.redefineCalls)
+	}
+	if phase := dep.lastPatch(t).Phase; phase != vmv1.VMPhaseFailed {
+		t.Fatalf("patched phase = %q, want failed", phase)
 	}
 }
