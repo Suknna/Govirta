@@ -41,6 +41,11 @@ type fakeRootVolumeCreator struct {
 	resizeErr    error
 	resizeCalls  int
 	gotResizeReq storage.ResizeVolumeRequest
+
+	dataCreated     volume.Volume
+	dataCreateErr   error
+	gotDataReq      storage.CreateDataVolumeRequest
+	dataCreateCalls int
 }
 
 func (f *fakeRootVolumeCreator) CreateRootVolumeFromReader(ctx context.Context, req storage.CreateRootVolumeFromReaderRequest) (volume.Volume, error) {
@@ -59,6 +64,22 @@ func (f *fakeRootVolumeCreator) CreateRootVolumeFromReader(ctx context.Context, 
 		return volume.Volume{}, f.createErr
 	}
 	return f.created, nil
+}
+
+// CreateDataVolume records the data-disk create request and returns a canned
+// volume/error. A data volume derives no image bytes (blank qcow2), so unlike
+// CreateRootVolumeFromReader there is no reader to drain. Faithful to
+// *storage.VolumeService, it honours ctx cancellation.
+func (f *fakeRootVolumeCreator) CreateDataVolume(ctx context.Context, req storage.CreateDataVolumeRequest) (volume.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
+	}
+	f.dataCreateCalls++
+	f.gotDataReq = req
+	if f.dataCreateErr != nil {
+		return volume.Volume{}, f.dataCreateErr
+	}
+	return f.dataCreated, nil
 }
 
 // DeleteVolume records the teardown delete request and returns a canned error so
@@ -329,6 +350,129 @@ func readyDeps(t *testing.T, vol volumev1.Volume, imageFormat imagev1.ImageForma
 }
 
 // --- tests ------------------------------------------------------------------
+
+// dataVolumeObject builds a data-disk Volume (role=data, no image refs — the
+// shape VolumeSpec.Validate requires for data volumes).
+func dataVolumeObject(name string) volumev1.Volume {
+	return volumev1.Volume{
+		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindVolume},
+		ObjectMeta: metav1.ObjectMeta{Name: name, UID: "uid-" + name},
+		Spec: volumev1.VolumeSpec{
+			PoolRef:       "block-pool",
+			VMRef:         "vm-uid",
+			VMName:        "vm-name",
+			DiskIndex:     1,
+			CapacityBytes: 1 << 30,
+			Role:          volumev1.VolumeRoleData,
+		},
+	}
+}
+
+// TestVolumeReconcileDataVolumeCreatesBlankVolume proves a data volume takes the
+// blank-create path: it gates only on its own block StoragePool (NOT the image /
+// image file pool refs it doesn't carry) and calls CreateDataVolume, never
+// GetImage / CreateRootVolumeFromReader. This is the path the cold-config-change
+// "add a second disk" scenario exercises — the first data volume the spine
+// creates.
+func TestVolumeReconcileDataVolumeCreatesBlankVolume(t *testing.T) {
+	vol := dataVolumeObject("vol-data")
+
+	wantPath := "/srv/pool/block-pool/vm-uid/disk-1.qcow2"
+	creator := &fakeRootVolumeCreator{
+		dataCreated: volume.Volume{
+			ID:       "vm-uid-data-1",
+			Name:     "vol-data",
+			PoolName: "block-pool",
+			Context:  map[string]string{"path": wantPath},
+		},
+	}
+	getter := &fakeImageGetter{}
+	// Only the block pool is wired ready; no image / image file pool objects exist.
+	dep := &fakeDependencyReader{
+		objects: map[string][]byte{
+			depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef): mustMarshal(t, storagePoolReady(vol.Spec.PoolRef)),
+		},
+	}
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want Done on a created data volume", result)
+	}
+
+	// Data volume derives no bytes: GetImage / CreateRootVolumeFromReader untouched.
+	if getter.getCalls != 0 {
+		t.Errorf("GetImage called %d times on a data volume, want 0", getter.getCalls)
+	}
+	if creator.createCalls != 0 {
+		t.Errorf("CreateRootVolumeFromReader called %d times on a data volume, want 0", creator.createCalls)
+	}
+
+	// CreateDataVolume called once with the right blank-volume request.
+	if creator.dataCreateCalls != 1 {
+		t.Fatalf("CreateDataVolume called %d times, want 1", creator.dataCreateCalls)
+	}
+	got := creator.gotDataReq
+	if got.VMID != "vm-uid" {
+		t.Errorf("data create VMID = %q, want %q", got.VMID, "vm-uid")
+	}
+	if got.VMName != "vm-name" {
+		t.Errorf("data create VMName = %q, want %q", got.VMName, "vm-name")
+	}
+	if got.PoolName != "block-pool" {
+		t.Errorf("data create PoolName = %q, want %q", got.PoolName, "block-pool")
+	}
+	if got.Name != "vol-data" {
+		t.Errorf("data create Name = %q, want %q", got.Name, "vol-data")
+	}
+	if got.DiskIndex != 1 {
+		t.Errorf("data create DiskIndex = %d, want 1", got.DiskIndex)
+	}
+	if got.CapacityBytes != 1<<30 {
+		t.Errorf("data create CapacityBytes = %d, want %d", got.CapacityBytes, int64(1<<30))
+	}
+
+	// status ready + VolumePath from the created data volume.
+	if len(dep.patches) != 1 {
+		t.Fatalf("PatchStatus captured %d patches, want 1", len(dep.patches))
+	}
+	patched := dep.patches[0].status
+	if patched.Phase != volumev1.VolumePhaseReady {
+		t.Errorf("patched phase = %q, want %q", patched.Phase, volumev1.VolumePhaseReady)
+	}
+	if patched.VolumePath != wantPath {
+		t.Errorf("patched VolumePath = %q, want %q", patched.VolumePath, wantPath)
+	}
+}
+
+// TestVolumeReconcileDataVolumeWaitsForPool proves a data volume requeues
+// (without creating) while its block pool is not yet ready — the gate is the
+// pool alone, with no spurious image dependency.
+func TestVolumeReconcileDataVolumeWaitsForPool(t *testing.T) {
+	vol := dataVolumeObject("vol-data")
+	creator := &fakeRootVolumeCreator{}
+	getter := &fakeImageGetter{}
+	// No objects wired: the block pool Get returns ErrNotFound → not ready.
+	dep := &fakeDependencyReader{objects: map[string][]byte{}}
+	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil on a wait", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("Reconcile() result = %+v, want Requeue while pool not ready", result)
+	}
+	if creator.dataCreateCalls != 0 {
+		t.Errorf("CreateDataVolume called %d times while pool not ready, want 0", creator.dataCreateCalls)
+	}
+	if len(dep.patches) != 0 {
+		t.Errorf("PatchStatus captured %d patches while waiting, want 0", len(dep.patches))
+	}
+}
 
 func TestVolumeReconcileAllReadyCreatesRootVolume(t *testing.T) {
 	vol := rootVolumeObject("vol-a")

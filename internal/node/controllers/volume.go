@@ -26,6 +26,10 @@ import (
 // delete a volume on teardown. *storage.VolumeService satisfies it (积木式 + 可测).
 type RootVolumeCreator interface {
 	CreateRootVolumeFromReader(ctx context.Context, req storage.CreateRootVolumeFromReaderRequest) (volume.Volume, error)
+	// CreateDataVolume creates a blank data disk volume (no image source). Data
+	// volumes are not image-derived, so the controller's data path gates only on
+	// the block pool and never opens an image reader.
+	CreateDataVolume(ctx context.Context, req storage.CreateDataVolumeRequest) (volume.Volume, error)
 	DeleteVolume(ctx context.Context, req storage.DeleteVolumeRequest) error
 	// ResizeVolume declares an absolute target capacity on the volume's live
 	// qcow2 (cold-resize convergence, 刀5). The driver decides idempotently
@@ -147,6 +151,24 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		return c.reconcileResize(ctx, vol)
 	}
 
+	// Role-based create dispatch. A root volume is a full copy of image bytes
+	// (gate on block pool + image file pool + Image, format from Image.Spec). A
+	// data volume is a blank qcow2 with no image source (gate only on its block
+	// pool; VolumeSpec.Validate forbids a data volume from carrying image refs).
+	// 刀6「增删硬件」的第二块盘是 data 盘——这是 e2e 首次走 data 创建路径。
+	if vol.Spec.Role == volumev1.VolumeRoleData {
+		return c.reconcileCreateData(ctx, ev, vol)
+	}
+	return c.reconcileCreateRoot(ctx, ev, vol)
+}
+
+// reconcileCreateRoot derives an independent root qcow2 by copying the source
+// Image's bytes. It gates on all three dependencies (block pool, image file
+// pool, Image) being live Ready, maps the Image's authoritative format, and
+// streams the bytes into CreateRootVolumeFromReader.
+func (c *VolumeController) reconcileCreateRoot(ctx context.Context, ev controller.Event, vol volumev1.Volume) (controller.ReconcileResult, error) {
+	logger := zerolog.Ctx(ctx)
+
 	img, ready, err := c.gate(ctx, vol)
 	if err != nil {
 		// A dependency read failed transiently: requeue without patching failed
@@ -179,10 +201,53 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		return controller.Requeue(), fmt.Errorf("volume controller: create root volume %q: %w", vol.Name, err)
 	}
 
+	return c.patchCreatedVolumeReady(ctx, ev, vol, created, "volume ready")
+}
+
+// reconcileCreateData creates a blank data-disk qcow2. Unlike a root volume it
+// derives no bytes from an image, so it gates only on its own block
+// StoragePool (no image / image file pool refs — VolumeSpec.Validate forbids a
+// data volume from carrying them) and calls CreateDataVolume.
+func (c *VolumeController) reconcileCreateData(ctx context.Context, ev controller.Event, vol volumev1.Volume) (controller.ReconcileResult, error) {
+	logger := zerolog.Ctx(ctx)
+
+	poolReady, err := c.storagePoolReady(ctx, vol.Spec.PoolRef)
+	if err != nil {
+		// Transient read failure: requeue without patching failed.
+		return controller.Requeue(), err
+	}
+	if !poolReady {
+		logger.Info().
+			Str("key", ev.Key).
+			Msg("data volume block pool not ready; requeueing")
+		return controller.Requeue(), nil
+	}
+
+	created, err := c.volumes.CreateDataVolume(ctx, storage.CreateDataVolumeRequest{
+		VMID:          vol.Spec.VMRef,
+		VMName:        vol.Spec.VMName,
+		PoolName:      vol.Spec.PoolRef,
+		Name:          vol.Name,
+		DiskIndex:     vol.Spec.DiskIndex,
+		CapacityBytes: vol.Spec.CapacityBytes,
+	})
+	if err != nil {
+		if perr := c.reportFailure(ctx, vol.Name, vol.Status, err); perr != nil {
+			return controller.Requeue(), fmt.Errorf("volume controller: create data volume %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
+		}
+		return controller.Requeue(), fmt.Errorf("volume controller: create data volume %q: %w", vol.Name, err)
+	}
+
+	return c.patchCreatedVolumeReady(ctx, ev, vol, created, "data volume ready")
+}
+
+// patchCreatedVolumeReady extracts the host path from a freshly created volume
+// and patches a ready status carrying it. A created volume without a host path
+// is an internal inconsistency treated as transient (report failed + requeue).
+// Shared by the root and data create paths.
+func (c *VolumeController) patchCreatedVolumeReady(ctx context.Context, ev controller.Event, vol volumev1.Volume, created volume.Volume, readyMsg string) (controller.ReconcileResult, error) {
 	path := created.Context[local.PathKey]
 	if path == "" {
-		// A created volume without a host path is an internal inconsistency:
-		// treat it as transient (report failed and requeue).
 		missing := fmt.Errorf("volume controller: created volume %q reports no host path", vol.Name)
 		if perr := c.reportFailure(ctx, vol.Name, vol.Status, missing); perr != nil {
 			return controller.Requeue(), fmt.Errorf("volume controller: %q missing path and status report failed: %w", vol.Name, errors.Join(missing, perr))
@@ -198,10 +263,10 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		return controller.Requeue(), err
 	}
 
-	logger.Info().
+	zerolog.Ctx(ctx).Info().
 		Str("key", ev.Key).
 		Str("volumePath", path).
-		Msg("volume ready")
+		Msg(readyMsg)
 	return controller.Done(), nil
 }
 
