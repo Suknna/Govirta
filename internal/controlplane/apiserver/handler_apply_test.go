@@ -669,8 +669,15 @@ func TestApplyAllowsColdMutableVMMemoryUpdate(t *testing.T) {
 		t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// Knife 6 gate 1: a cold-mutable change (memoryMiB) is accepted only when the
+	// submitted powerState is Off. The pre-Knife-6 contract ("cold-mutable always
+	// accepted at write time") was overturned — a cold config change now requires
+	// the VM be declared Off. This still proves cold-mutable fields ARE mutable
+	// (the point of the test), now with the Off precondition the design requires.
 	update := validVM()
 	update.Spec.MemoryMiB = 4096
+	update.Spec.PowerState = vmv1.PowerStateOff
+	update.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	rec := doApply(t, srv, metav1.KindVM, update.Name, update)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("update status = %d, want 201; body=%s", rec.Code, rec.Body.String())
