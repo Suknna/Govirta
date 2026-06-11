@@ -43,8 +43,6 @@ type PowerState string
 const (
 	// PowerStateOn requests the node to converge the guest to a running QEMU process.
 	PowerStateOn PowerState = "On"
-	// PowerStateShutdown requests graceful guest OS shutdown through the VM control plane.
-	PowerStateShutdown PowerState = "Shutdown"
 	// PowerStateOff requests the guest to remain powered down without a running QEMU process.
 	PowerStateOff PowerState = "Off"
 )
@@ -52,7 +50,27 @@ const (
 // Valid reports whether p is one of the supported desired power intents.
 func (p PowerState) Valid() bool {
 	switch p {
-	case PowerStateOn, PowerStateShutdown, PowerStateOff:
+	case PowerStateOn, PowerStateOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// PowerOffMode is how the VM reaches the Off power state. Only consumed when powerState is Off.
+type PowerOffMode string
+
+const (
+	// PowerOffModeAcpi triggers graceful guest OS shutdown via ACPI (vmm.Stop / QMP system_powerdown).
+	PowerOffModeAcpi PowerOffMode = "Acpi"
+	// PowerOffModeForce forcibly powers off the VM (vmm.Kill / QMP quit + SIGKILL fallback).
+	PowerOffModeForce PowerOffMode = "Force"
+)
+
+// Valid reports whether m is one of the supported power-off modes.
+func (m PowerOffMode) Valid() bool {
+	switch m {
+	case PowerOffModeAcpi, PowerOffModeForce:
 		return true
 	default:
 		return false
@@ -112,12 +130,13 @@ var ErrInvalidStatus = errors.New("vm: invalid status")
 // VMSpec is the desired state of a VM. VolumeRefs and NICRefs name the Volume
 // and NIC objects this VM depends on; the VM controller gates on their readiness.
 type VMSpec struct {
-	Arch       string     `json:"arch"`
-	VCPUs      int        `json:"vcpus"`
-	MemoryMiB  int        `json:"memoryMiB"`
-	VolumeRefs []string   `json:"volumeRefs"`
-	NICRefs    []string   `json:"nicRefs"`
-	PowerState PowerState `json:"powerState"`
+	Arch         string       `json:"arch"`
+	VCPUs        int          `json:"vcpus"`
+	MemoryMiB    int          `json:"memoryMiB"`
+	VolumeRefs   []string     `json:"volumeRefs"`
+	NICRefs      []string     `json:"nicRefs"`
+	PowerState   PowerState   `json:"powerState"`
+	PowerOffMode PowerOffMode `json:"powerOffMode,omitempty"`
 }
 
 // Validate reports whether the spec carries explicit, internally consistent fields.
@@ -138,7 +157,20 @@ func (s VMSpec) Validate() error {
 		return fmt.Errorf("%w: at least one nicRef is required", ErrInvalidSpec)
 	}
 	if !s.PowerState.Valid() {
-		return fmt.Errorf("%w: powerState %q must be one of On, Shutdown, Off", ErrInvalidSpec, s.PowerState)
+		return fmt.Errorf("%w: powerState %q must be one of On, Off", ErrInvalidSpec, s.PowerState)
+	}
+	switch s.PowerState {
+	case PowerStateOn:
+		if s.PowerOffMode != "" {
+			return fmt.Errorf("%w: powerOffMode must be empty when powerState is On", ErrInvalidSpec)
+		}
+	case PowerStateOff:
+		if s.PowerOffMode == "" {
+			return fmt.Errorf("%w: powerOffMode is required when powerState is Off", ErrInvalidSpec)
+		}
+		if !s.PowerOffMode.Valid() {
+			return fmt.Errorf("%w: powerOffMode %q must be one of Acpi, Force", ErrInvalidSpec, s.PowerOffMode)
+		}
 	}
 	return nil
 }

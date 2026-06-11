@@ -61,17 +61,72 @@ func TestVMSpecValidateReportsInvalidPowerStateValue(t *testing.T) {
 	if !errors.Is(err, ErrInvalidSpec) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
 	}
-	if got := err.Error(); !bytes.Contains([]byte(got), []byte(`powerState "Paused" must be one of On, Shutdown, Off`)) {
+	if got := err.Error(); !bytes.Contains([]byte(got), []byte(`powerState "Paused" must be one of On, Off`)) {
 		t.Fatalf("Validate() error = %q, want invalid value included", got)
 	}
 }
 
 func TestVMSpecValidateAcceptsKnownPowerStates(t *testing.T) {
-	for _, state := range []PowerState{PowerStateOn, PowerStateShutdown, PowerStateOff} {
-		spec := VMSpec{Arch: "aarch64", VCPUs: 1, MemoryMiB: 512, VolumeRefs: []string{"root"}, NICRefs: []string{"nic"}, PowerState: state}
+	tests := []struct {
+		powerState   PowerState
+		powerOffMode PowerOffMode
+	}{
+		{PowerStateOn, ""},
+		{PowerStateOff, PowerOffModeAcpi},
+	}
+	for _, tt := range tests {
+		spec := VMSpec{Arch: "aarch64", VCPUs: 1, MemoryMiB: 512, VolumeRefs: []string{"root"}, NICRefs: []string{"nic"}, PowerState: tt.powerState, PowerOffMode: tt.powerOffMode}
 		if err := spec.Validate(); err != nil {
-			t.Fatalf("Validate(%s) error = %v", state, err)
+			t.Fatalf("Validate(%s) error = %v", tt.powerState, err)
 		}
+	}
+}
+
+func TestPowerOffModeValid(t *testing.T) {
+	tests := []struct {
+		mode PowerOffMode
+		want bool
+	}{
+		{PowerOffModeAcpi, true},
+		{PowerOffModeForce, true},
+		{PowerOffMode("Maybe"), false},
+		{PowerOffMode(""), false},
+	}
+	for _, tt := range tests {
+		if got := tt.mode.Valid(); got != tt.want {
+			t.Fatalf("PowerOffMode(%q).Valid() = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestVMSpecValidatePowerOffModeConditional(t *testing.T) {
+	tests := []struct {
+		name         string
+		powerState   PowerState
+		powerOffMode PowerOffMode
+		wantErr      bool
+	}{
+		{"On with powerOffMode set", PowerStateOn, PowerOffModeAcpi, true},
+		{"Off with empty powerOffMode", PowerStateOff, "", true},
+		{"Off with invalid powerOffMode", PowerStateOff, PowerOffMode("Maybe"), true},
+		{"On with empty powerOffMode", PowerStateOn, "", false},
+		{"Off with Acpi powerOffMode", PowerStateOff, PowerOffModeAcpi, false},
+		{"Off with Force powerOffMode", PowerStateOff, PowerOffModeForce, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := validVMSpec()
+			spec.PowerState = tt.powerState
+			spec.PowerOffMode = tt.powerOffMode
+			err := spec.Validate()
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidSpec) {
+					t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+		})
 	}
 }
 
