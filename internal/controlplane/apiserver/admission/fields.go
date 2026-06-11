@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
@@ -116,7 +117,33 @@ func (v FieldPolicyValidator) validateVM(oldVM, newVM vmv1.VM) error {
 	if oldVM.Spec.Arch != newVM.Spec.Arch {
 		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.arch is immutable for VM update: existing %q vs requested %q", oldVM.Spec.Arch, newVM.Spec.Arch))
 	}
+	// Gate 1: cold-mutable fields (memoryMiB/vcpus/volumeRefs/nicRefs) may only
+	// change while the desired power intent is Off. We look exclusively at the
+	// submitted newVM.Spec.PowerState; status is a live projection and never
+	// drives admission.
+	if vmColdMutableChanged(oldVM, newVM) && newVM.Spec.PowerState != vmv1.PowerStateOff {
+		return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("cold config change requires powerState=Off, got %q", newVM.Spec.PowerState))
+	}
 	return nil
+}
+
+// vmColdMutableChanged reports whether any cold-mutable VM spec field differs
+// between oldVM and newVM. Scalar fields use !=; slice fields use
+// reflect.DeepEqual so that both membership and ordering changes count as drift.
+func vmColdMutableChanged(oldVM, newVM vmv1.VM) bool {
+	if oldVM.Spec.MemoryMiB != newVM.Spec.MemoryMiB {
+		return true
+	}
+	if oldVM.Spec.VCPUs != newVM.Spec.VCPUs {
+		return true
+	}
+	if !reflect.DeepEqual(oldVM.Spec.VolumeRefs, newVM.Spec.VolumeRefs) {
+		return true
+	}
+	if !reflect.DeepEqual(oldVM.Spec.NICRefs, newVM.Spec.NICRefs) {
+		return true
+	}
+	return false
 }
 
 func (v FieldPolicyValidator) validateVolume(oldVolume, newVolume volumev1.Volume) error {

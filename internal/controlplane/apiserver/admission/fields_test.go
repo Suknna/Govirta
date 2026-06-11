@@ -36,6 +36,10 @@ func TestFieldPolicyRejectsVMArchChange(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonConflict)
 }
 
+// TestFieldPolicyAllowsVMColdMutableChanges asserts that cold-mutable fields
+// (memoryMiB/vcpus/volumeRefs/nicRefs) may all change in one update when the
+// desired power intent is Off. Under Gate 1 these changes are only accepted
+// while powerState=Off, which is why the fixture sets PowerStateOff.
 func TestFieldPolicyAllowsVMColdMutableChanges(t *testing.T) {
 	old := validAdmissionVM()
 	obj := old
@@ -49,6 +53,77 @@ func TestFieldPolicyAllowsVMColdMutableChanges(t *testing.T) {
 	err := validateFieldPolicyUpdate(metav1.KindVM, old.Name, old, obj)
 	if err != nil {
 		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+// TestFieldPolicyVMColdMutableGate covers Gate 1: cold-mutable changes require
+// powerState=Off, pure power changes are unaffected, and no-op updates pass.
+func TestFieldPolicyVMColdMutableGate(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*vmv1.VM)
+		wantReason ErrorReason // "" means expect accept
+	}{
+		{
+			name: "On + memoryMiB change rejected",
+			mutate: func(obj *vmv1.VM) {
+				obj.Spec.PowerState = vmv1.PowerStateOn
+				obj.Spec.MemoryMiB = 4096
+			},
+			wantReason: ReasonBadRequest,
+		},
+		{
+			name: "Off + memoryMiB change accepted",
+			mutate: func(obj *vmv1.VM) {
+				obj.Spec.PowerState = vmv1.PowerStateOff
+				obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
+				obj.Spec.MemoryMiB = 4096
+			},
+		},
+		{
+			name: "Off + volumeRefs addition accepted",
+			mutate: func(obj *vmv1.VM) {
+				obj.Spec.PowerState = vmv1.PowerStateOff
+				obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
+				obj.Spec.VolumeRefs = []string{"vol-a", "vol-b"}
+			},
+		},
+		{
+			name: "On + volumeRefs change rejected",
+			mutate: func(obj *vmv1.VM) {
+				obj.Spec.PowerState = vmv1.PowerStateOn
+				obj.Spec.VolumeRefs = []string{"vol-a", "vol-b"}
+			},
+			wantReason: ReasonBadRequest,
+		},
+		{
+			name: "pure power change On to Off without cold-mutable change accepted",
+			mutate: func(obj *vmv1.VM) {
+				obj.Spec.PowerState = vmv1.PowerStateOff
+				obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
+			},
+		},
+		{
+			name:   "no change accepted",
+			mutate: func(obj *vmv1.VM) {},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			old := validAdmissionVM()
+			obj := old
+			tt.mutate(&obj)
+
+			err := validateFieldPolicyUpdate(metav1.KindVM, old.Name, old, obj)
+			if tt.wantReason == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			assertAdmissionReason(t, err, tt.wantReason)
+		})
 	}
 }
 
