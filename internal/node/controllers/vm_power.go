@@ -20,10 +20,10 @@ type vmPowerObservation struct {
 	KnownPhase bool
 }
 
-func observePower(phase vmm.Phase, desired vmv1.PowerState) vmPowerObservation {
+func observePower(phase vmm.Phase, desired vmv1.PowerState, mode vmv1.PowerOffMode) vmPowerObservation {
 	apiPhase, known := mapVMPhase(phase)
 	observed := observedPowerState(phase)
-	transition := powerTransition(desired, phase, observed)
+	transition := powerTransition(desired, mode, phase, observed)
 
 	return vmPowerObservation{
 		Phase:      apiPhase,
@@ -42,8 +42,8 @@ func vmStatus(obs vmPowerObservation, message string) vmv1.VMStatus {
 	}
 }
 
-func vmPowerStatus(desired vmv1.PowerState, phase vmm.Phase, message string) (vmv1.VMStatus, bool) {
-	obs := observePower(phase, desired)
+func vmPowerStatus(desired vmv1.PowerState, mode vmv1.PowerOffMode, phase vmm.Phase, message string) (vmv1.VMStatus, bool) {
+	obs := observePower(phase, desired, mode)
 	return vmStatus(obs, message), obs.KnownPhase
 }
 
@@ -65,19 +65,24 @@ func observedPowerState(phase vmm.Phase) vmv1.ObservedPowerState {
 	}
 }
 
-func powerTransition(desired vmv1.PowerState, phase vmm.Phase, observed vmv1.ObservedPowerState) vmv1.PowerTransition {
+// powerTransition derives the active convergence action from the desired
+// (powerState, powerOffMode) pair and the live observation. On consumes only the
+// powerState; Off consumes powerOffMode to pick the convergence verb while a
+// guest process is still live — Acpi → graceful ShutdownRequested (vmm.Stop),
+// Force → PoweringOff (vmm.Kill). Once the guest is dead the transition settles
+// to None regardless of mode.
+func powerTransition(desired vmv1.PowerState, mode vmv1.PowerOffMode, phase vmm.Phase, observed vmv1.ObservedPowerState) vmv1.PowerTransition {
 	switch desired {
 	case vmv1.PowerStateOn:
 		if observed == vmv1.ObservedPowerStateOff || phase == vmm.PhaseStarting {
 			return vmv1.PowerTransitionStarting
 		}
-	case vmv1.PowerStateShutdown:
-		if observed == vmv1.ObservedPowerStateOn {
-			return vmv1.PowerTransitionShutdownRequested
-		}
 	case vmv1.PowerStateOff:
 		if observed == vmv1.ObservedPowerStateOn {
-			return vmv1.PowerTransitionPoweringOff
+			if mode == vmv1.PowerOffModeForce {
+				return vmv1.PowerTransitionPoweringOff
+			}
+			return vmv1.PowerTransitionShutdownRequested
 		}
 	}
 	return vmv1.PowerTransitionNone

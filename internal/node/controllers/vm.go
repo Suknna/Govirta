@@ -156,20 +156,6 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (cont
 }
 
 func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj vmv1.VM) (controller.ReconcileResult, error) {
-	if obj.Spec.PowerState == vmv1.PowerStateShutdown {
-		err := fmt.Errorf("%w: powerState Shutdown is only valid for an existing VM", vmv1.ErrInvalidSpec)
-		desired := vmv1.VMStatus{
-			Phase:              vmv1.VMPhaseFailed,
-			ObservedPowerState: vmv1.ObservedPowerStateOff,
-			PowerTransition:    vmv1.PowerTransitionShutdownRequested,
-			Message:            err.Error(),
-		}
-		if perr := c.patchVMStatusIfChanged(ctx, obj.Name, desired); perr != nil {
-			return controller.Done(), fmt.Errorf("vm controller: report invalid shutdown create %q: %w", obj.Name, perr)
-		}
-		return controller.Done(), nil
-	}
-
 	// Gate on dependencies and collect the resolved disk + NIC config they expose.
 	disks, nics, ready, err := c.gatherDependencies(ctx, obj)
 	if err != nil {
@@ -216,7 +202,7 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 	}
 
 	if obj.Spec.PowerState == vmv1.PowerStateOff {
-		desired, known := vmPowerStatus(obj.Spec.PowerState, created.Phase, "")
+		desired, known := vmPowerStatus(obj.Spec.PowerState, obj.Spec.PowerOffMode, created.Phase, "")
 		c.logUnknownPhase(ctx, key, obj.UID, created.Phase, known)
 		if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
 			return controller.RequeueAfter(vmPowerRequeueDelay), err
@@ -238,7 +224,7 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 		return controller.RequeueAfter(vmPowerRequeueDelay), fmt.Errorf("vm controller: start %q: %w", obj.Name, err)
 	}
 
-	desired, known := vmPowerStatus(obj.Spec.PowerState, started.Phase, "")
+	desired, known := vmPowerStatus(obj.Spec.PowerState, obj.Spec.PowerOffMode, started.Phase, "")
 	c.logUnknownPhase(ctx, key, obj.UID, started.Phase, known)
 	if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
 		return controller.RequeueAfter(vmPowerRequeueDelay), err
@@ -247,7 +233,7 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 		return controller.Done(), nil
 	}
 
-	obs := observePower(started.Phase, obj.Spec.PowerState)
+	obs := observePower(started.Phase, obj.Spec.PowerState, obj.Spec.PowerOffMode)
 	requeue := powerNeedsDelayedRequeue(obs) || isTransientPhase(started.Phase)
 	logger := zerolog.Ctx(ctx)
 	logger.Info().
@@ -267,12 +253,10 @@ func (c *VMController) reconcileExistingVM(ctx context.Context, obj vmv1.VM, liv
 	switch obj.Spec.PowerState {
 	case vmv1.PowerStateOn:
 		return c.reconcileExistingVMOn(ctx, obj, live)
-	case vmv1.PowerStateShutdown:
-		return c.reconcileExistingVMShutdown(ctx, obj, live)
 	case vmv1.PowerStateOff:
 		return c.reconcileExistingVMOff(ctx, obj, live)
 	default:
-		err := fmt.Errorf("%w: powerState %q must be one of On, Shutdown, Off", vmv1.ErrInvalidSpec, obj.Spec.PowerState)
+		err := fmt.Errorf("%w: powerState %q must be one of On, Off", vmv1.ErrInvalidSpec, obj.Spec.PowerState)
 		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
 			return controller.Done(), fmt.Errorf("vm controller: report invalid powerState %q: %w", obj.Name, errors.Join(err, perr))
 		}
@@ -300,9 +284,29 @@ func (c *VMController) reconcileExistingVMOn(ctx context.Context, obj vmv1.VM, l
 	return c.patchLivePowerStatus(ctx, obj, live)
 }
 
-func (c *VMController) reconcileExistingVMShutdown(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
-	obs := observePower(live.Phase, obj.Spec.PowerState)
-	if obs.Observed == vmv1.ObservedPowerStateOn {
+// reconcileExistingVMOff drives a live guest down to the Off power state. The
+// physical terminal state (ObservedPowerState=Off) is the same regardless of
+// mode; only the path there differs:
+//
+//   - Acpi  → vmm.Stop (QMP system_powerdown): the guest OS shuts itself down
+//     gracefully. Reports PowerTransition=ShutdownRequested while the guest is
+//     still alive and requeues to track it to Off.
+//   - Force → vmm.Kill (QMP quit + SIGKILL fallback): the process is torn down
+//     immediately, not depending on guest cooperation. Reports
+//     PowerTransition=PoweringOff while alive and requeues.
+//
+// When the process is already dead (Stopped/Defined/Failed) the guest has
+// reached Off, so this is a no-op convergence: patch ObservedPowerState=Off /
+// PowerTransition=None (the no-op guard skips the PATCH when already current).
+func (c *VMController) reconcileExistingVMOff(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
+	obs := observePower(live.Phase, obj.Spec.PowerState, obj.Spec.PowerOffMode)
+	if obs.Observed != vmv1.ObservedPowerStateOn {
+		// Process is dead: already at Off. No-op convergence.
+		return c.patchLivePowerStatus(ctx, obj, live)
+	}
+
+	switch obj.Spec.PowerOffMode {
+	case vmv1.PowerOffModeAcpi:
 		desired := vmStatus(obs, "shutdown requested via ACPI; waiting for guest to power off")
 		if err := c.vmm.Stop(ctx, obj.UID); err != nil {
 			desired.Message = "shutdown request failed: " + err.Error()
@@ -315,13 +319,7 @@ func (c *VMController) reconcileExistingVMShutdown(ctx context.Context, obj vmv1
 			return controller.RequeueAfter(vmPowerRequeueDelay), err
 		}
 		return controller.RequeueAfter(vmPowerRequeueDelay), nil
-	}
-	return c.patchLivePowerStatus(ctx, obj, live)
-}
-
-func (c *VMController) reconcileExistingVMOff(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
-	obs := observePower(live.Phase, obj.Spec.PowerState)
-	if obs.Observed == vmv1.ObservedPowerStateOn {
+	case vmv1.PowerOffModeForce:
 		desired := vmStatus(obs, "force power off requested")
 		if err := c.vmm.Kill(ctx, obj.UID); err != nil {
 			desired.Message = "force power off failed: " + err.Error()
@@ -334,12 +332,17 @@ func (c *VMController) reconcileExistingVMOff(ctx context.Context, obj vmv1.VM, 
 			return controller.RequeueAfter(vmPowerRequeueDelay), err
 		}
 		return controller.RequeueAfter(vmPowerRequeueDelay), nil
+	default:
+		err := fmt.Errorf("%w: powerOffMode %q must be one of Acpi, Force", vmv1.ErrInvalidSpec, obj.Spec.PowerOffMode)
+		if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+			return controller.Done(), fmt.Errorf("vm controller: report invalid powerOffMode %q: %w", obj.Name, errors.Join(err, perr))
+		}
+		return controller.Done(), nil
 	}
-	return c.patchLivePowerStatus(ctx, obj, live)
 }
 
 func (c *VMController) patchLivePowerStatus(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
-	desired, known := vmPowerStatus(obj.Spec.PowerState, live.Phase, "")
+	desired, known := vmPowerStatus(obj.Spec.PowerState, obj.Spec.PowerOffMode, live.Phase, "")
 	c.logUnknownPhase(ctx, obj.Name, obj.UID, live.Phase, known)
 	if err := c.patchVMStatusIfChanged(ctx, obj.Name, desired); err != nil {
 		return controller.RequeueAfter(vmPowerRequeueDelay), err
@@ -347,7 +350,7 @@ func (c *VMController) patchLivePowerStatus(ctx context.Context, obj vmv1.VM, li
 	if !known {
 		return controller.Done(), nil
 	}
-	obs := observePower(live.Phase, obj.Spec.PowerState)
+	obs := observePower(live.Phase, obj.Spec.PowerState, obj.Spec.PowerOffMode)
 	if powerNeedsDelayedRequeue(obs) || isTransientPhase(live.Phase) {
 		return controller.RequeueAfter(vmTransientRequeueDelay), nil
 	}

@@ -12,6 +12,7 @@ func TestVMPowerObservationMatrix(t *testing.T) {
 	tests := []struct {
 		name       string
 		desired    vmv1.PowerState
+		mode       vmv1.PowerOffMode
 		phase      vmm.Phase
 		wantPhase  vmv1.VMPhase
 		wantPower  vmv1.ObservedPowerState
@@ -22,23 +23,25 @@ func TestVMPowerObservationMatrix(t *testing.T) {
 		{name: "On Stopped", desired: vmv1.PowerStateOn, phase: vmm.PhaseStopped, wantPhase: vmv1.VMPhaseStopped, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionStarting},
 		{name: "On Failed", desired: vmv1.PowerStateOn, phase: vmm.PhaseFailed, wantPhase: vmv1.VMPhaseFailed, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionStarting},
 		{name: "On Starting", desired: vmv1.PowerStateOn, phase: vmm.PhaseStarting, wantPhase: vmv1.VMPhaseStarting, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionStarting},
-		{name: "Shutdown Running", desired: vmv1.PowerStateShutdown, phase: vmm.PhaseRunning, wantPhase: vmv1.VMPhaseRunning, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionShutdownRequested},
-		{name: "Shutdown Starting", desired: vmv1.PowerStateShutdown, phase: vmm.PhaseStarting, wantPhase: vmv1.VMPhaseStarting, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionShutdownRequested},
-		{name: "Shutdown Stopping", desired: vmv1.PowerStateShutdown, phase: vmm.PhaseStopping, wantPhase: vmv1.VMPhaseStopping, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionShutdownRequested},
-		{name: "Shutdown Defined", desired: vmv1.PowerStateShutdown, phase: vmm.PhaseDefined, wantPhase: vmv1.VMPhaseDefined, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
-		{name: "Shutdown Stopped", desired: vmv1.PowerStateShutdown, phase: vmm.PhaseStopped, wantPhase: vmv1.VMPhaseStopped, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
-		{name: "Shutdown Failed", desired: vmv1.PowerStateShutdown, phase: vmm.PhaseFailed, wantPhase: vmv1.VMPhaseFailed, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
-		{name: "Off Running", desired: vmv1.PowerStateOff, phase: vmm.PhaseRunning, wantPhase: vmv1.VMPhaseRunning, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionPoweringOff},
-		{name: "Off Starting", desired: vmv1.PowerStateOff, phase: vmm.PhaseStarting, wantPhase: vmv1.VMPhaseStarting, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionPoweringOff},
-		{name: "Off Stopping", desired: vmv1.PowerStateOff, phase: vmm.PhaseStopping, wantPhase: vmv1.VMPhaseStopping, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionPoweringOff},
-		{name: "Off Defined", desired: vmv1.PowerStateOff, phase: vmm.PhaseDefined, wantPhase: vmv1.VMPhaseDefined, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
-		{name: "Off Stopped", desired: vmv1.PowerStateOff, phase: vmm.PhaseStopped, wantPhase: vmv1.VMPhaseStopped, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
-		{name: "Off Failed", desired: vmv1.PowerStateOff, phase: vmm.PhaseFailed, wantPhase: vmv1.VMPhaseFailed, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
+		// Off + Acpi: a live guest is converging to Off via graceful ACPI shutdown → ShutdownRequested.
+		{name: "Off Acpi Running", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeAcpi, phase: vmm.PhaseRunning, wantPhase: vmv1.VMPhaseRunning, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionShutdownRequested},
+		{name: "Off Acpi Starting", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeAcpi, phase: vmm.PhaseStarting, wantPhase: vmv1.VMPhaseStarting, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionShutdownRequested},
+		{name: "Off Acpi Stopping", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeAcpi, phase: vmm.PhaseStopping, wantPhase: vmv1.VMPhaseStopping, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionShutdownRequested},
+		{name: "Off Acpi Defined", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeAcpi, phase: vmm.PhaseDefined, wantPhase: vmv1.VMPhaseDefined, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
+		{name: "Off Acpi Stopped", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeAcpi, phase: vmm.PhaseStopped, wantPhase: vmv1.VMPhaseStopped, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
+		{name: "Off Acpi Failed", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeAcpi, phase: vmm.PhaseFailed, wantPhase: vmv1.VMPhaseFailed, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
+		// Off + Force: a live guest is converging to Off via forced power-off → PoweringOff.
+		{name: "Off Force Running", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeForce, phase: vmm.PhaseRunning, wantPhase: vmv1.VMPhaseRunning, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionPoweringOff},
+		{name: "Off Force Starting", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeForce, phase: vmm.PhaseStarting, wantPhase: vmv1.VMPhaseStarting, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionPoweringOff},
+		{name: "Off Force Stopping", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeForce, phase: vmm.PhaseStopping, wantPhase: vmv1.VMPhaseStopping, wantPower: vmv1.ObservedPowerStateOn, wantAction: vmv1.PowerTransitionPoweringOff},
+		{name: "Off Force Defined", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeForce, phase: vmm.PhaseDefined, wantPhase: vmv1.VMPhaseDefined, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
+		{name: "Off Force Stopped", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeForce, phase: vmm.PhaseStopped, wantPhase: vmv1.VMPhaseStopped, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
+		{name: "Off Force Failed", desired: vmv1.PowerStateOff, mode: vmv1.PowerOffModeForce, phase: vmm.PhaseFailed, wantPhase: vmv1.VMPhaseFailed, wantPower: vmv1.ObservedPowerStateOff, wantAction: vmv1.PowerTransitionNone},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			obs := observePower(tt.phase, tt.desired)
+			obs := observePower(tt.phase, tt.desired, tt.mode)
 			if obs.Phase != tt.wantPhase {
 				t.Fatalf("Phase = %q, want %q", obs.Phase, tt.wantPhase)
 			}
@@ -60,7 +63,7 @@ func TestVMPowerObservationMatrix(t *testing.T) {
 }
 
 func TestVMPowerUnknownPhaseMapsFailedWithPowerFields(t *testing.T) {
-	obs := observePower(vmm.Phase("mystery"), vmv1.PowerStateOn)
+	obs := observePower(vmm.Phase("mystery"), vmv1.PowerStateOn, "")
 	if obs.KnownPhase {
 		t.Fatalf("KnownPhase = true, want false for unknown phase")
 	}
@@ -80,7 +83,7 @@ func TestVMPowerUnknownPhaseMapsFailedWithPowerFields(t *testing.T) {
 }
 
 func TestVMPowerStatusDerivesCompleteStatus(t *testing.T) {
-	status, known := vmPowerStatus(vmv1.PowerStateShutdown, vmm.PhaseStopping, "shutdown requested")
+	status, known := vmPowerStatus(vmv1.PowerStateOff, vmv1.PowerOffModeAcpi, vmm.PhaseStopping, "shutdown requested")
 	if !known {
 		t.Fatalf("known = false, want true")
 	}

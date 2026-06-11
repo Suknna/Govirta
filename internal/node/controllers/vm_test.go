@@ -488,9 +488,14 @@ func TestVMReconcilePowerOnExistingDefinedStoppedFailedStarts(t *testing.T) {
 	}
 }
 
-func TestVMReconcileShutdownRunningRequestsStopWithDelayedRequeue(t *testing.T) {
+// TestVMReconcileOffAcpiRunningRequestsStopWithDelayedRequeue proves that a live
+// guest with desired Off + mode Acpi triggers a graceful ACPI shutdown (vmm.Stop)
+// and reports On/ShutdownRequested while the guest powers itself off, requeuing to
+// track convergence.
+func TestVMReconcileOffAcpiRunningRequestsStopWithDelayedRequeue(t *testing.T) {
 	obj := validVMObject()
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
 	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -505,15 +510,22 @@ func TestVMReconcileShutdownRunningRequestsStopWithDelayedRequeue(t *testing.T) 
 	if runner.stopCalls != 1 {
 		t.Fatalf("Stop called %d times, want 1", runner.stopCalls)
 	}
+	if runner.killCalls != 0 {
+		t.Fatalf("Kill called %d times, want 0 for Acpi mode", runner.killCalls)
+	}
 	status := dep.lastPatch(t)
 	if status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionShutdownRequested {
 		t.Fatalf("patched status = %+v, want On/ShutdownRequested", status)
 	}
 }
 
-func TestVMReconcileShutdownStoppedIsConvergedNoOp(t *testing.T) {
+// TestVMReconcileOffAcpiStoppedIsConvergedNoOp proves a dead guest with desired
+// Off + mode Acpi has already reached Off: no Stop/Kill, no requeue, just a
+// Stopped/Off/None status.
+func TestVMReconcileOffAcpiStoppedIsConvergedNoOp(t *testing.T) {
 	obj := validVMObject()
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped}
 	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -534,9 +546,13 @@ func TestVMReconcileShutdownStoppedIsConvergedNoOp(t *testing.T) {
 	}
 }
 
-func TestVMReconcilePowerOffRunningKillsWithDelayedRequeue(t *testing.T) {
+// TestVMReconcileOffForceRunningKillsWithDelayedRequeue proves that a live guest
+// with desired Off + mode Force triggers a forced power-off (vmm.Kill) and reports
+// On/PoweringOff while the process is torn down, requeuing to track convergence.
+func TestVMReconcileOffForceRunningKillsWithDelayedRequeue(t *testing.T) {
 	obj := validVMObject()
 	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeForce
 	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
 	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -551,16 +567,46 @@ func TestVMReconcilePowerOffRunningKillsWithDelayedRequeue(t *testing.T) {
 	if runner.killCalls != 1 {
 		t.Fatalf("Kill called %d times, want 1", runner.killCalls)
 	}
+	if runner.stopCalls != 0 {
+		t.Fatalf("Stop called %d times, want 0 for Force mode", runner.stopCalls)
+	}
 	status := dep.lastPatch(t)
 	if status.ObservedPowerState != vmv1.ObservedPowerStateOn || status.PowerTransition != vmv1.PowerTransitionPoweringOff {
 		t.Fatalf("patched status = %+v, want On/PoweringOff", status)
 	}
 }
 
+// TestVMReconcileOffForceStoppedIsConvergedNoOp proves a dead guest with desired
+// Off + mode Force has already reached Off: no Stop/Kill, no requeue.
+func TestVMReconcileOffForceStoppedIsConvergedNoOp(t *testing.T) {
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeForce
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped}
+	dep := readyVMDepReader(obj)
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	if runner.stopCalls != 0 || runner.killCalls != 0 || runner.startCalls != 0 {
+		t.Fatalf("start=%d stop=%d kill=%d, want 0/0/0", runner.startCalls, runner.stopCalls, runner.killCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseStopped || status.ObservedPowerState != vmv1.ObservedPowerStateOff || status.PowerTransition != vmv1.PowerTransitionNone {
+		t.Fatalf("patched status = %+v, want Stopped/Off/None", status)
+	}
+}
+
 func TestVMReconcileStopFailurePatchesStructuredStatusAndDelayedError(t *testing.T) {
 	stopErr := errors.New("acpi failed")
 	obj := validVMObject()
-	obj.Spec.PowerState = vmv1.PowerStateShutdown
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning, stopErr: stopErr}
 	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -585,6 +631,7 @@ func TestVMReconcileKillFailurePatchesStructuredStatusAndDelayedError(t *testing
 	killErr := errors.New("kill failed")
 	obj := validVMObject()
 	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeForce
 	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning, killErr: killErr}
 	dep := readyVMDepReader(obj)
 	c := NewVMController(runner, dep, cpu.ModelHost)
@@ -675,9 +722,11 @@ func TestVMReconcileUsesFreshPowerStateBeforeKilling(t *testing.T) {
 
 func TestVMReconcileUsesFreshPowerStateBeforeShutdown(t *testing.T) {
 	stale := validVMObject()
-	stale.Spec.PowerState = vmv1.PowerStateShutdown
+	stale.Spec.PowerState = vmv1.PowerStateOff
+	stale.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 	current := stale
 	current.Spec.PowerState = vmv1.PowerStateOn
+	current.Spec.PowerOffMode = ""
 	runner := &fakeVMRunner{statusPhase: vmm.PhaseRunning}
 	dep := readyVMDepReader(current)
 	c := NewVMController(runner, dep, cpu.ModelHost)
