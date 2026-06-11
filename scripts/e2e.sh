@@ -283,6 +283,8 @@ start_lima_govirtlet() {
 				--owner-uid $owner_uid \
 				--owner-gid $owner_gid \
 				--guest-cpu host \
+				--qemu-binary /usr/bin/qemu-system-aarch64 \
+				--firmware /usr/share/AAVMF/AAVMF_CODE.fd \
 				>/govirta-cache/govirtlet.log 2>&1 &
 			echo \$! >/govirta-cache/govirtlet.pid
 		"
