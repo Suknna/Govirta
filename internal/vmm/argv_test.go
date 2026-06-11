@@ -57,6 +57,62 @@ func TestDeriveBuilderDeterministic(t *testing.T) {
 	}
 }
 
+// TestDeriveBuilderRendersNoNICWhenDiskOnly pins the fix for the QEMU default
+// NIC defect: a disk-only VM (no NICs) must render an explicit "-nic none" so
+// QEMU does not auto-add a default NIC that loads a missing PXE option ROM
+// (efi-virtio.rom), which aborts spawn on hosts without that ROM. Explicit over
+// implicit: production argv must never rely on QEMU network defaults.
+func TestDeriveBuilderRendersNoNICWhenDiskOnly(t *testing.T) {
+	spec := SpecSummary{
+		Name:      "vm-disk-only",
+		Arch:      "aarch64",
+		VCPUs:     1,
+		MemoryMiB: 256,
+		CPUModel:  "host",
+		Disks:     []DiskSpec{{Path: "/var/lib/govirta/root.qcow2"}},
+		NICs:      nil,
+	}
+	b, err := deriveBuilder(spec, testNodeEnv)
+	if err != nil {
+		t.Fatalf("deriveBuilder: %v", err)
+	}
+	vm, err := b.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	argv := strings.Join(vm.Argv(), " ")
+	if !strings.Contains(argv, "-nic none") {
+		t.Fatalf("disk-only VM must render -nic none to suppress QEMU default NIC, got: %s", argv)
+	}
+}
+
+// TestDeriveBuilderOmitsNoNICWhenNICsPresent proves the -nic none suppression is
+// conditional: a VM with explicit NICs must NOT carry -nic none (its real NIC
+// already governs networking, and the explicit virtio-net-pci disables its ROM).
+func TestDeriveBuilderOmitsNoNICWhenNICsPresent(t *testing.T) {
+	spec := SpecSummary{
+		Name:      "vm-with-nic",
+		Arch:      "aarch64",
+		VCPUs:     1,
+		MemoryMiB: 256,
+		CPUModel:  "host",
+		Disks:     []DiskSpec{{Path: "/var/lib/govirta/root.qcow2"}},
+		NICs:      []NICSpec{{TapName: "gvtap0", MAC: "02:00:00:00:00:01"}},
+	}
+	b, err := deriveBuilder(spec, testNodeEnv)
+	if err != nil {
+		t.Fatalf("deriveBuilder: %v", err)
+	}
+	vm, err := b.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	argv := strings.Join(vm.Argv(), " ")
+	if strings.Contains(argv, "-nic none") {
+		t.Fatalf("VM with explicit NIC must not render -nic none, got: %s", argv)
+	}
+}
+
 func TestMapArchRejectsUnknown(t *testing.T) {
 	if _, _, err := mapArch("riscv64"); err == nil {
 		t.Fatal("unknown arch must error")

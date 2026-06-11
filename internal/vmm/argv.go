@@ -74,6 +74,14 @@ func deriveBuilder(spec SpecSummary, env NodeEnv) (*qemu.Builder, error) {
 		})
 	}
 
+	// 无网卡时显式渲染 -nic none：否则 QEMU 自动添加一个 default NIC，该 NIC 在
+	// aarch64 virt 上尝试加载缺失的 efi-virtio.rom option ROM 导致 spawn 失败。
+	// 显式优于隐式——production argv 绝不依赖 QEMU 隐式网络默认（与显式 NIC 设的
+	// romfile= 同源：本项目从不加载 PXE/网络 option ROM）。
+	if len(spec.NICs) == 0 {
+		b = b.NoNIC()
+	}
+
 	return b, nil
 }
 
