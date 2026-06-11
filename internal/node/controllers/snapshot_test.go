@@ -68,6 +68,9 @@ type snapVMRunner struct {
 func (f *snapVMRunner) Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error) {
 	return vmm.VM{}, nil
 }
+func (f *snapVMRunner) Redefine(ctx context.Context, uuid string, spec vmm.SpecSummary) (vmm.VM, error) {
+	return vmm.VM{}, nil
+}
 func (f *snapVMRunner) Start(ctx context.Context, uuid string) (vmm.VM, error) { return vmm.VM{}, nil }
 func (f *snapVMRunner) Stop(ctx context.Context, uuid string) error            { return nil }
 func (f *snapVMRunner) Kill(ctx context.Context, uuid string) error            { return nil }

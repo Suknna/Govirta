@@ -28,6 +28,7 @@ import (
 // *vmm.VMMService satisfies it (积木式 + 可测).
 type VMRunner interface {
 	Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error)
+	Redefine(ctx context.Context, uuid string, spec vmm.SpecSummary) (vmm.VM, error)
 	Start(ctx context.Context, uuid string) (vmm.VM, error)
 	Stop(ctx context.Context, uuid string) error
 	Status(ctx context.Context, uuid string) (vmm.VM, error)

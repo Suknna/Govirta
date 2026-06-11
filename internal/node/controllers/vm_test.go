@@ -33,15 +33,20 @@ type fakeVMRunner struct {
 	stopErr    error
 	startPhase vmm.Phase
 
+	redefineErr   error
+	redefinePhase vmm.Phase
+
 	killErr   error
 	deleteErr error
 
-	createCalls int
-	startCalls  int
-	stopCalls   int
-	killCalls   int
-	deleteCalls int
-	lastCreate  vmm.CreateRequest
+	createCalls   int
+	startCalls    int
+	stopCalls     int
+	killCalls     int
+	deleteCalls   int
+	redefineCalls int
+	lastCreate    vmm.CreateRequest
+	lastRedefine  vmm.SpecSummary
 }
 
 func (f *fakeVMRunner) Create(ctx context.Context, req vmm.CreateRequest) (vmm.VM, error) {
@@ -53,6 +58,20 @@ func (f *fakeVMRunner) Create(ctx context.Context, req vmm.CreateRequest) (vmm.V
 		return vmm.VM{}, f.createErr
 	}
 	return vmm.VM{UUID: req.UUID, Phase: vmm.PhaseDefined}, nil
+}
+
+// Redefine records the cold config-drift convergence call the controller issues
+// when a VM's desired SpecSummary diverges from the live persisted Spec, and
+// returns a canned phase/error. Faithful to *vmm.VMMService.
+func (f *fakeVMRunner) Redefine(ctx context.Context, uuid string, spec vmm.SpecSummary) (vmm.VM, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.redefineCalls++
+	f.lastRedefine = spec
+	if f.redefineErr != nil {
+		return vmm.VM{}, f.redefineErr
+	}
+	return vmm.VM{UUID: uuid, Spec: spec, Phase: f.redefinePhase}, nil
 }
 
 func (f *fakeVMRunner) Start(ctx context.Context, uuid string) (vmm.VM, error) {
