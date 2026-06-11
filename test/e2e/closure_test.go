@@ -112,15 +112,18 @@ func TestDistributedSpineClosure(t *testing.T) {
 	g := newGuest(t)
 
 	// Forward segment: apply dependencies first, define the VM while powered Off,
-	// then drive declared power intent through On, Shutdown, and Off updates.
+	// then drive declared power intent through the two-dimensional power model:
+	// On, Off+Acpi (graceful ACPI), On again, Off+Force (forced power-off).
 	applySpineDependencies(ctx, t, ctl, server, manifests)
 	waitObjectPhase(ctx, t, ctl, server, "NIC", nicName, "ready", 3*time.Minute)
 
 	tmpDir := t.TempDir()
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off")
+	// Scenario 1: create powerState=Off + powerOffMode=Acpi → defined, Off/None.
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off", "Acpi")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
 
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On")
+	// Scenario 2: update powerState=On (powerOffMode empty) → running, On/None.
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On", "")
 	waitVMOnRunning(ctx, t, ctl, server)
 
 	// MAC 透传 live 铁证：正在运行的 QEMU 进程 argv 必须携带控制面分配的 NIC.spec.MAC，
@@ -132,11 +135,23 @@ func TestDistributedSpineClosure(t *testing.T) {
 	assignedMAC := readNICMAC(ctx, t, ctl, server, nicName)
 	g.AssertRunningQEMUArgvHasMAC(ctx, vmUID, assignedMAC)
 
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Shutdown")
-	waitVMShutdownRequestedOrOff(ctx, t, ctl, server, 2*time.Minute)
-
-	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off")
+	// Scenario 3: update powerState=Off + powerOffMode=Acpi → graceful ACPI
+	// shutdown. CirrOS 0.6.2 supports ACPI shutdown (≥0.3.1), so this verifies
+	// true convergence to Off (not just that Stop was issued).
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off", "Acpi")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	// Scenario 4: update powerState=On → running again.
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On", "")
+	waitVMOnRunning(ctx, t, ctl, server)
+
+	// Scenario 5: update powerState=Off + powerOffMode=Force → forced power-off
+	// (vmm.Kill). Does not depend on guest cooperation; the QEMU process must be
+	// gone. Verify both the master status (Off/None) and the live absence of any
+	// QEMU process keyed by the VM uid (上下一致).
+	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off", "Force")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+	g.AssertNoQEMUProcess(ctx, vmUID)
 
 	// Cold-snapshot segment: the VM has just converged to Off/stopped, which is
 	// the cold precondition for taking and deleting an integral snapshot. Run the
@@ -150,7 +165,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// deleteAndVerify 删净，qcow2 不带内部快照，扩容路径不与快照交互。
 	coldResizeVolume(ctx, t, ctl, server, manifests, tmpDir, g)
 
-	expectShutdownCreateRejected(ctx, t, ctl, server, manifests, tmpDir)
+	expectPowerAdmissionRejections(ctx, t, ctl, server, manifests, tmpDir)
 
 	// Reverse segment: tear the spine down and prove the deletion lifecycle.
 	teardownSpine(ctx, t, ctl, server, g)
@@ -170,27 +185,46 @@ func applySpineDependencies(ctx context.Context, t *testing.T, ctl, server, mani
 	}
 }
 
-func applyVMVariant(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir, name, uid, powerState string) {
+func applyVMVariant(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir, name, uid, powerState, powerOffMode string) {
 	t.Helper()
-	path := writeVMManifestVariant(t, filepath.Join(manifests, vmManifestName), tmpDir, name, uid, powerState)
+	path := writeVMManifestVariant(t, filepath.Join(manifests, vmManifestName), tmpDir, name, uid, powerState, powerOffMode)
 	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
 	if err != nil {
-		t.Fatalf("apply VM %s powerState %s failed: %v\noutput:\n%s", name, powerState, err, out)
+		t.Fatalf("apply VM %s powerState %s/%s failed: %v\noutput:\n%s", name, powerState, powerOffMode, err, out)
 	}
-	t.Logf("applied VM %s powerState %s: %s", name, powerState, strings.TrimSpace(out))
+	t.Logf("applied VM %s powerState %s/%s: %s", name, powerState, powerOffMode, strings.TrimSpace(out))
 }
 
-func expectShutdownCreateRejected(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir string) {
+// expectPowerAdmissionRejections proves the apiserver admission rejects the
+// three illegal create-time power specs from design §7 scenario 6:
+//   - powerState=Shutdown (the removed value is no longer a valid powerState)
+//   - powerState=On with a non-empty powerOffMode (mode must be empty when On)
+//   - powerState=Off with an empty powerOffMode (mode is required when Off)
+//
+// Each must be rejected by govirtctl apply (non-nil error); the value
+// dimensions are exercised through writeVMManifestVariant so the rejection
+// comes from the real admission chain, not a client-side check.
+func expectPowerAdmissionRejections(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir string) {
 	t.Helper()
-	path := writeVMManifestVariant(t, filepath.Join(manifests, vmManifestName), tmpDir, "vm-shutdown-create-rejected", "vm-shutdown-create-rejected-001", "Shutdown")
-	out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
-	if err == nil {
-		t.Fatalf("create VM with powerState Shutdown must be rejected, but it was accepted:\n%s", out)
+	base := filepath.Join(manifests, vmManifestName)
+	cases := []struct {
+		name         string
+		powerState   string
+		powerOffMode string
+	}{
+		{"shutdown-create-rejected", "Shutdown", ""},
+		{"on-with-mode-rejected", "On", "Acpi"},
+		{"off-missing-mode-rejected", "Off", ""},
 	}
-	if !strings.Contains(out, "Shutdown is only valid for VM updates") && !strings.Contains(out, "powerState Shutdown") {
-		t.Fatalf("create VM Shutdown rejection should include admission error, got:\n%s", out)
+	for _, tc := range cases {
+		objName := "vm-" + tc.name
+		path := writeVMManifestVariant(t, base, tmpDir, objName, objName+"-001", tc.powerState, tc.powerOffMode)
+		out, err := runCtl(ctx, ctl, "apply", "--server", server, "-f", path)
+		if err == nil {
+			t.Fatalf("create VM (powerState=%q powerOffMode=%q) must be rejected, but it was accepted:\n%s", tc.powerState, tc.powerOffMode, out)
+		}
+		t.Logf("create VM (powerState=%q powerOffMode=%q) correctly rejected: %s", tc.powerState, tc.powerOffMode, strings.TrimSpace(out))
 	}
-	t.Logf("create VM with powerState Shutdown correctly rejected: %s", strings.TrimSpace(out))
 }
 
 func snapshotColdCycle(ctx context.Context, t *testing.T, ctl, server, manifests string, g *Guest) {
@@ -354,7 +388,11 @@ func writeVolumeManifestVariant(t *testing.T, basePath, tmpDir string, capacityB
 	return path
 }
 
-func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState string) string {
+// writeVMManifestVariant renders a VM manifest with the given powerState and
+// powerOffMode. An empty powerOffMode removes the field entirely (required for
+// powerState=On, where the two-dimensional power model forbids a non-empty
+// powerOffMode); a non-empty value sets it (required for powerState=Off).
+func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerState, powerOffMode string) string {
 	t.Helper()
 	body, err := os.ReadFile(basePath)
 	if err != nil {
@@ -369,12 +407,17 @@ func writeVMManifestVariant(t *testing.T, basePath, tmpDir, name, uid, powerStat
 	metadata["uid"] = uid
 	spec := objectMap(t, manifest, "spec")
 	spec["powerState"] = powerState
+	if powerOffMode == "" {
+		delete(spec, "powerOffMode")
+	} else {
+		spec["powerOffMode"] = powerOffMode
+	}
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		t.Fatalf("encode VM manifest variant %s/%s: %v", name, powerState, err)
 	}
-	path := filepath.Join(tmpDir, fmt.Sprintf("%s-%s.json", name, powerState))
+	path := filepath.Join(tmpDir, fmt.Sprintf("%s-%s-%s.json", name, powerState, powerOffMode))
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		t.Fatalf("write VM manifest variant %q: %v", path, err)
 	}
@@ -447,30 +490,6 @@ func waitVMOffConverged(ctx context.Context, t *testing.T, ctl, server string, t
 		time.Sleep(3 * time.Second)
 	}
 	t.Fatalf("VM %s did not reach Off/None before deadline\nlast get:\n%s", vmName, last)
-}
-
-func waitVMShutdownRequestedOrOff(ctx context.Context, t *testing.T, ctl, server string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var last string
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			t.Fatalf("context ended before VM reached shutdown request or Off/None: %v\nlast get:\n%s", err, last)
-		}
-		out, err := runCtl(ctx, ctl, "get", "--server", server, "VM", vmName)
-		last = out
-		status := decodeVMStatus(t, out)
-		if err == nil {
-			shutdownRequested := status.ObservedPowerState == "On" && status.PowerTransition == "ShutdownRequested"
-			alreadyOff := status.ObservedPowerState == "Off" && status.PowerTransition == "None"
-			if shutdownRequested || alreadyOff {
-				t.Logf("VM %s reached shutdown convergence checkpoint:\n%s", vmName, out)
-				return
-			}
-		}
-		time.Sleep(3 * time.Second)
-	}
-	t.Fatalf("VM %s did not reach ShutdownRequested or Off/None before deadline\nlast get:\n%s", vmName, last)
 }
 
 type vmStatusSnapshot struct {
