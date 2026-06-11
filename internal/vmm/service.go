@@ -18,6 +18,21 @@ import (
 // 存活的依赖（spec 硬约束 1）。
 type QMPFactory func(socketPath string) (qmp.Client, error)
 
+// NodeEnv 是节点级 QEMU 运行时环境：同一 node 上所有 guest 共享、与具体 VM
+// 无关的环境配置。它与 per-VM 的 SpecSummary 是两个独立的配置轴——SpecSummary
+// 承载「这台 VM 是什么样」（vcpu/内存/磁盘/网卡/MAC），NodeEnv 承载「这台 node
+// 的 QEMU 装在哪、固件在哪」。节点级环境不放进 SpecSummary，避免每台 VM 冗余
+// 重复同一份节点信息。
+type NodeEnv struct {
+	// QEMUBinary 是本节点 QEMU 可执行文件的绝对路径（如 /usr/libexec/qemu-kvm）。
+	// 必填：不退回 PATH 默认（显式铁律，且非默认安装路径如 Rocky 必须显式提供）。
+	QEMUBinary string
+	// Firmware 是本节点 guest 固件镜像路径（aarch64 virt 磁盘引导需 edk2，
+	// memory 868）。显式可空：空字符串 = 不渲染 -bios（x86_64 q35 自带 SeaBIOS，
+	// 无需显式固件）。
+	Firmware string
+}
+
 // VMMService 是节点本地 QEMU 进程生命周期领域服务（spec §3）。
 //
 // 它不长期持有 qmp.Client，也不缓存运行时态：运行时态永远从 live 探测
@@ -27,11 +42,12 @@ type VMMService struct {
 	runtimeRoot string
 	proc        proc.ProcessController
 	qmpFactory  QMPFactory
+	env         NodeEnv
 }
 
 // NewVMMService 构造服务。runtimeRoot 通常是 /var/lib/govirtlet。
-// 三个依赖全部必填（显式铁律：不为调用方推断默认值）。
-func NewVMMService(runtimeRoot string, pc proc.ProcessController, qf QMPFactory) (*VMMService, error) {
+// 依赖全部必填（显式铁律：不为调用方推断默认值）。env.QEMUBinary 必填。
+func NewVMMService(runtimeRoot string, pc proc.ProcessController, qf QMPFactory, env NodeEnv) (*VMMService, error) {
 	if runtimeRoot == "" {
 		return nil, fmt.Errorf("%w: runtime root is required", ErrInvalidRequest)
 	}
@@ -41,7 +57,10 @@ func NewVMMService(runtimeRoot string, pc proc.ProcessController, qf QMPFactory)
 	if qf == nil {
 		return nil, fmt.Errorf("%w: qmp factory is required", ErrInvalidRequest)
 	}
-	return &VMMService{runtimeRoot: runtimeRoot, proc: pc, qmpFactory: qf}, nil
+	if env.QEMUBinary == "" {
+		return nil, fmt.Errorf("%w: node env QEMU binary is required", ErrInvalidRequest)
+	}
+	return &VMMService{runtimeRoot: runtimeRoot, proc: pc, qmpFactory: qf, env: env}, nil
 }
 
 // Create 渲染 facility-injected argv 并落盘 vm.json，不 spawn。intent=Defined。
@@ -60,7 +79,7 @@ func (s *VMMService) Create(ctx context.Context, req CreateRequest) (VM, error) 
 		return VM{}, fmt.Errorf("vmm: probe existing state for %s: %w", req.UUID, err)
 	}
 
-	builder, err := deriveBuilder(req.Spec)
+	builder, err := deriveBuilder(req.Spec, s.env)
 	if err != nil {
 		return VM{}, err
 	}

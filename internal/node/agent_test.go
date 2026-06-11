@@ -107,6 +107,7 @@ func TestNewAgentAssemblesControllerManager(t *testing.T) {
 		NodeName:        "node-test",
 		RuntimeRoot:     t.TempDir(),
 		ImageSourceRoot: t.TempDir(),
+		QEMUBinary:      "/usr/bin/qemu-system-aarch64",
 	})
 	if err != nil {
 		t.Fatalf("NewAgent() error = %v, want nil", err)

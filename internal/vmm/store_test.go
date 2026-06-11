@@ -91,7 +91,7 @@ func TestDecodeStateRejectsMalformedJSON(t *testing.T) {
 // TestLoadStateNotFound 断言 vm.json 不存在映射为 ErrNotFound。
 func TestLoadStateNotFound(t *testing.T) {
 	fc := newFakeController()
-	svc, err := NewVMMService("/var/lib/govirtlet", fc, stubQMPFactory(&fakeQMPClient{}))
+	svc, err := NewVMMService("/var/lib/govirtlet", fc, stubQMPFactory(&fakeQMPClient{}), testNodeEnv)
 	if err != nil {
 		t.Fatalf("NewVMMService() error = %v", err)
 	}
@@ -104,7 +104,7 @@ func TestLoadStateNotFound(t *testing.T) {
 // TestWriteThenLoadStateRoundTrip 断言 writeState 落盘后 loadState 能读回。
 func TestWriteThenLoadStateRoundTrip(t *testing.T) {
 	fc := newFakeController()
-	svc, err := NewVMMService("/var/lib/govirtlet", fc, stubQMPFactory(&fakeQMPClient{}))
+	svc, err := NewVMMService("/var/lib/govirtlet", fc, stubQMPFactory(&fakeQMPClient{}), testNodeEnv)
 	if err != nil {
 		t.Fatalf("NewVMMService() error = %v", err)
 	}

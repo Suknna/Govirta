@@ -15,41 +15,27 @@ import (
 
 	"github.com/suknna/govirta/internal/vmm"
 	vmmproc "github.com/suknna/govirta/internal/vmm/proc"
-	"github.com/suknna/govirta/pkg/virt/qemu"
-	"github.com/suknna/govirta/pkg/virt/qemu/blockdev"
-	"github.com/suknna/govirta/pkg/virt/qemu/cpu"
-	"github.com/suknna/govirta/pkg/virt/qemu/device"
-	"github.com/suknna/govirta/pkg/virt/qemu/display"
-	"github.com/suknna/govirta/pkg/virt/qemu/machine"
 )
 
-// vmmBootBuilder 构造一台 cirros aarch64 VM 的「配置好但未 Build」builder。
-// 用 direct-kernel boot（cirros aarch64 无 EFI bootloader 无法从磁盘独立启动），
-// 不设 -daemonize/-pidfile/-qmp/-serial/-vnc——这些运行时设施 flag 由 vmm
-// facility 注入。NoNIC 让 lifecycle 测试聚焦进程生命周期，不依赖 host 网络。
-// 不设 NoShutdown：ACPI powerdown 必须让 QEMU 退出，graceful Stop 才能到 Stopped。
-func vmmBootBuilder(env hostnetAcceptanceEnv, diskPath string) *qemu.Builder {
-	return qemu.NewVM(qemu.ArchAArch64).
-		Binary(env.QEMU).
-		Machine(machine.ProfileAArch64VirtKVM).
-		CPU(cpu.ModelHost).
-		SMP(qemu.SMP{CPUs: 1, Cores: 1, Threads: 1, Sockets: 1}).
-		Memory(qemu.MiB(256)).
-		Kernel(env.Kernel).
-		Initrd(env.Initramfs).
-		Append("console=ttyAMA0 ds=none").
-		AddBlockdev(blockdev.Qcow2{
-			NodeName: "root",
-			File:     blockdev.FileProtocol{Filename: diskPath},
-			AIO:      blockdev.AIOThreads,
-		}).
-		AddDevice(device.VirtioBlkPCI{
-			ID:        "rootdev",
-			Drive:     blockdev.Ref("root"),
-			BootIndex: qemu.Int(1),
-		}).
-		NoNIC().
-		Display(display.None)
+// vmmNodeEnv 从 acceptance env 构造节点级运行时环境：QEMU 二进制 + edk2 固件。
+// aarch64 virt 磁盘引导需 edk2 固件（memory 868），由 NodeEnv.Firmware 提供，
+// vmm 的 deriveBuilder 在 production 路径渲染 -bios——这正是 production 真实走的路。
+func vmmNodeEnv(env hostnetAcceptanceEnv) vmm.NodeEnv {
+	return vmm.NodeEnv{QEMUBinary: env.QEMU, Firmware: env.Firmware}
+}
+
+// vmmBootSpec 构造一台 cirros aarch64 VM 的 per-VM 配置权威（SpecSummary）。
+// 走 production 磁盘引导路径（不再 direct-kernel）：cirros aarch64 磁盘镜像配合
+// NodeEnv 的 edk2 固件可从磁盘 UEFI 引导。无网卡让 lifecycle 测试聚焦进程生命周期。
+func vmmBootSpec(name, diskPath string) vmm.SpecSummary {
+	return vmm.SpecSummary{
+		Name:      name,
+		Arch:      "aarch64",
+		VCPUs:     1,
+		MemoryMiB: 256,
+		CPUModel:  "host",
+		Disks:     []vmm.DiskSpec{{Path: diskPath}},
+	}
 }
 
 // TestVMMLifecycleEndToEnd 用真实 Linux ProcessController + 真实 QEMU daemonize
@@ -66,16 +52,15 @@ func TestVMMLifecycleEndToEnd(t *testing.T) {
 		t.Fatalf("copy cirros image: %v", err)
 	}
 
-	svc, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory)
+	svc, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory, vmmNodeEnv(env))
 	if err != nil {
 		t.Fatalf("NewVMMService() error = %v", err)
 	}
 
 	const uuid = "vm1"
 	created, err := svc.Create(ctx, vmm.CreateRequest{
-		UUID:    uuid,
-		Builder: vmmBootBuilder(env, diskPath),
-		Spec:    vmm.SpecSummary{Arch: "aarch64", VCPUs: 1, MemoryMiB: 256, DiskPaths: []string{diskPath}},
+		UUID: uuid,
+		Spec: vmmBootSpec(uuid, diskPath),
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -125,7 +110,7 @@ func TestVMMLifecycleEndToEnd(t *testing.T) {
 
 	// 模拟编排器重启：丢弃 svc，新建 svc2（同 runtimeRoot），Discover 仍 Running，
 	// 证明发现/接管不依赖进程内存，只靠落盘 vm.json + live 探测。
-	svc2, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory)
+	svc2, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory, vmmNodeEnv(env))
 	if err != nil {
 		t.Fatalf("NewVMMService() restart error = %v", err)
 	}
@@ -195,15 +180,14 @@ func TestVMMDiscoverNeverRestartsDeadVM(t *testing.T) {
 		t.Fatalf("copy cirros image: %v", err)
 	}
 
-	svc, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory)
+	svc, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory, vmmNodeEnv(env))
 	if err != nil {
 		t.Fatalf("NewVMMService() error = %v", err)
 	}
 	const uuid = "vm-dead"
 	created, err := svc.Create(ctx, vmm.CreateRequest{
-		UUID:    uuid,
-		Builder: vmmBootBuilder(env, diskPath),
-		Spec:    vmm.SpecSummary{Arch: "aarch64", VCPUs: 1, MemoryMiB: 256, DiskPaths: []string{diskPath}},
+		UUID: uuid,
+		Spec: vmmBootSpec(uuid, diskPath),
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -233,7 +217,7 @@ func TestVMMDiscoverNeverRestartsDeadVM(t *testing.T) {
 	waitForProcessGone(t, ctx, pid)
 
 	// 新建 service（模拟重启），Discover 必须把该 VM 判为 Failed 且不拉起。
-	svc2, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory)
+	svc2, err := vmm.NewVMMService(runtimeRoot, vmmproc.NewLinuxController(), vmm.ProductionQMPFactory, vmmNodeEnv(env))
 	if err != nil {
 		t.Fatalf("NewVMMService() restart error = %v", err)
 	}

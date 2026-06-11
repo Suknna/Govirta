@@ -15,7 +15,7 @@ func TestDeriveBuilderFillsMACAndDisks(t *testing.T) {
 		Disks:     []DiskSpec{{Path: "/var/lib/govirta/d0.qcow2"}},
 		NICs:      []NICSpec{{TapName: "gvtap0", MAC: "02:00:00:00:00:01"}},
 	}
-	b, err := deriveBuilder(spec)
+	b, err := deriveBuilder(spec, testNodeEnv)
 	if err != nil {
 		t.Fatalf("deriveBuilder: %v", err)
 	}
@@ -41,11 +41,11 @@ func TestDeriveBuilderDeterministic(t *testing.T) {
 		Disks: []DiskSpec{{Path: "/a.qcow2"}},
 		NICs:  []NICSpec{{TapName: "gvtap0", MAC: "02:00:00:00:00:02"}},
 	}
-	b1, err := deriveBuilder(spec)
+	b1, err := deriveBuilder(spec, testNodeEnv)
 	if err != nil {
 		t.Fatalf("deriveBuilder 1: %v", err)
 	}
-	b2, err := deriveBuilder(spec)
+	b2, err := deriveBuilder(spec, testNodeEnv)
 	if err != nil {
 		t.Fatalf("deriveBuilder 2: %v", err)
 	}

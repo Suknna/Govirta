@@ -54,6 +54,8 @@ func parseConfig(args []string) (node.Config, error) {
 	ownerUID := fs.Int("owner-uid", -1, "OS uid that owns guest TAP devices (the user QEMU runs as) (required)")
 	ownerGID := fs.Int("owner-gid", -1, "OS gid that owns guest TAP devices (required)")
 	guestCPU := fs.String("guest-cpu", "host", "QEMU CPU model the node runs guests with")
+	qemuBinary := fs.String("qemu-binary", "", "absolute path to this node's QEMU executable, e.g. /usr/libexec/qemu-kvm (required)")
+	firmware := fs.String("firmware", "", "guest firmware image path (aarch64 virt disk-boot needs edk2); empty renders no -bios (x86_64 q35 ships SeaBIOS)")
 
 	if err := fs.Parse(args); err != nil {
 		return node.Config{}, fmt.Errorf("govirtlet: parse flags: %w", err)
@@ -77,6 +79,9 @@ func parseConfig(args []string) (node.Config, error) {
 	if *ownerGID < 0 {
 		return node.Config{}, fmt.Errorf("govirtlet: --owner-gid is required and must be non-negative")
 	}
+	if *qemuBinary == "" {
+		return node.Config{}, fmt.Errorf("govirtlet: --qemu-binary is required")
+	}
 
 	return node.Config{
 		MasterURL:       *masterURL,
@@ -86,5 +91,7 @@ func parseConfig(args []string) (node.Config, error) {
 		OwnerUID:        link.ExplicitUID(uint32(*ownerUID)),
 		OwnerGID:        link.ExplicitGID(uint32(*ownerGID)),
 		GuestCPU:        cpu.Model(*guestCPU),
+		QEMUBinary:      *qemuBinary,
+		Firmware:        *firmware,
 	}, nil
 }

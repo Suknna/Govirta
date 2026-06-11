@@ -6,10 +6,14 @@ import (
 	"testing"
 )
 
+// testNodeEnv 是单测用的节点级运行时环境：QEMUBinary 必填，固件留空
+// （单测不真正引导 guest，只验 argv 渲染与进程生命周期逻辑）。
+var testNodeEnv = NodeEnv{QEMUBinary: "/usr/bin/qemu-system-aarch64"}
+
 // newTestService 构造一个注入 fake 依赖的 VMMService，供生命周期单测使用。
 func newTestService(t *testing.T, fc *fakeController, qc *fakeQMPClient) *VMMService {
 	t.Helper()
-	svc, err := NewVMMService("/var/lib/govirtlet", fc, stubQMPFactory(qc))
+	svc, err := NewVMMService("/var/lib/govirtlet", fc, stubQMPFactory(qc), testNodeEnv)
 	if err != nil {
 		t.Fatalf("NewVMMService() error = %v", err)
 	}
@@ -36,10 +40,12 @@ func TestNewVMMServiceRejectsMissingDependencies(t *testing.T) {
 		runtimeRoot string
 		pc          *fakeController
 		qf          QMPFactory
+		env         NodeEnv
 	}{
-		{name: "empty_runtime_root", runtimeRoot: "", pc: fc, qf: stubQMPFactory(&fakeQMPClient{})},
-		{name: "nil_controller", runtimeRoot: "/var/lib/govirtlet", pc: nil, qf: stubQMPFactory(&fakeQMPClient{})},
-		{name: "nil_qmp_factory", runtimeRoot: "/var/lib/govirtlet", pc: fc, qf: nil},
+		{name: "empty_runtime_root", runtimeRoot: "", pc: fc, qf: stubQMPFactory(&fakeQMPClient{}), env: testNodeEnv},
+		{name: "nil_controller", runtimeRoot: "/var/lib/govirtlet", pc: nil, qf: stubQMPFactory(&fakeQMPClient{}), env: testNodeEnv},
+		{name: "nil_qmp_factory", runtimeRoot: "/var/lib/govirtlet", pc: fc, qf: nil, env: testNodeEnv},
+		{name: "empty_qemu_binary", runtimeRoot: "/var/lib/govirtlet", pc: fc, qf: stubQMPFactory(&fakeQMPClient{}), env: NodeEnv{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,9 +56,9 @@ func TestNewVMMServiceRejectsMissingDependencies(t *testing.T) {
 			var svc *VMMService
 			var err error
 			if pc == nil {
-				svc, err = NewVMMService(tc.runtimeRoot, nil, tc.qf)
+				svc, err = NewVMMService(tc.runtimeRoot, nil, tc.qf, tc.env)
 			} else {
-				svc, err = NewVMMService(tc.runtimeRoot, pc, tc.qf)
+				svc, err = NewVMMService(tc.runtimeRoot, pc, tc.qf, tc.env)
 			}
 			if err == nil {
 				t.Fatalf("NewVMMService() error = nil, want error")
@@ -106,7 +112,7 @@ func TestCreatePersistsArgvMatchingSpecDerivation(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	// 独立派生一份 argv，证明落盘 argv == Spec 的确定性派生（无漂移）。
-	b, err := deriveBuilder(req.Spec)
+	b, err := deriveBuilder(req.Spec, testNodeEnv)
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}

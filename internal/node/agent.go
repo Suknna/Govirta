@@ -57,6 +57,14 @@ type Config struct {
 	OwnerGID link.GID
 	// GuestCPU is the QEMU CPU model the node runs guests with (e.g. host).
 	GuestCPU cpu.Model
+	// QEMUBinary is the absolute path to this node's QEMU executable (e.g.
+	// /usr/libexec/qemu-kvm). Required; the node never falls back to a PATH
+	// default. This is node-level runtime environment, not per-VM config.
+	QEMUBinary string
+	// Firmware is the guest firmware image path this node boots guests with
+	// (aarch64 virt disk-boot needs edk2, memory 868). Explicitly optional: an
+	// empty string renders no -bios (x86_64 q35 ships SeaBIOS).
+	Firmware string
 }
 
 // hostManagers bundles the host-network primitive managers plus the VM process
@@ -103,7 +111,10 @@ func NewAgent(cfg Config) (*Agent, error) {
 	networkSvc := network.NewNetworkService(netpoolSvc)
 	nicSvc := network.NewNICService(netpoolSvc)
 
-	vmmSvc, err := vmm.NewVMMService(cfg.RuntimeRoot, hm.proc, qmpFactory)
+	vmmSvc, err := vmm.NewVMMService(cfg.RuntimeRoot, hm.proc, qmpFactory, vmm.NodeEnv{
+		QEMUBinary: cfg.QEMUBinary,
+		Firmware:   cfg.Firmware,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("node: build vmm service: %w", err)
 	}
