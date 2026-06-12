@@ -14,12 +14,9 @@ import (
 )
 
 // resourceVersionHeader carries the store-assigned ResourceVersion of a single
-// fetched object. We expose it as a response header rather than re-wrapping the
-// stored JSON: the get path is a pass-through that hands back the exact bytes the
-// store holds (already valid resource JSON), so the body stays byte-identical to
-// what Apply persisted and this handler remains kind-agnostic — it never decodes
-// the object to splice a version field in. List has no single version to carry,
-// so it does not set this header.
+// fetched object. Single GET also mirrors the same version into the response body
+// metadata without mutating the stored raw JSON. List has no single version to
+// carry, so it does not set this header.
 const resourceVersionHeader = "X-Resource-Version"
 
 // getHandler binds the read verbs. GET /apis/{kind}/{name} fetches one object and
@@ -32,10 +29,11 @@ func (s *Server) getHandler(mux *http.ServeMux) {
 	mux.HandleFunc("GET /apis/{kind}", s.ListOrWatch)
 }
 
-// Get fetches a single object by kind/name and writes its raw stored JSON with
-// HTTP 200, attaching the object's ResourceVersion as the X-Resource-Version
-// header. A missing object maps to 404; any other store failure maps to 5xx. On
-// failure it writes the uniform {"error": "..."} envelope.
+// Get fetches a single object by kind/name and writes JSON with HTTP 200,
+// attaching the object's ResourceVersion as both the X-Resource-Version header
+// and response body metadata.resourceVersion. A missing object maps to 404; any
+// other store failure maps to 5xx. On failure it writes the uniform {"error":
+// "..."} envelope.
 func (s *Server) Get(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -48,11 +46,20 @@ func (s *Server) Get(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	body, err := withBodyResourceVersion(raw.Value, raw.ResourceVersion)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, err := w.Write(errorBody(internalErr(fmt.Errorf("apiserver: get inject resourceVersion: %w", err)))); err != nil {
+			zerolog.Ctx(ctx).Error().Err(err).Msg("apiserver: write get resourceVersion error response")
+		}
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(resourceVersionHeader, raw.ResourceVersion)
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(raw.Value); err != nil {
+	if _, err := w.Write(body); err != nil {
 		// The response is already committed; record the write failure rather than
 		// silently discard it.
 		zerolog.Ctx(ctx).Error().Err(err).Msg("apiserver: write get response")
@@ -60,8 +67,8 @@ func (s *Server) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 // get resolves the kind/name path to a store key and fetches it, classifying
-// ErrNotFound as 404 and every other store error as 5xx. It does not decode the
-// object: the stored bytes are returned verbatim to the caller.
+// ErrNotFound as 404 and every other store error as 5xx. The stored bytes are
+// returned without mutation; response-only shaping happens in Get.
 func (s *Server) get(ctx context.Context, r *http.Request) (store.RawObject, *apiError) {
 	kind := metav1.Kind(r.PathValue("kind"))
 	name := r.PathValue("name")

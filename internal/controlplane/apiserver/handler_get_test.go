@@ -22,7 +22,7 @@ func doGet(t *testing.T, srv *Server, path string) *httptest.ResponseRecorder {
 }
 
 func TestGetHitReturnsStoredObject(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, st := newTestServer(t)
 
 	obj := validStoragePool()
 	if rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj); rec.Code != http.StatusCreated {
@@ -34,7 +34,8 @@ func TestGetHitReturnsStoredObject(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The body is the raw stored JSON; it must decode back to the same object.
+	// The body must decode back to the same object while carrying the store
+	// ResourceVersion injected by the response path.
 	var got storagepoolv1.StoragePool
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -46,12 +47,53 @@ func TestGetHitReturnsStoredObject(t *testing.T) {
 		t.Fatalf("response storageRoot = %q, want %q", got.Spec.StorageRoot, obj.Spec.StorageRoot)
 	}
 
-	// ResourceVersion is store metadata, not part of the persisted object bytes
-	// (Apply assigns it only on its own response), so the get body — a verbatim
-	// pass-through of the stored JSON — carries none. The version is surfaced on
-	// the X-Resource-Version header instead, and must be the store-assigned value.
-	if hv := rec.Header().Get(resourceVersionHeader); hv == "" {
+	hv := rec.Header().Get(resourceVersionHeader)
+	if hv == "" {
 		t.Fatalf("%s header is empty; expected store-assigned ResourceVersion", resourceVersionHeader)
+	}
+	if got.ResourceVersion == "" {
+		t.Fatal("response body metadata.resourceVersion is empty")
+	}
+	if got.ResourceVersion != hv {
+		t.Fatalf("body resourceVersion = %q, want header %q", got.ResourceVersion, hv)
+	}
+
+	var stored storagepoolv1.StoragePool
+	if err := json.Unmarshal(storedRaw(t, st, metav1.KindStoragePool, obj.Name).Value, &stored); err != nil {
+		t.Fatalf("decode stored raw: %v", err)
+	}
+	if stored.ResourceVersion != "" {
+		t.Fatalf("stored raw metadata.resourceVersion = %q, want empty", stored.ResourceVersion)
+	}
+}
+
+func TestGetBodyResourceVersionMatchesHeaderWithoutMutatingStore(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	obj := validStoragePool()
+	if rec := doApply(t, srv, metav1.KindStoragePool, obj.Name, obj); rec.Code != http.StatusCreated {
+		t.Fatalf("seed apply status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	before := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
+	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool)+"/"+obj.Name)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	after := storedRaw(t, st, metav1.KindStoragePool, obj.Name)
+
+	var got storagepoolv1.StoragePool
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if hv := rec.Header().Get(resourceVersionHeader); got.ResourceVersion != hv || hv == "" {
+		t.Fatalf("body resourceVersion = %q, header = %q; want same non-empty value", got.ResourceVersion, hv)
+	}
+	if !bytes.Equal(before.Value, after.Value) {
+		t.Fatalf("stored raw changed after GET: before=%s after=%s", before.Value, after.Value)
+	}
+	if bytes.Contains(after.Value, []byte(`"resourceVersion"`)) {
+		t.Fatalf("stored raw unexpectedly contains resourceVersion: %s", after.Value)
 	}
 }
 
