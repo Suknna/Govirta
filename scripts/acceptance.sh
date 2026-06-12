@@ -132,6 +132,10 @@ prepare_cache() {
 
 delete_instance() {
 	LIMA_HOME="$lima_home" limactl delete --force "$instance_name" >/dev/null 2>&1 || true
+	# `limactl delete` can leave a partially-created instance directory after a
+	# failed start. Remove this fixed test instance path so the next run starts
+	# from a coherent Lima state instead of reusing corrupt metadata.
+	rm -rf "$lima_home/$instance_name"
 }
 
 run_acceptance() {
@@ -141,7 +145,10 @@ run_acceptance() {
 	trap delete_instance EXIT INT TERM
 	delete_instance
 
-	LIMA_HOME="$lima_home" limactl start --name="$instance_name" --yes "$generated_config"
+	# Govirta acceptance uses mounts, provisioning, guest agent, and nested KVM,
+	# but not Lima's built-in containerd integration. Disabling containerd avoids
+	# waiting on an unrelated optional dependency during instance startup.
+	LIMA_HOME="$lima_home" limactl start --containerd=none --timeout=20m --name="$instance_name" --yes "$generated_config"
 
 	LIMA_HOME="$lima_home" limactl shell --workdir /govirta-src "$instance_name" -- sh -eu -c '
 		if ! command -v ip >/dev/null 2>&1; then
@@ -197,7 +204,7 @@ run_acceptance_logged() {
 	log_file="$log_dir/$(timestamp)-acceptance-$mode.log"
 	printf 'writing acceptance log to %s\n' "$log_file"
 	set +e
-	run_acceptance >"$log_file" 2>&1
+	(set -e; run_acceptance) >"$log_file" 2>&1
 	status=$?
 	set -e
 	cat "$log_file" || true

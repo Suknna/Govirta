@@ -183,6 +183,10 @@ cleanup() {
 	fi
 	docker rm -f "$etcd_container" >/dev/null 2>&1 || true
 	LIMA_HOME="$lima_home" limactl delete --force "$instance_name" >/dev/null 2>&1 || true
+	# `limactl delete` can leave a partially-created instance directory after a
+	# failed start. Remove this fixed test instance path so the next run starts
+	# from a coherent Lima state instead of reusing corrupt metadata.
+	rm -rf "$lima_home/$instance_name"
 }
 
 start_etcd() {
@@ -238,7 +242,10 @@ start_govirtad() {
 }
 
 start_lima_govirtlet() {
-	LIMA_HOME="$lima_home" limactl start --name="$instance_name" --yes "$generated_config"
+	# The distributed-spine test needs mounts, provisioning, guest agent, and
+	# nested KVM, but not Lima's built-in containerd integration. Disable it so
+	# instance readiness is not gated by an unrelated optional runtime.
+	LIMA_HOME="$lima_home" limactl start --containerd=none --timeout=20m --name="$instance_name" --yes "$generated_config"
 
 	# guest 内：装备状态目录、放镜像、开转发、构建并后台启动 govirtlet 拨回 host。
 	# host.lima.internal 是 Lima guest 访问 host 的标准地址。
@@ -327,7 +334,7 @@ run_full_logged() {
 	log_file="$log_dir/$(date '+%Y-%m-%d-%H%M%S')-e2e-full.log"
 	printf 'writing e2e log to %s\n' "$log_file"
 	set +e
-	run_full >"$log_file" 2>&1
+	(set -e; run_full) >"$log_file" 2>&1
 	status=$?
 	set -e
 	cat "$log_file" || true
