@@ -15,6 +15,7 @@ type Operation string
 const (
 	OperationCreate          Operation = "Create"
 	OperationUpdate          Operation = "Update"
+	OperationReplace         Operation = "Replace"
 	OperationDelete          Operation = "Delete"
 	OperationStatusPatch     Operation = "StatusPatch"
 	OperationFinalizersPatch Operation = "FinalizersPatch"

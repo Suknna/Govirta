@@ -241,7 +241,7 @@ func (s *Server) decodeAndAdmitApply(ctx context.Context, kind metav1.Kind, name
 // caller-submitted zero-value status stands). All seven kinds carry a typed
 // Status field; the type switch mirrors decodeObjectByKind.
 func preserveUpdateStatus(req admission.Request, obj any) (any, *apiError) {
-	if req.Operation != admission.OperationUpdate {
+	if req.Operation != admission.OperationUpdate && req.Operation != admission.OperationReplace {
 		return obj, nil
 	}
 	mismatch := func() *apiError {
@@ -316,7 +316,7 @@ func injectFinalizer(meta *metav1.ObjectMeta) {
 // chosen MAC cannot be claimed by a concurrent apply between selection and write.
 // A non-empty submitted MAC is preserved as-is (already validated by Validate()).
 func (s *Server) applyNIC(ctx context.Context, key string, nic *nicv1.NIC, req admission.Request) (store.RawObject, *apiError) {
-	if req.Operation == admission.OperationUpdate {
+	if req.Operation == admission.OperationUpdate || req.Operation == admission.OperationReplace {
 		oldNIC, ok := req.OldObject.(nicv1.NIC)
 		if !ok {
 			return store.RawObject{}, internalErr(fmt.Errorf("apiserver: existing object for NIC %q has type %T", nic.Name, req.OldObject))

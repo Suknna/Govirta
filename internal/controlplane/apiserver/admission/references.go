@@ -33,7 +33,7 @@ type ReferenceValidator struct {
 func (ReferenceValidator) Name() string { return "ReferenceValidator" }
 
 func (v ReferenceValidator) Validate(ctx context.Context, req Request) error {
-	if req.Operation != OperationCreate && req.Operation != OperationUpdate {
+	if req.Operation != OperationCreate && req.Operation != OperationUpdate && req.Operation != OperationReplace {
 		return nil
 	}
 	if v.Store == nil {

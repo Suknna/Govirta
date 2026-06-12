@@ -120,7 +120,7 @@ func (s *Server) applyVM(ctx context.Context, key string, vm *vmv1.VM, req admis
 		if err := s.bindVM(ctx, vm); err != nil {
 			return store.RawObject{}, err
 		}
-	case admission.OperationUpdate:
+	case admission.OperationUpdate, admission.OperationReplace:
 		if aerr := preserveVMUpdateMetadata(req.OldObject, vm); aerr != nil {
 			return store.RawObject{}, aerr
 		}
@@ -149,7 +149,7 @@ func preserveVMUpdateMetadata(oldObject any, vm *vmv1.VM) *apiError {
 }
 
 func preserveUpdateObjectMeta(req admission.Request, meta *metav1.ObjectMeta) *apiError {
-	if req.Operation != admission.OperationUpdate {
+	if req.Operation != admission.OperationUpdate && req.Operation != admission.OperationReplace {
 		return nil
 	}
 	existing, err := admission.Metadata(req.OldObject)

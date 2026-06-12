@@ -20,6 +20,25 @@ func PostApplyChain() Chain {
 	return NewChain(NICFinalMACValidator{})
 }
 
+// PreReplaceChain returns validators for resourceVersion-guarded full-object
+// replacement before apiserver-owned preservation runs.
+func PreReplaceChain(st StoreReader) Chain {
+	return NewChain(
+		EnvelopeValidator{},
+		SpecValidator{},
+		ReplaceOperationValidator{},
+		VMPowerStateValidator{},
+		FieldPolicyValidator{},
+		ReferenceValidator{Store: st},
+	)
+}
+
+// PostReplaceChain returns validators that check the final replacement object
+// after server-owned preservation and before the CAS write.
+func PostReplaceChain() Chain {
+	return NewChain(NICFinalMACValidator{})
+}
+
 // DeleteChain returns validators for DELETE requests before the handler stamps
 // deletionTimestamp or finalizes an already-deleting object.
 func DeleteChain(st StoreReader) Chain {

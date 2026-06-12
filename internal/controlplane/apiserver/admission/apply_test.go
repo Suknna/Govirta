@@ -127,6 +127,100 @@ func TestEnvelopeValidatorRejectsUpdateUIDChangeWithConflict(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonConflict)
 }
 
+func TestEnvelopeValidatorRequiresReplaceResourceVersion(t *testing.T) {
+	old := validAdmissionVM()
+	old.ResourceVersion = "7"
+	obj := old
+	obj.ResourceVersion = ""
+
+	err := EnvelopeValidator{}.Validate(context.Background(), Request{
+		Operation: OperationReplace,
+		Kind:      metav1.KindVM,
+		Name:      obj.Name,
+		OldRaw:    []byte(`{}`),
+		OldObject: old,
+		NewObject: obj,
+	})
+	assertAdmissionReason(t, err, ReasonBadRequest)
+}
+
+func TestEnvelopeValidatorAllowsReplaceResourceVersion(t *testing.T) {
+	old := validAdmissionVM()
+	old.ResourceVersion = "7"
+	obj := old
+
+	err := EnvelopeValidator{}.Validate(context.Background(), Request{
+		Operation: OperationReplace,
+		Kind:      metav1.KindVM,
+		Name:      obj.Name,
+		OldRaw:    []byte(`{}`),
+		OldObject: old,
+		NewObject: obj,
+	})
+	if err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
+func TestEnvelopeValidatorRejectsReplaceServerOwnedMetadata(t *testing.T) {
+	serverOwnedCases := []struct {
+		name   string
+		mutate func(*vmv1.VM)
+	}{
+		{name: "deletionTimestamp", mutate: func(obj *vmv1.VM) { obj.DeletionTimestamp = "2026-06-12T00:00:00Z" }},
+		{name: "finalizers", mutate: func(obj *vmv1.VM) {
+			obj.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+		}},
+	}
+
+	for _, tc := range serverOwnedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			old := validAdmissionVM()
+			old.ResourceVersion = "7"
+			obj := old
+			tc.mutate(&obj)
+
+			err := EnvelopeValidator{}.Validate(context.Background(), Request{
+				Operation: OperationReplace,
+				Kind:      metav1.KindVM,
+				Name:      obj.Name,
+				OldRaw:    []byte(`{}`),
+				OldObject: old,
+				NewObject: obj,
+			})
+			assertAdmissionReason(t, err, ReasonBadRequest)
+		})
+	}
+}
+
+func TestReplaceOperationValidatorRequiresOldObject(t *testing.T) {
+	err := ReplaceOperationValidator{}.Validate(context.Background(), Request{
+		Operation: OperationReplace,
+		Kind:      metav1.KindVM,
+		Name:      "vm-a",
+		NewObject: validAdmissionVM(),
+	})
+	assertAdmissionReason(t, err, ReasonInternal)
+}
+
+func TestVMPowerStateValidatorRejectsReplaceNodeNameMismatchWithConflict(t *testing.T) {
+	old := validAdmissionVM()
+	old.NodeName = "node-1"
+	obj := old
+	obj.ResourceVersion = "7"
+	obj.NodeName = "node-2"
+
+	err := VMPowerStateValidator{}.Validate(context.Background(), Request{
+		Operation: OperationReplace,
+		Kind:      metav1.KindVM,
+		Name:      obj.Name,
+		OldRaw:    []byte(`{}`),
+		OldObject: old,
+		NewObject: obj,
+	})
+	assertAdmissionReason(t, err, ReasonConflict)
+}
+
 func TestVMPowerStateValidatorRejectsNodeNameMismatchWithConflict(t *testing.T) {
 	old := validAdmissionVM()
 	old.NodeName = "node-1"

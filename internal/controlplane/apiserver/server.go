@@ -60,15 +60,14 @@ func NewServer(st store.Store, alloc mac.MACAllocator, sched scheduler.Scheduler
 }
 
 // Handler returns the HTTP routes this server serves on a single /apis surface.
-// Apply is bound to both POST and PUT on /apis/{kind}/{name}: the create/update
-// distinction is not meaningful at this layer (the store performs an
-// unconditional create-or-overwrite), so both verbs share one handler. The read
-// (get/list/watch) and status sub-resource routes are registered alongside apply
-// so one Handler() serves the full surface.
+// POST remains declarative apply with an unconditional create-or-overwrite store
+// write; PUT is replace and requires a matching metadata.resourceVersion. The
+// read (get/list/watch) and status sub-resource routes are registered alongside
+// writes so one Handler() serves the full surface.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /apis/{kind}/{name}", s.Apply)
-	mux.HandleFunc("PUT /apis/{kind}/{name}", s.Apply)
+	mux.HandleFunc("PUT /apis/{kind}/{name}", s.Replace)
 	// Read routes (get/list) are registered alongside apply so a single
 	// Handler() serves the full /apis surface.
 	s.getHandler(mux)

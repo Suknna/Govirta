@@ -68,6 +68,23 @@ func (v EnvelopeValidator) Validate(ctx context.Context, req Request) error {
 		if len(meta.Finalizers) != 0 {
 			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("finalizers are server-owned on update"))
 		}
+	case OperationReplace:
+		oldMeta, err := Metadata(req.OldObject)
+		if err != nil {
+			return Reject(v.Name(), ReasonInternal, err)
+		}
+		if oldMeta.UID != meta.UID {
+			return Reject(v.Name(), ReasonConflict, fmt.Errorf("uid is immutable: existing %q vs requested %q", oldMeta.UID, meta.UID))
+		}
+		if meta.ResourceVersion == "" {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("resourceVersion is required for replace"))
+		}
+		if meta.DeletionTimestamp != "" {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("deletionTimestamp is server-owned on replace"))
+		}
+		if len(meta.Finalizers) != 0 {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("finalizers are server-owned on replace"))
+		}
 	}
 	return nil
 }
@@ -121,6 +138,22 @@ func (v ApplyOperationValidator) Validate(ctx context.Context, req Request) erro
 	return nil
 }
 
+// ReplaceOperationValidator ensures a replace request carries the stored object
+// context required for old/new admission checks and CAS preservation.
+type ReplaceOperationValidator struct{}
+
+func (ReplaceOperationValidator) Name() string { return "ReplaceOperationValidator" }
+
+func (v ReplaceOperationValidator) Validate(ctx context.Context, req Request) error {
+	if req.Operation != OperationReplace {
+		return Reject(v.Name(), ReasonInternal, fmt.Errorf("unsupported replace operation %q", req.Operation))
+	}
+	if len(req.OldRaw) == 0 || req.OldObject == nil {
+		return Reject(v.Name(), ReasonInternal, fmt.Errorf("replace request must include an old object"))
+	}
+	return nil
+}
+
 // VMPowerStateValidator enforces VM apply rules that depend on create/update
 // context but are not field immutability policy.
 type VMPowerStateValidator struct{}
@@ -136,7 +169,7 @@ func (v VMPowerStateValidator) Validate(ctx context.Context, req Request) error 
 	if !ok {
 		return nil
 	}
-	if req.Operation != OperationUpdate || vm.NodeName == "" {
+	if (req.Operation != OperationUpdate && req.Operation != OperationReplace) || vm.NodeName == "" {
 		return nil
 	}
 	oldObj, err := normalizeObject(req.OldObject)

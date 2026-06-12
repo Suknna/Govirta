@@ -265,7 +265,7 @@ func TestApplyNetworkAdmissionRejections(t *testing.T) {
 func TestApplyUnknownKindNotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodPut, "/apis/Widget/w-a", bytes.NewReader([]byte(`{}`)))
+	req := httptest.NewRequest(http.MethodPost, "/apis/Widget/w-a", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 

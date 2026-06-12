@@ -80,9 +80,9 @@ func TestServerRunRoutesReachable(t *testing.T) {
 		t.Fatalf("marshal vm: %v", err)
 	}
 
-	// Apply route: PUT /apis/VM/{name} must hit Apply and persist (201).
+	// Apply route: POST /apis/VM/{name} must hit Apply and persist (201).
 	applyURL := base + "/apis/" + string(metav1.KindVM) + "/" + vm.Name
-	req, err := http.NewRequest(http.MethodPut, applyURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, applyURL, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new apply request: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestServerRunStatusRoute(t *testing.T) {
 		t.Fatalf("marshal vm: %v", err)
 	}
 	applyURL := base + "/apis/" + string(metav1.KindVM) + "/" + vm.Name
-	req, err := http.NewRequest(http.MethodPut, applyURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, applyURL, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new apply request: %v", err)
 	}

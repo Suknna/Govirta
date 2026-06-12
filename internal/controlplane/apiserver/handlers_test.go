@@ -45,7 +45,7 @@ func newTestServer(t *testing.T) (*Server, *fake.Store) {
 	return NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, ""), st
 }
 
-// doApply submits obj to PUT /apis/{kind}/{name} through the server's handler and
+// doApply submits obj to POST /apis/{kind}/{name} through the server's handler and
 // returns the recorded response. Body is the marshalled obj.
 func doApply(t *testing.T, srv *Server, kind metav1.Kind, name string, obj any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -59,7 +59,7 @@ func doApplyWithoutReferenceSeeds(t *testing.T, srv *Server, kind metav1.Kind, n
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPut, "/apis/"+string(kind)+"/"+name, bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, "/apis/"+string(kind)+"/"+name, bytes.NewReader(data))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
