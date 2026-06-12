@@ -122,6 +122,45 @@ func TestGetResourceVersionInjectionErrorReturns500(t *testing.T) {
 	}
 }
 
+func TestGetResourceVersionInjectionPreservesLargeJSONNumbers(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	name := "pool-large-capacity"
+	largeCapacity := json.RawMessage(`9223372036854775807`)
+	if _, err := st.Put(
+		t.Context(),
+		storeKey(metav1.KindStoragePool, name),
+		[]byte(`{"apiVersion":"govirta.io/v1alpha1","kind":"StoragePool","metadata":{"name":"pool-large-capacity","uid":"uid-pool-large-capacity"},"spec":{"backend":"localfile","type":"file","storageRoot":"/var/lib/govirta/pool-large-capacity","capacityBytes":9223372036854775807}}`),
+		"",
+	); err != nil {
+		t.Fatalf("seed large capacity object: %v", err)
+	}
+
+	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool)+"/"+name)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Metadata map[string]json.RawMessage `json:"metadata"`
+		Spec     struct {
+			CapacityBytes json.RawMessage `json:"capacityBytes"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response raw messages: %v", err)
+	}
+	if got := string(body.Spec.CapacityBytes); got != string(largeCapacity) {
+		t.Fatalf("capacityBytes raw JSON = %s, want %s", got, largeCapacity)
+	}
+	if bytes.Contains(body.Spec.CapacityBytes, []byte("e")) || bytes.Contains(body.Spec.CapacityBytes, []byte("E")) {
+		t.Fatalf("capacityBytes used scientific notation: %s", body.Spec.CapacityBytes)
+	}
+	if len(body.Metadata["resourceVersion"]) == 0 {
+		t.Fatalf("metadata.resourceVersion was not injected: %s", rec.Body.String())
+	}
+}
+
 func TestGetMissingReturns404(t *testing.T) {
 	srv, _ := newTestServer(t)
 
