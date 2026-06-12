@@ -139,6 +139,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// Scenario 1: create powerState=Off + powerOffMode=Acpi → defined, Off/None.
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off", "Acpi")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+	replaceCycle(ctx, t, ctl, server, tmpDir)
 
 	// Scenario 2: update powerState=On (powerOffMode empty) → running, On/None.
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On", "")
