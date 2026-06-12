@@ -126,6 +126,34 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// DeleteIfVersion removes key only when its ModRevision matches expectedVersion.
+// Missing keys are idempotent success; present keys with an empty, unparsable, or
+// stale expectedVersion return store.ErrRevisionConflict and remain stored.
+func (s *Store) DeleteIfVersion(ctx context.Context, key string, expectedVersion string) error {
+	rev, err := strconv.ParseInt(expectedVersion, 10, 64)
+	if err != nil || rev == 0 {
+		return store.ErrRevisionConflict
+	}
+
+	resp, err := s.cli.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).
+		Then(clientv3.OpDelete(key)).
+		Else(clientv3.OpGet(key)).
+		Commit()
+	if err != nil {
+		return fmt.Errorf("etcd: conditional delete %q: %w", key, err)
+	}
+	if resp.Succeeded {
+		return nil
+	}
+
+	getResp := resp.Responses[0].GetResponseRange()
+	if getResp == nil || len(getResp.Kvs) == 0 {
+		return nil
+	}
+	return store.ErrRevisionConflict
+}
+
 // Watch streams events for keys under prefix. With startRevision == "" it is a
 // list-then-watch: the store first snapshots every current matching object as an
 // ADDED event, then watches from the snapshot's revision so no change between the

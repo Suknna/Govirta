@@ -63,6 +63,10 @@ type Store interface {
 	List(ctx context.Context, prefix string) ([]RawObject, error)
 	// Delete removes key. Deleting a missing key is not an error (idempotent).
 	Delete(ctx context.Context, key string) error
+	// DeleteIfVersion removes key only when the currently stored ResourceVersion
+	// equals expectedVersion. Missing keys are idempotent success. Empty or stale
+	// expectedVersion returns ErrRevisionConflict and does not delete a present key.
+	DeleteIfVersion(ctx context.Context, key string, expectedVersion string) error
 	// Watch streams events for keys under prefix starting after startRevision
 	// ("" = current). The channel closes when ctx is done or the store closes.
 	Watch(ctx context.Context, prefix string, startRevision string) (<-chan WatchEvent, error)

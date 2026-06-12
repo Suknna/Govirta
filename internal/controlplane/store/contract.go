@@ -142,6 +142,43 @@ func RunStoreContract(t *testing.T, newStore func() Store) {
 		}
 	})
 
+	t.Run("DeleteIfVersionCompareAndSwap", func(t *testing.T) {
+		t.Helper()
+		s := newStore()
+		defer s.Close()
+		ctx := context.Background()
+
+		first, err := s.Put(ctx, "/govirta/pod/a", []byte(`{"v":1}`), "")
+		if err != nil {
+			t.Fatalf("Put initial: unexpected error: %v", err)
+		}
+
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", ""); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("DeleteIfVersion empty version: error = %v, want ErrRevisionConflict", err)
+		}
+		if _, err := s.Get(ctx, "/govirta/pod/a"); err != nil {
+			t.Fatalf("Get after empty-version delete: unexpected error: %v", err)
+		}
+
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", "stale"); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("DeleteIfVersion stale: error = %v, want ErrRevisionConflict", err)
+		}
+		if _, err := s.Get(ctx, "/govirta/pod/a"); err != nil {
+			t.Fatalf("Get after stale delete: unexpected error: %v", err)
+		}
+
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", first.ResourceVersion); err != nil {
+			t.Fatalf("DeleteIfVersion matching: unexpected error: %v", err)
+		}
+		if _, err := s.Get(ctx, "/govirta/pod/a"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Get after matching delete: error = %v, want ErrNotFound", err)
+		}
+
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", first.ResourceVersion); err != nil {
+			t.Fatalf("DeleteIfVersion missing key must be idempotent, got %v", err)
+		}
+	})
+
 	t.Run("WatchAddedModifiedDeleted", func(t *testing.T) {
 		t.Helper()
 		s := newStore()
@@ -176,6 +213,35 @@ func RunStoreContract(t *testing.T, newStore func() Store) {
 		}
 		if ev := recvEvent(t, ctx, ch); ev.Type != EventDeleted || ev.Object.Key != "/govirta/pod/a" {
 			t.Fatalf("Watch delete: event = %+v, want DELETED for /govirta/pod/a", ev)
+		}
+	})
+
+	t.Run("WatchDeleteIfVersionDeleted", func(t *testing.T) {
+		t.Helper()
+		s := newStore()
+		defer s.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		ch, err := s.Watch(ctx, "/govirta/pod/", "")
+		if err != nil {
+			t.Fatalf("Watch: unexpected error: %v", err)
+		}
+
+		first, err := s.Put(ctx, "/govirta/pod/a", []byte(`{"v":1}`), "")
+		if err != nil {
+			t.Fatalf("Put add: unexpected error: %v", err)
+		}
+		if ev := recvEvent(t, ctx, ch); ev.Type != EventAdded || ev.Object.Key != "/govirta/pod/a" {
+			t.Fatalf("Watch add: event = %+v, want ADDED for /govirta/pod/a", ev)
+		}
+
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", first.ResourceVersion); err != nil {
+			t.Fatalf("DeleteIfVersion: unexpected error: %v", err)
+		}
+		if ev := recvEvent(t, ctx, ch); ev.Type != EventDeleted || ev.Object.Key != "/govirta/pod/a" {
+			t.Fatalf("Watch conditional delete: event = %+v, want DELETED for /govirta/pod/a", ev)
 		}
 	})
 

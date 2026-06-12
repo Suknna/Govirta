@@ -189,6 +189,41 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// DeleteIfVersion removes key only when the stored ResourceVersion matches
+// expectedVersion. A missing key is idempotent success; a present key with an
+// empty or stale expectedVersion is a CAS conflict and remains stored.
+func (s *Store) DeleteIfVersion(ctx context.Context, key string, expectedVersion string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return store.ErrClosed
+	}
+
+	existing, found := s.data[key]
+	if !found {
+		return nil
+	}
+	if expectedVersion == "" || existing.ResourceVersion != expectedVersion {
+		return store.ErrRevisionConflict
+	}
+
+	delete(s.data, key)
+	s.rev++
+	s.broadcastLocked(store.WatchEvent{
+		Type: store.EventDeleted,
+		Object: store.RawObject{
+			Key:             key,
+			ResourceVersion: strconv.FormatInt(s.rev, 10),
+		},
+	})
+	return nil
+}
+
 // Watch streams events for keys under prefix. With startRevision == "" it is a
 // list-then-watch: the current matching objects are enqueued as ADDED first,
 // then the watcher is registered so it observes every subsequent change. Holding

@@ -119,6 +119,10 @@ func (p *prefixStore) Delete(ctx context.Context, key string) error {
 	return p.inner.Delete(ctx, p.toInner(key))
 }
 
+func (p *prefixStore) DeleteIfVersion(ctx context.Context, key string, expectedVersion string) error {
+	return p.inner.DeleteIfVersion(ctx, p.toInner(key), expectedVersion)
+}
+
 func (p *prefixStore) Watch(ctx context.Context, prefix string, startRevision string) (<-chan store.WatchEvent, error) {
 	inCh, err := p.inner.Watch(ctx, p.toInner(prefix), startRevision)
 	if err != nil {
