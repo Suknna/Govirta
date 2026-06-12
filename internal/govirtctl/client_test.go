@@ -46,6 +46,57 @@ func TestClientApplySurfacesErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestClientReplaceUsesPutAndReturnsStoredObject(t *testing.T) {
+	var gotMethod, gotPath, gotContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"kind":"VM","metadata":{"name":"vm-a","resourceVersion":"2"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	got, err := c.Replace(context.Background(), "VM", "vm-a", []byte(`{"kind":"VM","metadata":{"name":"vm-a","resourceVersion":"1"}}`))
+	if err != nil {
+		t.Fatalf("Replace error = %v, want nil", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("server saw method %q, want PUT", gotMethod)
+	}
+	if gotPath != "/apis/VM/vm-a" {
+		t.Fatalf("server saw path %q, want /apis/VM/vm-a", gotPath)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("server saw Content-Type %q, want application/json", gotContentType)
+	}
+	if len(got) == 0 {
+		t.Fatal("Replace returned empty body, want stored object")
+	}
+}
+
+func TestClientReplaceSurfacesConflictEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("unexpected method %s, want PUT", r.Method)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"resource version conflict"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	_, err := c.Replace(context.Background(), "VM", "vm-a", []byte(`{"kind":"VM"}`))
+	if err == nil {
+		t.Fatal("Replace error = nil, want non-2xx error")
+	}
+	if got := err.Error(); !contains(got, "master returned 409") || !contains(got, "resource version conflict") {
+		t.Fatalf("Replace error = %q, want it to carry status and envelope message", got)
+	}
+}
+
 func TestClientGetReturnsObjectAndResourceVersion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(resourceVersionHeader, "42")

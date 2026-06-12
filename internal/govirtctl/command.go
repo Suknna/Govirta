@@ -17,7 +17,8 @@ import (
 type objectEnvelope struct {
 	Kind     string `json:"kind"`
 	Metadata struct {
-		Name string `json:"name"`
+		Name            string `json:"name"`
+		ResourceVersion string `json:"resourceVersion"`
 	} `json:"metadata"`
 }
 
@@ -33,6 +34,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "apply":
 		return runApply(ctx, args[1:], stdout, stderr)
+	case "replace":
+		return runReplace(ctx, args[1:], stdout, stderr)
 	case "get":
 		return runGet(ctx, args[1:], stdout, stderr)
 	case "delete":
@@ -48,6 +51,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 const usage = `usage:
   govirtctl apply --server <url> -f <manifest.json>
+  govirtctl replace --server <url> -f <manifest.json>
   govirtctl get --server <url> <kind> <name>
   govirtctl delete --server <url> <kind> <name>
   govirtctl version`
@@ -96,6 +100,59 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s/%s applied\n", env.Kind, env.Metadata.Name)
+	return 0
+}
+
+// runReplace reads a manifest file and sends it through the master's guarded
+// replace path. The manifest must carry metadata.resourceVersion from a prior
+// get/edit workflow so the master can reject stale writes.
+func runReplace(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("replace", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	server := fs.String("server", "", "master apiserver root, e.g. http://127.0.0.1:8080 (required)")
+	file := fs.String("f", "", "path to the resource manifest JSON file (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *server == "" {
+		fmt.Fprintln(stderr, "govirtctl replace: --server is required")
+		return 2
+	}
+	if *file == "" {
+		fmt.Fprintln(stderr, "govirtctl replace: -f <manifest> is required")
+		return 2
+	}
+
+	body, err := os.ReadFile(*file)
+	if err != nil {
+		fmt.Fprintf(stderr, "govirtctl replace: read manifest %q: %v\n", *file, err)
+		return 1
+	}
+
+	var env objectEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		fmt.Fprintf(stderr, "govirtctl replace: decode manifest %q: %v\n", *file, err)
+		return 1
+	}
+	if env.Kind == "" {
+		fmt.Fprintf(stderr, "govirtctl replace: manifest %q has no kind\n", *file)
+		return 1
+	}
+	if env.Metadata.Name == "" {
+		fmt.Fprintf(stderr, "govirtctl replace: manifest %q has no metadata.name\n", *file)
+		return 1
+	}
+	if env.Metadata.ResourceVersion == "" {
+		fmt.Fprintf(stderr, "govirtctl replace: manifest %q has no metadata.resourceVersion; run govirtctl get first\n", *file)
+		return 2
+	}
+
+	c := NewClient(*server, nil)
+	if _, err := c.Replace(ctx, env.Kind, env.Metadata.Name, body); err != nil {
+		fmt.Fprintf(stderr, "govirtctl replace: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s/%s replaced\n", env.Kind, env.Metadata.Name)
 	return 0
 }
 

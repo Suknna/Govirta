@@ -74,6 +74,37 @@ func (c *Client) Apply(ctx context.Context, kind, name string, body []byte) (_ [
 	return respBody, nil
 }
 
+// Replace submits body as the full object for kind/name via PUT
+// /apis/{kind}/{name}. The master enforces metadata.resourceVersion as the
+// optimistic-concurrency guard and returns the stored object bytes on success.
+func (c *Client) Replace(ctx context.Context, kind, name string, body []byte) (_ []byte, err error) {
+	url := fmt.Sprintf("%s/apis/%s/%s", c.baseURL, kind, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("govirtctl: build replace request for %s/%s: %w", kind, name, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("govirtctl: replace %s/%s: %w", kind, name, err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("govirtctl: close replace response body: %w", cerr)
+		}
+	}()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("govirtctl: read replace response for %s/%s: %w", kind, name, readErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("govirtctl: replace %s/%s: master returned %d: %s", kind, name, resp.StatusCode, errorMessage(respBody))
+	}
+	return respBody, nil
+}
+
 // Get fetches kind/name via GET /apis/{kind}/{name}. It returns the object bytes
 // and the X-Resource-Version header value, or ErrNotFound on a 404.
 func (c *Client) Get(ctx context.Context, kind, name string) (_ []byte, _ string, err error) {
