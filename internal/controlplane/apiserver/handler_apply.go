@@ -75,6 +75,9 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 	}
 
 	switch kind {
+	case metav1.KindTask:
+		return nil, forbidden(fmt.Errorf("apiserver: Task is internal and cannot be applied through the public API"))
+
 	case metav1.KindStoragePool:
 		obj, req, aerr := s.decodeAndAdmitApply(ctx, kind, name, body)
 		if aerr != nil {
@@ -528,6 +531,7 @@ func (e *apiError) Unwrap() error { return e.err }
 func badRequest(err error) *apiError  { return &apiError{code: http.StatusBadRequest, err: err} }
 func notFound(err error) *apiError    { return &apiError{code: http.StatusNotFound, err: err} }
 func conflictErr(err error) *apiError { return &apiError{code: http.StatusConflict, err: err} }
+func forbidden(err error) *apiError   { return &apiError{code: http.StatusForbidden, err: err} }
 func internalErr(err error) *apiError {
 	return &apiError{code: http.StatusInternalServerError, err: err}
 }

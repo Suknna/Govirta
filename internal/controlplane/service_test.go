@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	controlcontroller "github.com/suknna/govirta/internal/controlplane/controller"
 	"github.com/suknna/govirta/internal/controlplane/store/fake"
 )
 
@@ -25,6 +26,15 @@ func testConfig() Config {
 		MACSuffixStart: 0,
 		MACSuffixEnd:   0xFF,
 		NodeNames:      []string{"node-a"},
+		TaskManager: controlcontroller.Config{
+			NodeTaskName:    "phase-one-node-task-node-a",
+			NodeTaskNode:    "node-a",
+			ClusterTaskName: "phase-one-cluster-task",
+			OwnerName:       "phase-one-owner",
+			OwnerUID:        "phase-one-owner-uid",
+			ExecutorID:      "govirtad-test",
+			NoopMarker:      "phase-one",
+		},
 	}
 }
 

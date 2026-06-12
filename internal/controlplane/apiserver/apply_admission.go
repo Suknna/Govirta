@@ -14,6 +14,7 @@ import (
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
+	taskv1 "github.com/suknna/govirta/pkg/apis/task/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
@@ -104,6 +105,12 @@ func decodeObjectByKind(kind metav1.Kind, raw []byte) (any, error) {
 		var obj snapshotv1.Snapshot
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return nil, fmt.Errorf("decode Snapshot: %w", err)
+		}
+		return obj, nil
+	case metav1.KindTask:
+		var obj taskv1.Task
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return nil, fmt.Errorf("decode Task: %w", err)
 		}
 		return obj, nil
 	default:

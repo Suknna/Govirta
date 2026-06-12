@@ -18,6 +18,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/suknna/govirta/internal/controlplane/apiserver"
+	controlcontroller "github.com/suknna/govirta/internal/controlplane/controller"
 	"github.com/suknna/govirta/internal/controlplane/mac"
 	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
@@ -46,13 +47,18 @@ type Config struct {
 	// NodeNames is the static set of candidate node names the scheduler places
 	// VMs onto (第一刀：静态 node 名单).
 	NodeNames []string
+	// TaskManager carries every explicit input for the phase-one control-plane
+	// controller-manager. The composition root must provide all fields; there are
+	// no hidden defaults inside controlplane.
+	TaskManager controlcontroller.Config
 }
 
 // Service coordinates control-plane components. It owns the store it was built
 // over (it constructed it, so it closes it) and the apiserver that serves the
 // /apis surface.
 type Service struct {
-	apiServer *apiserver.Server
+	apiServer   *apiserver.Server
+	taskManager *controlcontroller.Manager
 	// store is owned by the Service: NewService constructs it, and Run closes it
 	// on return so the dialed etcd client does not leak past serving life.
 	store store.Store
@@ -99,7 +105,8 @@ func newServiceWithStore(st store.Store, cfg Config) (*Service, error) {
 	alloc := mac.NewAllocator(pool, st)
 	sched := scheduler.NewNoopScheduler()
 	srv := apiserver.NewServer(st, alloc, sched, cfg.NodeNames, cfg.ListenAddr)
-	return &Service{apiServer: srv, store: st}, nil
+	mgr := controlcontroller.NewManager(st, cfg.TaskManager)
+	return &Service{apiServer: srv, taskManager: mgr, store: st}, nil
 }
 
 // Run starts the apiserver and serves until ctx is cancelled, then closes the
@@ -108,7 +115,51 @@ func newServiceWithStore(st store.Store, cfg Config) (*Service, error) {
 // store-close error are joined so neither is swallowed.
 func (s *Service) Run(ctx context.Context) error {
 	zerolog.Ctx(ctx).Info().Str("component", "controlplane").Msg("starting control plane")
-	runErr := s.apiServer.Run(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	managerErr := make(chan error, 1)
+	go func() {
+		managerErr <- s.taskManager.Run(runCtx)
+	}()
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- s.apiServer.Run(runCtx)
+	}()
+
+	var serverErrValue error
+	var mgrErr error
+	managerDone := false
+	serverDone := false
+	for !serverDone {
+		select {
+		case err := <-serverErr:
+			serverErrValue = err
+			serverDone = true
+		case err := <-managerErr:
+			managerDone = true
+			if err != nil {
+				mgrErr = err
+				cancel()
+				serverErrValue = <-serverErr
+				serverDone = true
+			}
+		case <-ctx.Done():
+			cancel()
+			serverErrValue = <-serverErr
+			serverDone = true
+		}
+		if managerDone && !serverDone {
+			// A normal phase-one manager completion only means its initial proof task
+			// reached terminal state; the apiserver must continue serving until ctx is
+			// canceled or the server itself fails.
+			managerErr = nil
+		}
+	}
+	if !managerDone {
+		cancel()
+		mgrErr = <-managerErr
+	}
 	closeErr := s.store.Close()
-	return errors.Join(runErr, closeErr)
+	return errors.Join(serverErrValue, mgrErr, closeErr)
 }

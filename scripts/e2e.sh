@@ -224,6 +224,13 @@ start_govirtad() {
 		--mac-prefix "$mac_prefix" \
 		--mac-suffix-start "$mac_suffix_start" \
 		--mac-suffix-end "$mac_suffix_end" \
+		--phase-one-node-task-name "phase-one-node-task-$node_name" \
+		--phase-one-node-task-node "$node_name" \
+		--phase-one-cluster-task-name "phase-one-cluster-task" \
+		--phase-one-task-owner-name "phase-one-owner" \
+		--phase-one-task-owner-uid "phase-one-owner-uid" \
+		--phase-one-task-executor-id "govirtad" \
+		--phase-one-task-noop-marker "phase-one" \
 		>"$govirtad_log" 2>&1 &
 	echo $! >"$govirtad_pidfile"
 

@@ -115,6 +115,9 @@ func TestWatchDeliversMatchingNodeNameEvent(t *testing.T) {
 	if got.NodeName != nodeName {
 		t.Fatalf("event object nodeName = %q, want %q", got.NodeName, nodeName)
 	}
+	if got.ResourceVersion == "" {
+		t.Fatalf("event object resourceVersion empty; watch must inject store resourceVersion")
+	}
 }
 
 func TestWatchFiltersOutNonMatchingNodeName(t *testing.T) {

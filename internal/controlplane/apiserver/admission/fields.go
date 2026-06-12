@@ -108,6 +108,8 @@ func (v FieldPolicyValidator) Validate(ctx context.Context, req Request) error {
 			return Reject(v.Name(), ReasonInternal, fmt.Errorf("new object type %T is not Snapshot", req.NewObject))
 		}
 		return v.validateSnapshot(oldSnap, newSnap)
+	case metav1.KindTask:
+		return Reject(v.Name(), ReasonConflict, fmt.Errorf("Task spec is internal-only and cannot be updated through public admission"))
 	default:
 		return Reject(v.Name(), ReasonInternal, fmt.Errorf("unsupported kind %q", req.Kind))
 	}

@@ -120,6 +120,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 	}
 
 	list := []controller.Controller{
+		controllers.NewTaskController(cfg.NodeName, master),
 		controllers.NewStoragePoolController(poolSvc, master),
 		controllers.NewImageController(imageSvc, master, nil, cfg.ImageSourceRoot),
 		controllers.NewVolumeController(volumeSvc, imageSvc, vmmSvc, master),

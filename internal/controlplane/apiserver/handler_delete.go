@@ -73,6 +73,9 @@ func (s *Server) Delete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 	kind := metav1.Kind(r.PathValue("kind"))
 	name := r.PathValue("name")
+	if kind == metav1.KindTask {
+		return forbidden(fmt.Errorf("apiserver: Task is internal and cannot be deleted through the public API"))
+	}
 	key := storeKey(kind, name)
 
 	raw, err := s.store.Get(ctx, key)

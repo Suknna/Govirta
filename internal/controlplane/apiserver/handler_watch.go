@@ -161,6 +161,13 @@ func nodeNameMatches(value []byte, want string) (bool, error) {
 // appends the trailing newline that delimits events.
 func writeWatchEvent(enc *json.Encoder, ev store.WatchEvent) error {
 	obj := json.RawMessage(ev.Object.Value)
+	if len(obj) > 0 {
+		withResourceVersion, err := withWatchResourceVersion(obj, ev.Object.ResourceVersion)
+		if err != nil {
+			return err
+		}
+		obj = withResourceVersion
+	}
 	if len(obj) == 0 {
 		// An empty object (e.g. a DELETED with no value that somehow reaches here)
 		// must still be valid JSON on the wire.
@@ -170,6 +177,36 @@ func writeWatchEvent(enc *json.Encoder, ev store.WatchEvent) error {
 		return fmt.Errorf("apiserver: encode watch event: %w", err)
 	}
 	return nil
+}
+
+func withWatchResourceVersion(obj json.RawMessage, rv string) (json.RawMessage, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(obj, &envelope); err != nil {
+		return nil, fmt.Errorf("apiserver: decode watch event object for resourceVersion: %w", err)
+	}
+	var metadata map[string]json.RawMessage
+	if rawMeta, ok := envelope["metadata"]; ok && len(rawMeta) > 0 && string(rawMeta) != "null" {
+		if err := json.Unmarshal(rawMeta, &metadata); err != nil {
+			return nil, fmt.Errorf("apiserver: decode watch event metadata for resourceVersion: %w", err)
+		}
+	} else {
+		metadata = make(map[string]json.RawMessage)
+	}
+	rvBytes, err := json.Marshal(rv)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: encode watch resourceVersion: %w", err)
+	}
+	metadata["resourceVersion"] = rvBytes
+	metaBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: encode watch metadata with resourceVersion: %w", err)
+	}
+	envelope["metadata"] = metaBytes
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: encode watch object with resourceVersion: %w", err)
+	}
+	return out, nil
 }
 
 // writeWatchError renders a pre-stream failure as the uniform error envelope. It

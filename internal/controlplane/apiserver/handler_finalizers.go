@@ -94,6 +94,9 @@ func (s *Server) PatchFinalizers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.RawObject, bool, *apiError) {
 	kind := metav1.Kind(r.PathValue("kind"))
 	name := r.PathValue("name")
+	if kind == metav1.KindTask {
+		return store.RawObject{}, false, forbidden(fmt.Errorf("apiserver: Task is internal and cannot patch finalizers through the public API"))
+	}
 	key := storeKey(kind, name)
 
 	body, err := io.ReadAll(r.Body)

@@ -17,6 +17,7 @@ import (
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
+	taskv1 "github.com/suknna/govirta/pkg/apis/task/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
@@ -45,6 +46,9 @@ func (s *Server) Replace(w http.ResponseWriter, r *http.Request) {
 func (s *Server) replace(ctx context.Context, r *http.Request) ([]byte, *apiError) {
 	kind := metav1.Kind(r.PathValue("kind"))
 	name := r.PathValue("name")
+	if kind == metav1.KindTask {
+		return nil, forbidden(fmt.Errorf("apiserver: Task is internal and cannot be replaced through the public API"))
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, badRequest(fmt.Errorf("apiserver: read replace request body: %w", err))
@@ -110,6 +114,8 @@ func (s *Server) replace(ctx context.Context, r *http.Request) ([]byte, *apiErro
 		}
 		o.NodeName = node
 		return s.putReplaceResponse(ctx, storeKey(kind, o.Name), o, req, expectedVersion)
+	case taskv1.Task:
+		return nil, forbidden(fmt.Errorf("apiserver: Task is internal and cannot be replaced through the public API"))
 	default:
 		return nil, notFound(fmt.Errorf("%w: %q", ErrUnknownKind, kind))
 	}

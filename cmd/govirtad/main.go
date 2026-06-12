@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/suknna/govirta/internal/controlplane"
+	controlcontroller "github.com/suknna/govirta/internal/controlplane/controller"
 )
 
 // stringSlice is a flag.Value collecting a repeatable string flag into a slice,
@@ -72,6 +73,13 @@ func parseConfig(args []string) (controlplane.Config, error) {
 	macPrefix := fs.String("mac-prefix", "", "3-byte locally-administered unicast OUI for the MAC pool, e.g. 02:00:00 (required)")
 	macStart := fs.Uint("mac-suffix-start", 0, "inclusive start of the MAC pool's 24-bit suffix interval")
 	macEnd := fs.Uint("mac-suffix-end", 0, "inclusive end of the MAC pool's 24-bit suffix interval")
+	taskNodeName := fs.String("phase-one-node-task-name", "", "internal phase-one NodeTask name (required)")
+	taskNode := fs.String("phase-one-node-task-node", "", "nodeName targeted by the internal phase-one NodeTask (required)")
+	taskClusterName := fs.String("phase-one-cluster-task-name", "", "internal phase-one ClusterTask name (required)")
+	taskOwnerName := fs.String("phase-one-task-owner-name", "", "ownerName recorded on internal phase-one Tasks (required)")
+	taskOwnerUID := fs.String("phase-one-task-owner-uid", "", "ownerUID recorded on internal phase-one Tasks (required)")
+	taskExecutorID := fs.String("phase-one-task-executor-id", "", "control-plane executor identity recorded in ClusterTask status (required)")
+	taskNoopMarker := fs.String("phase-one-task-noop-marker", "", "explicit marker passed through phase-one no-op Task input/status (required)")
 
 	if err := fs.Parse(args); err != nil {
 		return controlplane.Config{}, fmt.Errorf("govirtad: parse flags: %w", err)
@@ -89,6 +97,9 @@ func parseConfig(args []string) (controlplane.Config, error) {
 	if *macPrefix == "" {
 		return controlplane.Config{}, fmt.Errorf("govirtad: --mac-prefix is required")
 	}
+	if *taskNodeName == "" || *taskNode == "" || *taskClusterName == "" || *taskOwnerName == "" || *taskOwnerUID == "" || *taskExecutorID == "" || *taskNoopMarker == "" {
+		return controlplane.Config{}, fmt.Errorf("govirtad: all phase-one task flags are required")
+	}
 
 	hw, err := parseOUI(*macPrefix)
 	if err != nil {
@@ -103,6 +114,15 @@ func parseConfig(args []string) (controlplane.Config, error) {
 		MACSuffixStart:  uint32(*macStart),
 		MACSuffixEnd:    uint32(*macEnd),
 		NodeNames:       []string(nodeNames),
+		TaskManager: controlcontroller.Config{
+			NodeTaskName:    *taskNodeName,
+			NodeTaskNode:    *taskNode,
+			ClusterTaskName: *taskClusterName,
+			OwnerName:       *taskOwnerName,
+			OwnerUID:        *taskOwnerUID,
+			ExecutorID:      *taskExecutorID,
+			NoopMarker:      *taskNoopMarker,
+		},
 	}, nil
 }
 

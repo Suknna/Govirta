@@ -19,6 +19,7 @@ const (
 	e2eServerEnv   = "GOVIRTA_E2E_SERVER"
 	e2eCtlEnv      = "GOVIRTA_E2E_GOVIRTCTL"
 	e2eManifestEnv = "GOVIRTA_E2E_MANIFESTS"
+	e2eNodeEnv     = "GOVIRTA_E2E_NODE"
 )
 
 // Object names the spine is built from. They MUST match metadata.name in the
@@ -118,6 +119,10 @@ func TestDistributedSpineClosure(t *testing.T) {
 	server := requireEnv(t, e2eServerEnv)
 	ctl := requireEnv(t, e2eCtlEnv)
 	manifests := requireEnv(t, e2eManifestEnv)
+	nodeName := os.Getenv(e2eNodeEnv)
+	if nodeName == "" {
+		nodeName = "node0"
+	}
 
 	// The forward apply + wait-Running can take minutes; the reverse teardown
 	// adds a VM stop+delete plus six more delete→404 polls. Give the whole
@@ -128,6 +133,13 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// Guest handle for guest-side live verification (上下一致: assert lower-layer
 	// reality, not just the master's API projection).
 	g := newGuest(t)
+
+	// Phase-one Task proof: scripts/e2e.sh starts govirtad with explicit
+	// phase-one Task config and govirtlet with the same nodeName. These checks prove
+	// the real etcd + govirtad + govirtlet path completes both ClusterTask and
+	// NodeTask before the legacy business controllers drive the VM spine.
+	waitTaskSucceeded(ctx, t, ctl, server, "phase-one-cluster-task", 2*time.Minute)
+	waitTaskSucceeded(ctx, t, ctl, server, "phase-one-node-task-"+nodeName, 2*time.Minute)
 
 	// Forward segment: apply dependencies first, define the VM while powered Off,
 	// then drive declared power intent through the two-dimensional power model:
@@ -767,6 +779,25 @@ func decodeObjectPhase(t *testing.T, out string) string {
 		return ""
 	}
 	return obj.Status.Phase
+}
+
+func waitTaskSucceeded(ctx context.Context, t *testing.T, ctl, server, name string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("context ended before Task/%s reached Succeeded: %v\nlast get:\n%s", name, err, last)
+		}
+		out, err := runCtl(ctx, ctl, "get", "--server", server, "Task", name)
+		last = out
+		if err == nil && decodeObjectPhase(t, out) == "Succeeded" {
+			t.Logf("Task/%s reached Succeeded:\n%s", name, out)
+			return
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("Task/%s did not reach Succeeded before deadline\nlast get:\n%s", name, last)
 }
 
 // teardownSpine deletes the spine in reverse dependency order and proves the

@@ -17,6 +17,13 @@ func TestParseConfigValid(t *testing.T) {
 		"--mac-prefix", "02:00:00",
 		"--mac-suffix-start", "0",
 		"--mac-suffix-end", "255",
+		"--phase-one-node-task-name", "phase-one-node-task",
+		"--phase-one-node-task-node", "node-0",
+		"--phase-one-cluster-task-name", "phase-one-cluster-task",
+		"--phase-one-task-owner-name", "phase-one-owner",
+		"--phase-one-task-owner-uid", "phase-one-owner-uid",
+		"--phase-one-task-executor-id", "govirtad-test",
+		"--phase-one-task-noop-marker", "phase-one",
 	}
 	cfg, err := parseConfig(args)
 	if err != nil {
@@ -42,6 +49,9 @@ func TestParseConfigValid(t *testing.T) {
 	if cfg.MACSuffixStart != 0 || cfg.MACSuffixEnd != 255 {
 		t.Fatalf("MAC suffix range = [%d,%d], want [0,255]", cfg.MACSuffixStart, cfg.MACSuffixEnd)
 	}
+	if cfg.TaskManager.NodeTaskName != "phase-one-node-task" || cfg.TaskManager.NodeTaskNode != "node-0" || cfg.TaskManager.ClusterTaskName != "phase-one-cluster-task" || cfg.TaskManager.ExecutorID != "govirtad-test" || cfg.TaskManager.NoopMarker != "phase-one" {
+		t.Fatalf("TaskManager = %+v, want explicit phase-one task config", cfg.TaskManager)
+	}
 }
 
 func TestParseConfigMissingRequired(t *testing.T) {
@@ -51,11 +61,18 @@ func TestParseConfigMissingRequired(t *testing.T) {
 			"--node-name", "node-0",
 			"--listen-addr", "127.0.0.1:8080",
 			"--mac-prefix", "02:00:00",
+			"--phase-one-node-task-name", "phase-one-node-task",
+			"--phase-one-node-task-node", "node-0",
+			"--phase-one-cluster-task-name", "phase-one-cluster-task",
+			"--phase-one-task-owner-name", "phase-one-owner",
+			"--phase-one-task-owner-uid", "phase-one-owner-uid",
+			"--phase-one-task-executor-id", "govirtad-test",
+			"--phase-one-task-noop-marker", "phase-one",
 		}
 	}
 	tests := map[string]func() []string{
 		"missing etcd-endpoint": func() []string {
-			return []string{"--node-name", "node-0", "--listen-addr", "127.0.0.1:8080", "--mac-prefix", "02:00:00"}
+			return append(base()[2:], []string{}...)
 		},
 		"missing node-name": func() []string {
 			return []string{"--etcd-endpoint", "localhost:2379", "--listen-addr", "127.0.0.1:8080", "--mac-prefix", "02:00:00"}
@@ -65,6 +82,9 @@ func TestParseConfigMissingRequired(t *testing.T) {
 		},
 		"missing mac-prefix": func() []string {
 			return []string{"--etcd-endpoint", "localhost:2379", "--node-name", "node-0", "--listen-addr", "127.0.0.1:8080"}
+		},
+		"missing phase-one task config": func() []string {
+			return []string{"--etcd-endpoint", "localhost:2379", "--node-name", "node-0", "--listen-addr", "127.0.0.1:8080", "--mac-prefix", "02:00:00"}
 		},
 	}
 	_ = base
@@ -117,6 +137,13 @@ func TestParseConfigRejectsSixByteMACPrefix(t *testing.T) {
 		"--node-name", "node-0",
 		"--listen-addr", "127.0.0.1:8080",
 		"--mac-prefix", "02:00:00:00:00:00",
+		"--phase-one-node-task-name", "phase-one-node-task",
+		"--phase-one-node-task-node", "node-0",
+		"--phase-one-cluster-task-name", "phase-one-cluster-task",
+		"--phase-one-task-owner-name", "phase-one-owner",
+		"--phase-one-task-owner-uid", "phase-one-owner-uid",
+		"--phase-one-task-executor-id", "govirtad-test",
+		"--phase-one-task-noop-marker", "phase-one",
 	}
 	if _, err := parseConfig(args); err == nil {
 		t.Fatal("parseConfig: expected error for 6-byte mac-prefix, got nil")

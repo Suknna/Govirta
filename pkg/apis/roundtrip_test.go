@@ -9,6 +9,7 @@ import (
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
+	taskv1 "github.com/suknna/govirta/pkg/apis/task/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
@@ -232,6 +233,44 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 					t.Fatalf("spec mismatch: %+v", out.Spec)
 				}
 				if out.Status.Phase != vmv1.VMPhaseRunning || out.Status.ObservedPowerState != vmv1.ObservedPowerStateOn || out.Status.PowerTransition != vmv1.PowerTransitionNone {
+					t.Fatalf("status mismatch: %+v", out.Status)
+				}
+			},
+		},
+		{
+			name: "Task",
+			obj: func() taskv1.Task {
+				input, err := json.Marshal(taskv1.NoopInput{Marker: "phase-one"})
+				if err != nil {
+					t.Fatalf("marshal task input: %v", err)
+				}
+				tm, om := meta(metav1.KindTask, "task1")
+				return taskv1.Task{
+					TypeMeta:   tm,
+					ObjectMeta: om,
+					Spec: taskv1.TaskSpec{
+						Scope:     taskv1.TaskScopeNode,
+						OwnerKind: metav1.KindTask,
+						OwnerName: "phase-one-owner",
+						OwnerUID:  "phase-one-owner-uid",
+						Operation: taskv1.TaskOperationNoopNode,
+						Input:     input,
+					},
+					Status: taskv1.TaskStatus{Phase: taskv1.TaskPhasePending, ErrorClass: taskv1.TaskErrorClassNone},
+				}
+			}(),
+			verify: func(t *testing.T, b []byte) {
+				var out taskv1.Task
+				if err := json.Unmarshal(b, &out); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if out.Kind != metav1.KindTask || out.Name != "task1" {
+					t.Fatalf("identity mismatch: %+v", out)
+				}
+				if out.Spec.Scope != taskv1.TaskScopeNode || out.Spec.Operation != taskv1.TaskOperationNoopNode {
+					t.Fatalf("spec mismatch: %+v", out.Spec)
+				}
+				if out.Status.Phase != taskv1.TaskPhasePending {
 					t.Fatalf("status mismatch: %+v", out.Status)
 				}
 			},

@@ -19,6 +19,7 @@ import (
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	snapshotv1 "github.com/suknna/govirta/pkg/apis/snapshot/v1alpha1"
 	storagepoolv1 "github.com/suknna/govirta/pkg/apis/storagepool/v1alpha1"
+	taskv1 "github.com/suknna/govirta/pkg/apis/task/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
@@ -229,6 +230,31 @@ func validStoragePool() storagepoolv1.StoragePool {
 			StorageRoot:   "/var/lib/govirta/pool-a",
 			CapacityBytes: 1 << 30,
 		},
+	}
+}
+
+func validTask(t *testing.T, name, nodeName string, scope taskv1.TaskScope, operation taskv1.TaskOperation) taskv1.Task {
+	t.Helper()
+	input, err := json.Marshal(taskv1.NoopInput{Marker: "phase-one"})
+	if err != nil {
+		t.Fatalf("marshal task input: %v", err)
+	}
+	return taskv1.Task{
+		TypeMeta: metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindTask},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:     name,
+			UID:      "uid-" + name,
+			NodeName: nodeName,
+		},
+		Spec: taskv1.TaskSpec{
+			Scope:     scope,
+			OwnerKind: metav1.KindTask,
+			OwnerName: "phase-one-owner",
+			OwnerUID:  "phase-one-owner-uid",
+			Operation: operation,
+			Input:     input,
+		},
+		Status: taskv1.TaskStatus{Phase: taskv1.TaskPhasePending},
 	}
 }
 
