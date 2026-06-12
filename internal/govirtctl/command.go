@@ -156,8 +156,9 @@ func runReplace(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	return 0
 }
 
-// runGet fetches one object and prints it. For a VM it also extracts and prints
-// status.phase on its own line so scripts can grep the lifecycle state.
+// runGet fetches one object and prints the JSON object exactly as returned by
+// the apiserver. The output is intentionally machine-editable: operators can
+// redirect it to a file, edit spec fields, and pass it to `govirtctl replace`.
 func runGet(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -187,14 +188,6 @@ func runGet(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	var withStatus struct {
-		Status struct {
-			Phase string `json:"phase"`
-		} `json:"status"`
-	}
-	if err := json.Unmarshal(body, &withStatus); err == nil && withStatus.Status.Phase != "" {
-		fmt.Fprintf(stdout, "phase: %s\n", withStatus.Status.Phase)
-	}
 	return 0
 }
 

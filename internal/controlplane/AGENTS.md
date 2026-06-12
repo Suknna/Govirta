@@ -53,7 +53,7 @@ Verified-against:
 
 ## OVERVIEW
 
-Control plane composition root: assembles etcd-backed store, MAC allocator, scheduler, and HTTP apiserver into a single `Service`. The apiserver exposes a Kubernetes-style REST surface (`/apis/{kind}/{name}`) for 6 resource kinds with apply/get/list/watch/status operations.
+Control plane composition root: assembles etcd-backed store, MAC allocator, scheduler, and HTTP apiserver into a single `Service`. The apiserver exposes a Kubernetes-style REST surface (`/apis/{kind}/{name}`) for 7 resource kinds with apply/replace/get/list/watch/status/finalizer operations.
 
 ## WHERE TO LOOK
 
@@ -61,11 +61,12 @@ Control plane composition root: assembles etcd-backed store, MAC allocator, sche
 | --- | --- | --- |
 | Composition root | `service.go` | `NewService(ctx, Config)` dials etcd, assembles all deps; `newServiceWithStore` is test seam |
 | HTTP server + routing | `apiserver/server.go` | `Server.Handler()` registers all routes; `Server.Run` binds TCP |
-| Apply handler (create/update) | `apiserver/handler_apply.go` | kind-dispatched decode→validate→admit→store pipeline |
+| Apply handler (unconditional create/update) | `apiserver/handler_apply.go` | kind-dispatched decode→validate→admit→store pipeline for POST apply |
+| Replace handler (guarded update) | `apiserver/handler_replace.go` | PUT replace requires body `metadata.resourceVersion` and CASes through store.Put |
 | Get/List handler | `apiserver/handler_get.go` | `Get` single object + `List` by prefix |
 | Watch handler (streaming) | `apiserver/handler_watch.go` | chunked NDJSON, nodeName filter, list-then-watch + resume |
 | Status patch handler | `apiserver/handler_status.go` | read-modify-write CAS with retry (max 3) |
-| Store interface | `store/store.go` | `Put`/`Get`/`List`/`Delete`/`Watch`/`Close` + sentinel errors |
+| Store interface | `store/store.go` | `Put`/`Get`/`List`/`Delete`/`DeleteIfVersion`/`Watch`/`Close` + sentinel errors |
 | Store behavior contract | `store/contract.go` | `RunStoreContract` reusable test suite |
 | etcd implementation | `store/etcd/etcd.go` | `clientv3`-backed, linearizable get, list-then-watch |
 | Fake implementation | `store/fake/fake.go` | in-memory, monotonic revision, watcher fan-out |
@@ -81,6 +82,8 @@ Control plane composition root: assembles etcd-backed store, MAC allocator, sche
 - MAC allocation is atomic: `WithAllocation` holds a mutex across the entire list→pick→commit flow.
 - `store.Store` is the swappable boundary: etcd and fake implement the same `RunStoreContract` behavior suite.
 - Watch uses list-then-watch (startRevision="") for initial connect, resume (startRevision=N) for reconnection.
+- GET single-object responses inject `metadata.resourceVersion` into the response body; the store remains raw JSON and is not mutated by GET.
+- PUT replace is update-only optimistic concurrency: the request body must carry `metadata.resourceVersion`; stale versions return 409.
 - Status PATCH uses read-modify-write CAS with max 3 retries; 409 on exhaustion.
 - `newServiceWithStore(st, cfg)` is the test seam that bypasses etcd dial.
 
@@ -108,7 +111,7 @@ Control plane composition root: assembles etcd-backed store, MAC allocator, sche
 
 ### Flow: apply pipeline {#flow-apiserver-apply}
 
-- Entry: `internal/controlplane/apiserver/handler_apply.go:60 (Server.Apply)` — POST/PUT `/apis/{kind}/{name}`
+- Entry: `internal/controlplane/apiserver/handler_apply.go:60 (Server.Apply)` — POST `/apis/{kind}/{name}`
 - Local chain:
   1. `:81 (Server.apply)` — kind dispatch: StoragePool/Image/Volume/Network/NIC/VM
   2. `:91-185` — `json.Unmarshal` → typed object → `validateObject(meta, spec)` → `requireName`
@@ -118,6 +121,18 @@ Control plane composition root: assembles etcd-backed store, MAC allocator, sche
 - Data: HTTP body `[]byte` → typed API object → `json.Marshal` → etcd key-value
 - Side effects: etcd write; MAC allocation (NIC); node binding (VM)
 - Exit / next hop: HTTP 201 + JSON body with `ResourceVersion`
+
+### Flow: replace pipeline {#flow-apiserver-replace}
+
+- Entry: `internal/controlplane/apiserver/handler_replace.go:24 (Server.Replace)` — PUT `/apis/{kind}/{name}`
+- Local chain:
+  1. Decode incoming object and require `metadata.resourceVersion`.
+  2. `store.Get` old object; missing object returns HTTP 404 because replace is update-only.
+  3. Run replace admission with old/new objects, preserving server-owned metadata and status.
+  4. `store.Put(ctx, key, data, expectedVersion)` — CAS using submitted resourceVersion.
+- Data: editable GET response JSON → typed API object → admission → CAS JSON write.
+- Side effects: etcd conditional write only; no create-on-missing behavior.
+- Exit / next hop: HTTP 200 + stored object body with new `metadata.resourceVersion`; stale RV returns 409.
 
 ### Flow: watch pipeline {#flow-apiserver-watch}
 
@@ -147,4 +162,4 @@ Control plane composition root: assembles etcd-backed store, MAC allocator, sche
 - The old `internal/apiserver/server.go` (noop skeleton) still exists but is no longer wired into `controlplane.NewService`. The real apiserver lives in `internal/controlplane/apiserver/`.
 - `store/etcd` integration tests require `GOVIRTA_ETCD_ENDPOINTS` env var.
 - `mac.Pool.Candidates()` returns `iter.Seq[net.HardwareAddr]`; it is a pure iterator, not a slice allocation.
-- The apiserver does not decode objects for Get/List — it returns raw bytes pass-through with `X-Resource-Version` header.
+- The apiserver keeps stored values as raw bytes. Single-object GET injects `metadata.resourceVersion` into the response body plus `X-Resource-Version` header for get→edit→replace; List/Watch still stream stored raw object bytes.

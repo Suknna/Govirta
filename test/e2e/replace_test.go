@@ -20,10 +20,14 @@ func replaceCycle(ctx context.Context, t *testing.T, ctl, server, tmpDir string)
 		t.Fatalf("govirtctl get VM/%s: %v\noutput:\n%s", vmName, err, getOut)
 	}
 
+	getPath := filepath.Join(tmpDir, "vm-replace-get.json")
+	if err := os.WriteFile(getPath, []byte(getOut), 0o600); err != nil {
+		t.Fatalf("write raw govirtctl get output %q: %v", getPath, err)
+	}
+
 	var current map[string]any
-	dec := json.NewDecoder(strings.NewReader(getOut))
-	if err := dec.Decode(&current); err != nil {
-		t.Fatalf("decode first JSON object from govirtctl get output: %v\noutput:\n%s", err, getOut)
+	if err := json.Unmarshal([]byte(getOut), &current); err != nil {
+		t.Fatalf("decode govirtctl get output as replace manifest: %v\noutput:\n%s", err, getOut)
 	}
 	oldObject := cloneJSONMap(t, current)
 
@@ -40,11 +44,10 @@ func replaceCycle(ctx context.Context, t *testing.T, ctl, server, tmpDir string)
 		t.Fatalf("govirtctl get VM/%s returned spec=%T, want object", vmName, current["spec"])
 	}
 	spec["powerState"] = "Off"
-	spec["powerOffMode"] = "Acpi"
+	spec["powerOffMode"] = "Force"
 
-	replacePath := filepath.Join(tmpDir, "vm-replace-current.json")
-	writeJSONManifest(t, replacePath, current)
-	replaceOut, err := runCtl(ctx, ctl, "replace", "--server", server, "-f", replacePath)
+	writeJSONManifest(t, getPath, current)
+	replaceOut, err := runCtl(ctx, ctl, "replace", "--server", server, "-f", getPath)
 	if err != nil {
 		t.Fatalf("govirtctl replace VM/%s: %v\noutput:\n%s", vmName, err, replaceOut)
 	}

@@ -666,7 +666,7 @@ func waitObjectPhase(ctx context.Context, t *testing.T, ctl, server, kind, name,
 		}
 		out, err := runCtl(ctx, ctl, "get", "--server", server, kind, name)
 		last = out
-		if err == nil && strings.Contains(out, "phase: "+want) {
+		if err == nil && decodeObjectPhase(t, out) == want {
 			t.Logf("%s/%s reached phase %s:\n%s", kind, name, want, out)
 			return
 		}
@@ -724,8 +724,7 @@ type vmStatusSnapshot struct {
 // readNICMAC reads the apiserver-assigned MAC from the NIC object's spec. The
 // MAC is NOT hardcoded in 06-nic.json — the control plane allocates it at
 // admission time, so the e2e must read the assigned value back rather than
-// assume a fixed one. json.Decoder reads only the first JSON value, ignoring the
-// trailing "phase: <x>" line govirtctl get appends.
+// assume a fixed one.
 func readNICMAC(ctx context.Context, t *testing.T, ctl, server, name string) string {
 	t.Helper()
 	out, err := runCtl(ctx, ctl, "get", "--server", server, "NIC", name)
@@ -755,6 +754,19 @@ func decodeVMStatus(t *testing.T, out string) vmStatusSnapshot {
 		return vmStatusSnapshot{}
 	}
 	return obj.Status
+}
+
+func decodeObjectPhase(t *testing.T, out string) string {
+	t.Helper()
+	var obj struct {
+		Status struct {
+			Phase string `json:"phase"`
+		} `json:"status"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out)).Decode(&obj); err != nil {
+		return ""
+	}
+	return obj.Status.Phase
 }
 
 // teardownSpine deletes the spine in reverse dependency order and proves the

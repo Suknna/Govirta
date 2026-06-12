@@ -3,6 +3,7 @@ package govirtctl
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,7 +126,7 @@ func TestRunReplaceConflictExitsOneAndSurfacesMessage(t *testing.T) {
 	}
 }
 
-func TestRunGetPrintsPhaseForVM(t *testing.T) {
+func TestRunGetPrintsEditableJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"kind":"VM","metadata":{"name":"vm-a"},"status":{"phase":"running"}}`))
@@ -137,8 +138,12 @@ func TestRunGetPrintsPhaseForVM(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Run get code = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if !bytes.Contains(stdout.Bytes(), []byte("phase: running")) {
-		t.Fatalf("get stdout = %q, want it to contain 'phase: running'", stdout.String())
+	if bytes.Contains(stdout.Bytes(), []byte("phase:")) {
+		t.Fatalf("get stdout = %q, want pure JSON without human phase suffix", stdout.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("get stdout must be directly usable as JSON for replace: %v\noutput:\n%s", err, stdout.String())
 	}
 }
 
