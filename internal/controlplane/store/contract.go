@@ -174,8 +174,15 @@ func RunStoreContract(t *testing.T, newStore func() Store) {
 			t.Fatalf("Get after matching delete: error = %v, want ErrNotFound", err)
 		}
 
-		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", first.ResourceVersion); err != nil {
-			t.Fatalf("DeleteIfVersion missing key must be idempotent, got %v", err)
+		for name, version := range map[string]string{
+			"valid old version": first.ResourceVersion,
+			"empty version":     "",
+			"stale version":     "stale",
+			"invalid version":   "invalid",
+		} {
+			if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", version); err != nil {
+				t.Fatalf("DeleteIfVersion missing key with %s must be idempotent, got %v", name, err)
+			}
 		}
 	})
 

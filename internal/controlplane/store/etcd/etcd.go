@@ -130,6 +130,14 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // Missing keys are idempotent success; present keys with an empty, unparsable, or
 // stale expectedVersion return store.ErrRevisionConflict and remain stored.
 func (s *Store) DeleteIfVersion(ctx context.Context, key string, expectedVersion string) error {
+	current, err := s.cli.Get(ctx, key)
+	if err != nil {
+		return fmt.Errorf("etcd: conditional delete get %q: %w", key, err)
+	}
+	if len(current.Kvs) == 0 {
+		return nil
+	}
+
 	rev, err := strconv.ParseInt(expectedVersion, 10, 64)
 	if err != nil || rev == 0 {
 		return store.ErrRevisionConflict
