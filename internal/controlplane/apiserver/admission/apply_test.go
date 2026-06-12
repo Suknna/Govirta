@@ -147,6 +147,8 @@ func TestEnvelopeValidatorRequiresReplaceResourceVersion(t *testing.T) {
 func TestEnvelopeValidatorAllowsReplaceResourceVersion(t *testing.T) {
 	old := validAdmissionVM()
 	old.ResourceVersion = "7"
+	old.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
+	old.DeletionTimestamp = "2026-06-12T00:00:00Z"
 	obj := old
 
 	err := EnvelopeValidator{}.Validate(context.Background(), Request{
@@ -188,7 +190,7 @@ func TestEnvelopeValidatorRejectsReplaceServerOwnedMetadata(t *testing.T) {
 				OldObject: old,
 				NewObject: obj,
 			})
-			assertAdmissionReason(t, err, ReasonBadRequest)
+			assertAdmissionReason(t, err, ReasonConflict)
 		})
 	}
 }

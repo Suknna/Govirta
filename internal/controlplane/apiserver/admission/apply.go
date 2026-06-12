@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
@@ -79,11 +80,11 @@ func (v EnvelopeValidator) Validate(ctx context.Context, req Request) error {
 		if meta.ResourceVersion == "" {
 			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("resourceVersion is required for replace"))
 		}
-		if meta.DeletionTimestamp != "" {
-			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("deletionTimestamp is server-owned on replace"))
+		if meta.DeletionTimestamp != oldMeta.DeletionTimestamp {
+			return Reject(v.Name(), ReasonConflict, fmt.Errorf("deletionTimestamp is server-owned on replace: existing %q vs requested %q", oldMeta.DeletionTimestamp, meta.DeletionTimestamp))
 		}
-		if len(meta.Finalizers) != 0 {
-			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("finalizers are server-owned on replace"))
+		if !slices.Equal(meta.Finalizers, oldMeta.Finalizers) {
+			return Reject(v.Name(), ReasonConflict, fmt.Errorf("finalizers are server-owned on replace: existing %v vs requested %v", oldMeta.Finalizers, meta.Finalizers))
 		}
 	}
 	return nil

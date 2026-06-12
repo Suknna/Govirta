@@ -225,6 +225,22 @@ func TestFieldPolicyRejectsSnapshotSpecChange(t *testing.T) {
 	assertAdmissionReason(t, err, ReasonConflict)
 }
 
+func TestFieldPolicyRejectsReplaceImmutableField(t *testing.T) {
+	old := validAdmissionVM()
+	obj := old
+	obj.Spec.Arch = "aarch64"
+
+	err := FieldPolicyValidator{}.Validate(context.Background(), Request{
+		Operation: OperationReplace,
+		Kind:      metav1.KindVM,
+		Name:      old.Name,
+		OldRaw:    []byte(`{}`),
+		OldObject: old,
+		NewObject: obj,
+	})
+	assertAdmissionReason(t, err, ReasonConflict)
+}
+
 func TestFieldPolicyAllowsSnapshotUnchangedSpec(t *testing.T) {
 	old := validAdmissionSnapshot()
 	obj := old

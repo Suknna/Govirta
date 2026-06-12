@@ -87,7 +87,7 @@ func TestWatchSourceReceivesEveryRapidLiveEventThroughRealAPIServer(t *testing.T
 	}
 }
 
-// applyStoragePool PUTs a minimal valid StoragePool bound to nodeName through the
+// applyStoragePool POSTs a minimal valid StoragePool bound to nodeName through the
 // real apiserver Apply route, exactly as govirtctl does.
 func applyStoragePool(t *testing.T, ts *httptest.Server, nodeName, name string) {
 	t.Helper()
@@ -110,7 +110,7 @@ func applyStoragePool(t *testing.T, ts *httptest.Server, nodeName, name string) 
 		t.Fatalf("marshal %q: %v", name, err)
 	}
 	url := fmt.Sprintf("%s/apis/%s/%s", ts.URL, metav1.KindStoragePool, name)
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("build apply request %q: %v", name, err)
 	}

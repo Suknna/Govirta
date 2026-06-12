@@ -60,26 +60,31 @@ func (s *Server) replace(ctx context.Context, r *http.Request) ([]byte, *apiErro
 		if aerr := preserveUpdateObjectMeta(req, &o.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		return s.putReplaceResponse(ctx, storeKey(kind, o.Name), o, req, expectedVersion)
 	case imagev1.Image:
 		if aerr := preserveUpdateObjectMeta(req, &o.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		return s.putReplaceResponse(ctx, storeKey(kind, o.Name), o, req, expectedVersion)
 	case volumev1.Volume:
 		if aerr := preserveUpdateObjectMeta(req, &o.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		return s.putReplaceResponse(ctx, storeKey(kind, o.Name), o, req, expectedVersion)
 	case networkv1.Network:
 		if aerr := preserveUpdateObjectMeta(req, &o.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		return s.putReplaceResponse(ctx, storeKey(kind, o.Name), o, req, expectedVersion)
 	case nicv1.NIC:
 		if aerr := preserveUpdateObjectMeta(req, &o.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		if req.Operation == admission.OperationReplace && o.Spec.MAC == "" {
 			oldNIC, ok := req.OldObject.(nicv1.NIC)
 			if !ok {
@@ -92,11 +97,13 @@ func (s *Server) replace(ctx context.Context, r *http.Request) ([]byte, *apiErro
 		if aerr := preserveVMUpdateMetadata(req.OldObject, &o); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		return s.putReplaceResponse(ctx, storeKey(kind, o.Name), o, req, expectedVersion)
 	case snapshotv1.Snapshot:
 		if aerr := preserveUpdateObjectMeta(req, &o.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
+		o.ResourceVersion = ""
 		node, aerr := s.resolveVMNodeName(ctx, o.Spec.VMRef)
 		if aerr != nil {
 			return nil, aerr

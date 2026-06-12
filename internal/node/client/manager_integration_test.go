@@ -177,7 +177,7 @@ func applyObject(t *testing.T, ts *httptest.Server, kind metav1.Kind, name strin
 		t.Fatalf("marshal %s/%s: %v", kind, name, err)
 	}
 	url := fmt.Sprintf("%s/apis/%s/%s", ts.URL, kind, name)
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("build apply %s/%s: %v", kind, name, err)
 	}
