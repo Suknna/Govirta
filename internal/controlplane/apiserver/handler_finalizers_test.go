@@ -276,6 +276,56 @@ func TestPatchFinalizersConcurrentWriteReturns409(t *testing.T) {
 	}
 }
 
+type conflictDeleteIfVersionStore struct {
+	store.Store
+	failsRemaining int
+}
+
+func (s *conflictDeleteIfVersionStore) DeleteIfVersion(ctx context.Context, key string, expectedVersion string) error {
+	if expectedVersion != "" && s.failsRemaining > 0 {
+		s.failsRemaining--
+		return store.ErrRevisionConflict
+	}
+	return s.Store.DeleteIfVersion(ctx, key, expectedVersion)
+}
+
+func TestPatchFinalizersRealDeleteConflictReturns409AndKeepsObject(t *testing.T) {
+	st := fake.New()
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	})
+	pool, err := mac.NewPool(net.HardwareAddr{0x02, 0x00, 0x00}, 0x000001, 0x0000ff)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	alloc := mac.NewAllocator(pool, st)
+	wrapped := &conflictDeleteIfVersionStore{Store: st, failsRemaining: 1}
+	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+
+	vol := validVolume()
+	if rec := doApply(t, srv, metav1.KindVolume, vol.Name, vol); rec.Code != http.StatusCreated {
+		t.Fatalf("seed volume apply = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	stampDeletionTimestamp(t, srv, metav1.KindVolume, vol.Name)
+
+	rec := doPatchFinalizers(t, srv, metav1.KindVolume, vol.Name, metav1.FinalizerNodeTeardown)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (CAS conflict on real delete must surface as 409); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if msg := decodeError(t, rec); msg == "" {
+		t.Fatalf("expected non-empty error body")
+	}
+	if wrapped.failsRemaining != 0 {
+		t.Fatalf("forced delete CAS conflict not consumed; failsRemaining = %d", wrapped.failsRemaining)
+	}
+	if _, err := st.Get(context.Background(), storeKey(metav1.KindVolume, vol.Name)); err != nil {
+		t.Fatalf("store.Get after conflicted finalizer real delete: err = %v, want object to remain", err)
+	}
+}
+
 // TestPatchFinalizersMissingObjectReturns404 covers the 404 error branch: a
 // PATCH of the finalizers sub-resource on an object that was never created
 // resolves to store.ErrNotFound -> 404, with the uniform {"error": "..."}

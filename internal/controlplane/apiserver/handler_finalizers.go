@@ -146,16 +146,13 @@ func (s *Server) patchFinalizers(ctx context.Context, r *http.Request) (store.Ra
 
 	// 收口判定：finalizer 清空 且 对象带 deletionTimestamp（存在删除意图）→ 真删。
 	// 这是真删唯一发生的地方：DELETE 只打戳，等所有 finalizer 拆净才在此收口。
-	//
-	// 已知版本一致性窗口（I1，本刀接受）：回写路径用 raw.ResourceVersion 做 CAS
-	// （conditional Put），但真删路径用无条件 store.Delete（store 接口的 Delete 无 version
-	// 参数）。Get→Delete 之间若有并发写（如 apply 重写该对象、清掉 deletionTimestamp 复活
-	// 它），无条件 Delete 仍会盲删。当前架构下正常流不会触发：每个 node 控制器对自己负责的
-	// 对象是单写者 reconcile，且 DELETE 入口已做反向引用守卫。严格的版本化删除需要 store
-	// 接口支持 conditional delete（带 expectedVersion），属于已冻结的 store 层改动，记为
-	// backlog；本刀不改 store 接口、接受此窗口。
+	// 真删同样以本次读取到的 ResourceVersion 为 CAS 条件；若 Get→DeleteIfVersion
+	// 之间发生并发写，返回 409 让调用者重试，避免盲删更新后的对象。
 	if len(obj.Metadata.Finalizers) == 0 && obj.Metadata.DeletionTimestamp != "" {
-		if err := s.store.Delete(ctx, key); err != nil {
+		if err := s.store.DeleteIfVersion(ctx, key, raw.ResourceVersion); err != nil {
+			if errors.Is(err, store.ErrRevisionConflict) {
+				return store.RawObject{}, false, conflictErr(fmt.Errorf("apiserver: finalizers delete %s/%s: %w", kind, name, err))
+			}
 			return store.RawObject{}, false, internalErr(fmt.Errorf("apiserver: finalizers delete %s/%s: %w", kind, name, err))
 		}
 		return store.RawObject{}, true, nil
