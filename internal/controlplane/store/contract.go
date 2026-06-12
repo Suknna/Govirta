@@ -174,6 +174,27 @@ func RunStoreContract(t *testing.T, newStore func() Store) {
 			t.Fatalf("Get after matching delete: error = %v, want ErrNotFound", err)
 		}
 
+		second, err := s.Put(ctx, "/govirta/pod/a", []byte(`{"v":2}`), "")
+		if err != nil {
+			t.Fatalf("Put second generation: unexpected error: %v", err)
+		}
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", first.ResourceVersion); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("DeleteIfVersion stale valid version: error = %v, want ErrRevisionConflict", err)
+		}
+		got, err := s.Get(ctx, "/govirta/pod/a")
+		if err != nil {
+			t.Fatalf("Get after stale valid delete: unexpected error: %v", err)
+		}
+		if got.ResourceVersion != second.ResourceVersion {
+			t.Fatalf("Get after stale valid delete: ResourceVersion = %q, want %q", got.ResourceVersion, second.ResourceVersion)
+		}
+		if err := s.DeleteIfVersion(ctx, "/govirta/pod/a", second.ResourceVersion); err != nil {
+			t.Fatalf("DeleteIfVersion second matching: unexpected error: %v", err)
+		}
+		if _, err := s.Get(ctx, "/govirta/pod/a"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Get after second matching delete: error = %v, want ErrNotFound", err)
+		}
+
 		for name, version := range map[string]string{
 			"valid old version": first.ResourceVersion,
 			"empty version":     "",
