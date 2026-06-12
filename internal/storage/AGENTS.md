@@ -2,12 +2,13 @@
 
 <!--
 Verified-against:
-  base_commit: 8778cb4
+  base_commit: dfad16b
   files:
     - internal/storage/service.go
     - internal/storage/image_service.go
     - internal/storage/errors.go
     - internal/storage/pool/service.go
+    - internal/storage/pool/resize.go
     - internal/storage/pool/pool.go
     - internal/storage/block/driver.go
     - internal/storage/image/driver.go
@@ -36,6 +37,18 @@ Verified-against:
         - internal/storage/pool/service.go
         - internal/storage/local/driver.go
         - pkg/virt/qemuimg/client.go
+    - anchor: flow-storage-snapshot
+      sources:
+        - internal/storage/service.go
+        - internal/storage/pool/service.go
+        - internal/storage/local/driver.go
+        - pkg/virt/qemuimg/client.go
+    - anchor: flow-storage-resize
+      sources:
+        - internal/storage/service.go
+        - internal/storage/pool/resize.go
+        - internal/storage/local/driver.go
+        - pkg/virt/qemuimg/client.go
 -->
 
 ## OVERVIEW
@@ -49,7 +62,7 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
 | VM block volume API | `service.go` | `VolumeService`; all requests carry explicit `PoolName`, VM identity, disk identity |
 | File image API | `image_service.go` | `ImageService`; `PutImage` returns commit/cancel writer, `GetImage` returns `io.ReadCloser` |
 | Pool registry/accounting | `pool/service.go`, `pool/pool.go` | block/file pool type split, capacity admission, in-memory indexes |
-| Block driver contract | `block/driver.go` | `Create`, `CreateFromReader`, `Publish`, `Delete`, `Snapshot`, `Resize` |
+| Block driver contract | `block/driver.go` | `Create`, `CreateFromReader`, `Publish`, `Delete`, `Snapshot`, `DeleteSnapshot`, `Resize` |
 | Image driver contract | `image/driver.go` | raw/qcow2 byte image `Put/Get/Delete` + `ImageWriter` |
 | Volume model | `volume/` | `Volume`, `PublishedVolume`, file attachment contract |
 | Explicit source format | `diskformat/format.go` | only `qcow2` and `raw` are valid |
@@ -71,7 +84,7 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
 - Do not make storage infer image format from bytes or file extension; upper layers must pass `diskformat.Format`.
 - Do not scan storage roots to rebuild metadata after restart; catalog persistence belongs above this package.
 - Do not create qcow2 backing chains from image-derived root volumes; every VM root disk is an independent copy.
-- Do not perform snapshot/resize lifecycle operations against running VMs; current `local.Driver.Snapshot` and `Resize` return unsupported.
+- Do not perform snapshot/resize lifecycle operations against running VMs; `local.Driver.Snapshot`/`DeleteSnapshot`/`Resize` assume the caller already enforced the VM cold gate.
 
 ## CALL GRAPHS & DATA FLOW (LOCAL)
 
@@ -87,7 +100,7 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
   6. `internal/storage/pool/service.go:325 (Service.PublishVolume)` — validate VM ownership, call driver publish, record attachment state
 - Data (within module): `CreateVolumeRequest` → `block.CreateRequest` → `volume.Volume` → `volume.PublishedVolume{AttachmentFile,qcow2,path}`
 - Side effects (within module): creates/deletes qcow2 under `StorageRoot/pool/<pool>/...`; mutates in-memory `Pool.volumes`; publish records attachment state only
-- Exit / next hop: `pkg/virt/qemuimg/client.go:105 (QCOW2Client.Create)` / `:110 (Info)` / `:135 (QCOW2Client.Remove)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+- Exit / next hop: `pkg/virt/qemuimg/client.go:105 (QCOW2Client.Create)` / `:110 (Info)` / `:135 (QCOW2Client.Remove)` [详见 `../../pkg/virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 
 ### Flow: storage image lifecycle {#flow-storage-image}
 
@@ -115,7 +128,32 @@ OpenStack-style internal storage boundary: VM-facing services call explicit name
   6. `internal/storage/local/driver.go:206 (Driver.CreateFromReader)` — optional qemu-img resize for requested capacity, then commit temp via hard-link (`commitTempImage` at `:215`)
 - Data (within module): `io.ReadCloser` + `diskformat.Format` → `block.CreateFromReaderRequest` → independent qcow2 `volume.Volume`
 - Side effects (within module): reads source image, writes standalone qcow2 root disk, updates `Pool.volumes`; source image remains independent
-- Exit / next hop: `pkg/virt/qemuimg/client.go:115 (QCOW2Client.Convert)` / `:120 (Resize)` [详见 `../virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+- Exit / next hop: `pkg/virt/qemuimg/client.go:115 (QCOW2Client.Convert)` / `:120 (Resize)` [详见 `../../pkg/virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+
+### Flow: qcow2 internal snapshot {#flow-storage-snapshot}
+
+- Entry from root flow: `internal/storage/service.go:268 (VolumeService.SnapshotVolume)` / `:291 (DeleteVolumeSnapshot)`
+- Local chain:
+  1. `internal/storage/service.go:268 (VolumeService.SnapshotVolume)` — validate explicit pool, volume ID, snapshot name; cold safety is owned by SnapshotController
+  2. `internal/storage/pool/service.go:398 (Service.SnapshotVolume)` — lookup block pool and existing volume under pool lock
+  3. `internal/storage/local/driver.go:357 (Driver.Snapshot)` — resolve owned qcow2 path, verify regular image, call qemu-img snapshot create
+  4. `internal/storage/service.go:291 (VolumeService.DeleteVolumeSnapshot)` — same request validation for delete
+  5. `internal/storage/local/driver.go:385 (Driver.DeleteSnapshot)` — list-before-delete so missing internal snapshot is idempotent success
+- Data (within module): `SnapshotVolumeRequest{PoolName,VolumeID,SnapshotName}` → `block.SnapshotRequest` → qcow2 internal snapshot tag
+- Side effects (within module): qemu-img modifies internal snapshot metadata in the volume qcow2 file; no storage metadata record is added
+- Exit / next hop: `pkg/virt/qemuimg/client.go:125 (QCOW2Client.Snapshot)` / `:130 (SnapshotDelete)` / `:142 (SnapshotList)` [详见 `../../pkg/virt/qemuimg/AGENTS.md#flow-qcow2-do`]
+
+### Flow: cold volume resize {#flow-storage-resize}
+
+- Entry from root flow: `internal/storage/service.go:242 (VolumeService.ResizeVolume)`
+- Local chain:
+  1. `internal/storage/service.go:242 (VolumeService.ResizeVolume)` — validate explicit pool, volume ID, positive absolute capacity
+  2. `internal/storage/pool/resize.go:22 (Service.ResizeVolume)` — lookup block pool, reserve capacity delta under pool lock, call driver, mutate map only after success
+  3. `internal/storage/local/driver.go:438 (Driver.Resize)` — resolve owned qcow2 path, read live virtual size through qemu-img info, no-op if live size already reaches target
+  4. `internal/storage/local/driver.go:465 (Driver.Resize)` — qemu-img resize grows to absolute target; never shrinks
+- Data (within module): `ResizeVolumeRequest{PoolName,VolumeID,CapacityBytes}` → live qcow2 virtual size → updated `volume.Volume.CapacityBytes`
+- Side effects (within module): qemu-img may grow qcow2; in-memory `Pool.volumes` capacity updates only after driver success
+- Exit / next hop: `pkg/virt/qemuimg/client.go:110 (QCOW2Client.Info)` / `:120 (Resize)` [详见 `../../pkg/virt/qemuimg/AGENTS.md#flow-qcow2-do`]
 
 ## NOTES
 

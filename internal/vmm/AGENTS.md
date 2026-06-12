@@ -2,11 +2,13 @@
 
 <!--
 Verified-against:
-  base_commit: 8778cb4
+  base_commit: dfad16b
   files:
     - internal/vmm/service.go
     - internal/vmm/lifecycle.go
     - internal/vmm/discover.go
+    - internal/vmm/redefine.go
+    - internal/vmm/argv.go
     - internal/vmm/state.go
     - internal/vmm/store.go
     - internal/vmm/paths.go
@@ -20,6 +22,8 @@ Verified-against:
     - internal/vmm/proc/errors.go
     - pkg/virt/qemu/vm.go
     - test/acceptance/vmm_lifecycle_test.go
+    - internal/vmm/redefine_test.go
+    - internal/vmm/argv_test.go
   flows:
     - anchor: flow-vmm-create
       sources:
@@ -37,6 +41,12 @@ Verified-against:
         - internal/vmm/discover.go
         - internal/vmm/state.go
         - internal/vmm/proc/controller_linux.go
+    - anchor: flow-vmm-redefine
+      sources:
+        - internal/vmm/redefine.go
+        - internal/vmm/argv.go
+        - internal/vmm/facility.go
+        - internal/vmm/store.go
 -->
 
 ## OVERVIEW
@@ -65,6 +75,8 @@ Recovery is kubelet-shaped: `Discover` enumerates live actual VMs (CRI-list role
 | --- | --- | --- |
 | Service struct + Create + Delete | `service.go` | `VMMService`; `NewVMMService(runtimeRoot, proc, qmpFactory)`; `QMPFactory` type |
 | Start / Stop / Kill | `lifecycle.go` | `Start` (spawn persisted argv), `Stop` (best-effort QMP `system_powerdown`), `Kill` (QMP `quit` → SIGKILL fallback, guaranteed stop) |
+| Cold config redefine | `redefine.go` | replace persisted `Spec` + derived argv; does not touch `Intended` or QEMU process |
+| Spec → argv derivation | `argv.go` | derive typed QEMU builder from `SpecSummary` + explicit `NodeEnv` |
 | Status / List / Discover / Reattach | `discover.go` | live probe (`probe`/`statusFrom`), `Discover` scan, `Reattach` adopt-live-only |
 | Phase derivation (pure) | `state.go` | `derivePhase`/`observedPhase`; live wins over intent |
 | vm.json encode/decode + persistence | `store.go` | `encodeState`/`decodeState`/`writeState`/`loadState` |
@@ -93,6 +105,7 @@ Recovery is kubelet-shaped: `Discover` enumerates live actual VMs (CRI-list role
 | `VMMService.Status` | method | `discover.go:55` | single-VM live probe → derived `Phase` |
 | `VMMService.Discover` | method | `discover.go:64` | scan runtimeRoot, load each vm.json, live-verify; skips undiscoverable dirs; sorted by UUID |
 | `VMMService.Reattach` | method | `discover.go:96` | adopt live process only; dead → `ErrNotReady`, never spawns |
+| `VMMService.Redefine` | method | `redefine.go:25` | cold config convergence: rewrite vm.json Spec + argv without process mutation |
 | `derivePhase` / `observedPhase` | func | `state.go:10` / `state.go:37` | intent + live probe → `Phase`; live wins; `observedPhase` adds the Defined special-case |
 | `injectFacilityFlags` | func | `facility.go:17` | renders runtime facility flags onto the builder, returns argv snapshot |
 | `runtimePathsFor` | func | `paths.go:15` | runtimeRoot + uuid → full `RuntimePaths` (private layout) |
@@ -121,6 +134,7 @@ Conflict arbitration: `intent=Running` + process gone → `Failed` (never report
 - VM UUID is caller-supplied in `CreateRequest.UUID`; vmm never generates it (一等公民判据 + explicit 铁律).
 - The caller passes a configured-but-unbuilt `*qemu.Builder`; vmm injects runtime facility flags from its private path layout then calls `Build()` (Q6-A + Q70). The path layout never leaks to the upper layer (与 storage `local.Driver` 同构).
 - Persisted argv model: `Create` renders the facility-injected argv once and stores it in vm.json. `Start` execs the stored argv; `Discover`/`Reattach` reconstruct everything from vm.json after restart — the builder never survives across operations.
+- `Redefine` is the cold-only config convergence path: it replaces `persistedState.Spec`, re-derives facility-injected argv, and preserves identity/paths/intent/createdAt. The caller owns the cold gate.
 - QMP clients are transient: built per-op via `QMPFactory` from the uuid-derived `qmp.sock` path, used, then `Disconnect`. A live QMP connection is never a guest-survival dependency (硬约束 1).
 - Run-state is always read live (process + QMP); vm.json is authoritative for identity/spec/intent only, never for run-state (上下一致). On conflict, live wins.
 - All OS side effects go through `proc.ProcessController` (spawn/alive/forcekill + atomic file IO + dir scan); unit tests inject a fake and never touch real QEMU. QMP stays a separate swappable boundary injected via `QMPFactory`.
@@ -176,12 +190,26 @@ Conflict arbitration: `intent=Running` + process gone → `Failed` (never report
 - Side effects: none (read-only live observation); never spawns
 - Exit / next hop: `internal/vmm/proc/controller_linux.go:54 (LinuxController.ProcessAlive)` (pidfile + signal 0); transient QMP `query-status`
 
+### Flow: VM redefine {#flow-vmm-redefine}
+
+- Entry from root flow: `internal/vmm/redefine.go:25 (VMMService.Redefine)` (called by node VM controller after observed process is off)
+- Local chain:
+  1. `internal/vmm/redefine.go:28 (Redefine → loadState)` — read existing vm.json; missing → `ErrNotFound`
+  2. `internal/vmm/redefine.go:33 (Redefine → deriveBuilder)` — rebuild typed QEMU builder from new `SpecSummary` and explicit `NodeEnv`
+  3. `internal/vmm/redefine.go:37 (Redefine → injectFacilityFlags)` — re-apply pidfile/QMP/serial/VNC/daemonize facility flags from preserved runtime paths
+  4. `internal/vmm/redefine.go:43 (Redefine)` — replace `st.Spec` and `st.Argv`; preserve `Intended`, `UUID`, `Paths`, and `CreatedAt`
+  5. `internal/vmm/redefine.go:45 (Redefine → writeState)` — atomic vm.json rewrite; `UpdatedAt` changes
+  6. `internal/vmm/redefine.go:49 (Redefine → statusFrom)` — return live-probed phase
+- Data: `uuid` + desired `SpecSummary` → typed QEMU builder → facility-injected argv → updated `persistedState`
+- Side effects: vm.json rewrite only; no QEMU process start/stop/kill/QMP command
+- Exit / next hop: `internal/node/controllers/vm_config.go:74 (VMController.reconcileConfigDrift)` [详见 `../node/controllers/AGENTS.md#flow-vm-cold-config-change`]
+
 ## NOTES
 
 - Differs deliberately from storage's "no scan, in-memory only, upper-layer replay" (#251/#367): storage qcow2 is an inert file with no live process, while a VM has a daemonized process surviving restart that must be re-discovered + adopted to Stop/Kill/Status it. User-authorized deviation, documented in the spec.
 - Builder extension for this layer (`pkg/virt/qemu`): added `Daemonize()`, `VNC(display.VNCUnix)`, `serial.File(path)`, and typed direct-kernel boot (`Kernel`/`Initrd`/`Append`). Direct-kernel boot was required because cirros aarch64 has no EFI bootloader and cannot boot standalone from disk; every acceptance test boots via `-kernel`/`-initrd`/`-append`.
-- Out of scope (deferred): reconcile loop (upper `internal/node`), fencing token / STONITH strong-consistency double-write prevention, VNC byte-stream proxy/websocket, cold snapshot/resize/config edit, control-plane etcd integration.
+- Out of scope (deferred): fencing token / STONITH strong-consistency double-write prevention, VNC byte-stream proxy/websocket, hot-plug/live migration, control-plane etcd integration inside this package. Cold config edit is now implemented through `Redefine`; cold snapshot/resize live above vmm in node/storage.
 - Verification: `go test -race -count=1 ./internal/vmm/...` (fake `ProcessController` + fake `qmp.Client`, full phase-derivation table, lifecycle, anti-split-brain guard, ctx cancellation); Lima-only `TestVMMLifecycleEndToEnd` + `TestVMMDiscoverNeverRestartsDeadVM` (`test/acceptance/vmm_lifecycle_test.go`) prove real daemonize/QMP/powerdown/kill/discover/reattach and the never-auto-restart guard on a real kernel.
 - Graceful Stop is best-effort, matching libvirt/Proxmox/kubevirt: QMP `system_powerdown` only injects an ACPI power-button event and returns immediately; whether the guest exits depends on guest ACPI cooperation. direct-kernel cirros aarch64 has no UEFI/ACPI, so the acceptance test asserts only that Stop is accepted, intent lands `Stopped`, and phase ∈ {`Stopping`, `Stopped`} — never that the guest truly exits. Guaranteed stop is `Kill` (QMP `quit`, no guest cooperation); upper layers own the Stop→Kill grace-period escalation.
 - `SpawnDaemonized` captures QEMU's stderr during the synchronous fork-before-daemonize phase. Pre-daemonize initialization errors (argv parse, disk open, QMP bind failure) are written to stderr with a non-zero exit code; the captured text is joined into the returned error so callers see the actual QEMU diagnostic instead of a bare "exit status 1". This does not violate the decoupling constraint: only the pre-fork parent's synchronous output is captured; after daemonize the parent exits and the guest is setsid-detached with its own `-D`/`-serial` log.
-- Evidence: direct source reads + AFT outline for symbol/line confirmation at `base_commit a240be0`. `[已验证]` 源码与单测断言；Lima acceptance 为真实内核网关。`[降级: LSP call hierarchy]`.
+- Evidence: direct source reads + AFT outline for symbol/line confirmation at `base_commit dfad16b`. `[已验证]` 源码与单测断言；Lima acceptance 为真实内核网关。`[降级: LSP call hierarchy]`.

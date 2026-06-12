@@ -2,7 +2,7 @@
 
 <!--
 Verified-against:
-  base_commit: 8778cb4
+  base_commit: dfad16b
   files:
     - internal/network/service.go
     - internal/network/nic_service.go
@@ -134,4 +134,4 @@ VM-facing network orchestration layer mirroring the `internal/storage` layering:
 - `NetworkService` and `NICService` intentionally share one `*netpool.Service` so network and NIC registrations live in the same record index (`internal/node/agent.go:29` wires both over one `netpool.NewService(...)`).
 - `GetNetworkStatus`/`GetNICStatus` populate every observed field from live primitive reads, including the firewall `RuleInfo` fields: `GetNetworkStatus` reads `Masquerade`/`Forward` via `firewall.ListRules` filtered by the definition's owner/purpose/family/table/chain, and `GetNICStatus` reads `AntiSpoofing` the same way, completing the unique match Go-side against the observed `EndpointAntiSpoofingSummary` MAC (multiple NICs share one owner/chain and `ListRules` cannot filter by MAC). A unique network rule that is absent is `networker.ErrNotFound`, and more than one match is `networker.ErrConflict`, mirroring the `link.Get`/`dhcp.GetServer` reads rather than returning an ambiguous zero-value `RuleInfo`.
 - Focused verification is doc-only for this knowledge base. Behavior is covered by `go test -count=1 ./internal/network/...` (registration, orchestration order, MAC passthrough, live status) and the Lima-only `TestNetworkEgressEndToEnd`.
-- Evidence: direct source reads of the orchestration layer, firewall forward-accept, node wiring, and the acceptance test at `base_commit e057cc0`; AFT outline/grep for symbol/line confirmation. `[已验证]` 源码与测试断言；`[降级: LSP call hierarchy]`.
+- Evidence: direct source reads of the orchestration layer, firewall forward-accept, node wiring, and the acceptance test at `base_commit dfad16b`; AFT outline/grep for symbol/line confirmation. `[已验证]` 源码与测试断言；`[降级: LSP call hierarchy]`.

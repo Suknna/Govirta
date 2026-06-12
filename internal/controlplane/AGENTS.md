@@ -2,15 +2,24 @@
 
 <!--
 Verified-against:
-  base_commit: 8778cb4
+  base_commit: dfad16b
   files:
     - internal/controlplane/service.go
     - internal/controlplane/service_test.go
     - internal/controlplane/apiserver/server.go
     - internal/controlplane/apiserver/handler_apply.go
+    - internal/controlplane/apiserver/handler_replace.go
+    - internal/controlplane/apiserver/handler_delete.go
+    - internal/controlplane/apiserver/handler_finalizers.go
     - internal/controlplane/apiserver/handler_get.go
     - internal/controlplane/apiserver/handler_watch.go
     - internal/controlplane/apiserver/handler_status.go
+    - internal/controlplane/apiserver/apply_admission.go
+    - internal/controlplane/apiserver/admission/registry.go
+    - internal/controlplane/apiserver/admission/delete.go
+    - internal/controlplane/apiserver/admission/fields.go
+    - internal/controlplane/apiserver/admission/finalizers.go
+    - internal/controlplane/apiserver/admission/references.go
     - internal/controlplane/store/store.go
     - internal/controlplane/store/contract.go
     - internal/controlplane/store/etcd/etcd.go
@@ -26,6 +35,7 @@ Verified-against:
     - pkg/apis/storagepool/v1alpha1/types.go
     - pkg/apis/image/v1alpha1/types.go
     - pkg/apis/volume/v1alpha1/types.go
+    - pkg/apis/snapshot/v1alpha1/types.go
   flows:
     - anchor: flow-controlplane-boot
       sources:
@@ -37,9 +47,32 @@ Verified-against:
       sources:
         - internal/controlplane/apiserver/server.go
         - internal/controlplane/apiserver/handler_apply.go
+        - internal/controlplane/apiserver/apply_admission.go
+        - internal/controlplane/apiserver/admission/registry.go
         - internal/controlplane/store/store.go
         - internal/controlplane/mac/allocator.go
         - internal/controlplane/scheduler/scheduler.go
+    - anchor: flow-apiserver-replace
+      sources:
+        - internal/controlplane/apiserver/server.go
+        - internal/controlplane/apiserver/handler_replace.go
+        - internal/controlplane/apiserver/admission/registry.go
+        - internal/controlplane/store/store.go
+        - internal/controlplane/store/etcd/etcd.go
+    - anchor: flow-apiserver-delete-finalizers
+      sources:
+        - internal/controlplane/apiserver/server.go
+        - internal/controlplane/apiserver/handler_delete.go
+        - internal/controlplane/apiserver/handler_finalizers.go
+        - internal/controlplane/apiserver/admission/delete.go
+        - internal/controlplane/apiserver/admission/finalizers.go
+        - internal/controlplane/store/store.go
+    - anchor: flow-apiserver-apply-snapshot
+      sources:
+        - internal/controlplane/apiserver/handler_apply.go
+        - internal/controlplane/apiserver/handler_replace.go
+        - internal/controlplane/apiserver/admission/references.go
+        - pkg/apis/snapshot/v1alpha1/types.go
     - anchor: flow-apiserver-watch
       sources:
         - internal/controlplane/apiserver/server.go
@@ -53,16 +86,18 @@ Verified-against:
 
 ## OVERVIEW
 
-Control plane composition root: assembles etcd-backed store, MAC allocator, scheduler, and HTTP apiserver into a single `Service`. The apiserver exposes a Kubernetes-style REST surface (`/apis/{kind}/{name}`) for 7 resource kinds with apply/replace/get/list/watch/status/finalizer operations.
+Control plane composition root: assembles etcd-backed store, MAC allocator, scheduler, and HTTP apiserver into a single `Service`. The apiserver exposes a Kubernetes-style REST surface (`/apis/{kind}/{name}`) for 7 resource kinds with apply/replace/get/list/watch/status/delete/finalizer operations.
 
 ## WHERE TO LOOK
 
 | Task | Location | Notes |
 | --- | --- | --- |
 | Composition root | `service.go` | `NewService(ctx, Config)` dials etcd, assembles all deps; `newServiceWithStore` is test seam |
-| HTTP server + routing | `apiserver/server.go` | `Server.Handler()` registers all routes; `Server.Run` binds TCP |
+| HTTP server + routing | `apiserver/server.go` | `Server.Handler()` registers all routes; `Server.Run` binds TCP; internals详见 `apiserver/AGENTS.md` |
 | Apply handler (unconditional create/update) | `apiserver/handler_apply.go` | kind-dispatched decode→validate→admit→store pipeline for POST apply |
 | Replace handler (guarded update) | `apiserver/handler_replace.go` | PUT replace requires body `metadata.resourceVersion` and CASes through store.Put |
+| Delete/finalizers | `apiserver/handler_delete.go`, `apiserver/handler_finalizers.go` | DELETE stamps deletionTimestamp; finalizers subresource performs real delete |
+| Admission chains | `apiserver/admission/` | apply/replace/status/delete/finalizers validators and reference policy |
 | Get/List handler | `apiserver/handler_get.go` | `Get` single object + `List` by prefix |
 | Watch handler (streaming) | `apiserver/handler_watch.go` | chunked NDJSON, nodeName filter, list-then-watch + resume |
 | Status patch handler | `apiserver/handler_status.go` | read-modify-write CAS with retry (max 3) |
@@ -111,28 +146,51 @@ Control plane composition root: assembles etcd-backed store, MAC allocator, sche
 
 ### Flow: apply pipeline {#flow-apiserver-apply}
 
-- Entry: `internal/controlplane/apiserver/handler_apply.go:60 (Server.Apply)` — POST `/apis/{kind}/{name}`
+- Entry: `internal/controlplane/apiserver/handler_apply.go:47 (Server.Apply)` — POST `/apis/{kind}/{name}` [详见 `apiserver/AGENTS.md#flow-apiserver-apply`]
 - Local chain:
-  1. `:81 (Server.apply)` — kind dispatch: StoragePool/Image/Volume/Network/NIC/VM
-  2. `:91-185` — `json.Unmarshal` → typed object → `validateObject(meta, spec)` → `requireName`
-  3. `:167 (KindNIC → applyNIC)` — empty MAC → `alloc.WithAllocation` (list NICs → pick free → commit)
-  4. `:185 (KindVM → bindVM)` — no explicit node → `sched.Schedule(ctx, vm, nodeNames)`
-  5. `:273 (Server.put)` — `json.Marshal` → `store.Put(ctx, key, data, "")`
+  1. `internal/controlplane/apiserver/handler_apply.go:68 (Server.apply)` — kind dispatch for StoragePool/Image/Volume/Network/NIC/VM/Snapshot
+  2. `internal/controlplane/apiserver/handler_apply.go:199 (decodeAndAdmitApply)` — decode typed object and run admission
+  3. `internal/controlplane/apiserver/handler_apply.go:318 (applyNIC)` — empty MAC → `alloc.WithAllocation`
+  4. `internal/controlplane/apiserver/handler_apply.go:418 (bindVM)` — no explicit node → `sched.Schedule(ctx, vm, nodeNames)`
+  5. `internal/controlplane/apiserver/handler_apply.go:383 (applySnapshot)` — Snapshot nodeName derived from target VM placement
+  6. `internal/controlplane/apiserver/handler_apply.go:433 (put)` — `json.Marshal` → `store.Put(ctx, key, data, "")`
 - Data: HTTP body `[]byte` → typed API object → `json.Marshal` → etcd key-value
-- Side effects: etcd write; MAC allocation (NIC); node binding (VM)
+- Side effects: etcd write; MAC allocation (NIC); node binding (VM/Snapshot)
 - Exit / next hop: HTTP 201 + JSON body with `ResourceVersion`
 
 ### Flow: replace pipeline {#flow-apiserver-replace}
 
-- Entry: `internal/controlplane/apiserver/handler_replace.go:24 (Server.Replace)` — PUT `/apis/{kind}/{name}`
+- Entry: `internal/controlplane/apiserver/handler_replace.go:26 (Server.Replace)` — PUT `/apis/{kind}/{name}` [详见 `apiserver/AGENTS.md#flow-apiserver-replace`]
 - Local chain:
-  1. Decode incoming object and require `metadata.resourceVersion`.
-  2. `store.Get` old object; missing object returns HTTP 404 because replace is update-only.
-  3. Run replace admission with old/new objects, preserving server-owned metadata and status.
-  4. `store.Put(ctx, key, data, expectedVersion)` — CAS using submitted resourceVersion.
+  1. `internal/controlplane/apiserver/handler_replace.go:45 (Server.replace)` — decode incoming object and require `metadata.resourceVersion`.
+  2. `internal/controlplane/apiserver/handler_replace.go:128 (decodeAndAdmitReplace)` — `store.Get` old object; missing object returns HTTP 404 because replace is update-only.
+  3. `internal/controlplane/apiserver/handler_replace.go:152 (decodeAndAdmitReplace)` — run replace admission with old/new objects, preserving server-owned metadata and status.
+  4. `internal/controlplane/apiserver/handler_replace.go:175 (putReplaceResponse)` — `store.Put(ctx, key, data, expectedVersion)` CAS using submitted resourceVersion.
 - Data: editable GET response JSON → typed API object → admission → CAS JSON write.
 - Side effects: etcd conditional write only; no create-on-missing behavior.
 - Exit / next hop: HTTP 200 + stored object body with new `metadata.resourceVersion`; stale RV returns 409.
+
+### Flow: delete + finalizers {#flow-apiserver-delete-finalizers}
+
+- Entry: `internal/controlplane/apiserver/handler_delete.go:48 (Server.Delete)` / `internal/controlplane/apiserver/handler_finalizers.go:54 (Server.PatchFinalizers)` [详见 `apiserver/AGENTS.md#flow-apiserver-delete-finalizers`]
+- Local chain:
+  1. `internal/controlplane/apiserver/handler_delete.go:73 (Server.delete)` — read object, reverse-reference guard, stamp `deletionTimestamp`, CAS write.
+  2. `internal/controlplane/apiserver/handler_finalizers.go:94 (Server.patchFinalizers)` — validate finalizer patch and target deleting state.
+  3. `internal/controlplane/apiserver/handler_finalizers.go:151 (Server.patchFinalizers)` — last finalizer + deletionTimestamp → `store.DeleteIfVersion`.
+- Data: stored object bytes → metadata-only patch object → deleting object or tombstone delete.
+- Side effects: etcd CAS write and conditional delete.
+- Exit / next hop: node controllers remove finalizers after local teardown [详见 `../node/controllers/AGENTS.md#flow-node-finalizer-teardown`]
+
+### Flow: Snapshot admission placement {#flow-apiserver-apply-snapshot}
+
+- Entry: `internal/controlplane/apiserver/handler_apply.go:177 (KindSnapshot)` / `internal/controlplane/apiserver/handler_replace.go:102 (Snapshot)` [详见 `apiserver/AGENTS.md#flow-apiserver-apply-snapshot`]
+- Local chain:
+  1. `internal/controlplane/apiserver/admission/registry.go:13 (PreApplyChain)` / `:32 (PreReplaceChain)` — `ReferenceValidator` proves target VM exists.
+  2. `internal/controlplane/apiserver/handler_apply.go:383 (applySnapshot)` — resolve target VM nodeName.
+  3. `internal/controlplane/apiserver/handler_replace.go:107 (Server.replace)` — replace path re-resolves nodeName instead of trusting caller bytes.
+- Data: `snapshotv1.Snapshot{Spec.VMRef}` → target VM metadata → Snapshot routed to target VM node.
+- Side effects: etcd write of derived `metadata.nodeName`; no qcow2 operation in control plane.
+- Exit / next hop: Snapshot routed to node [详见 `../node/controllers/AGENTS.md#flow-node-snapshot-cold-lifecycle`]
 
 ### Flow: watch pipeline {#flow-apiserver-watch}
 
