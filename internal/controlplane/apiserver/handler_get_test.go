@@ -100,25 +100,41 @@ func TestGetBodyResourceVersionMatchesHeaderWithoutMutatingStore(t *testing.T) {
 func TestGetResourceVersionInjectionErrorReturns500(t *testing.T) {
 	srv, st := newTestServer(t)
 
-	name := "pool-malformed-metadata"
-	if _, err := st.Put(
-		t.Context(),
-		storeKey(metav1.KindStoragePool, name),
-		[]byte(`{"apiVersion":"govirta.io/v1alpha1","kind":"StoragePool","metadata":"invalid"}`),
-		"",
-	); err != nil {
-		t.Fatalf("seed malformed metadata object: %v", err)
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "metadata-string",
+			raw:  []byte(`{"apiVersion":"govirta.io/v1alpha1","kind":"StoragePool","metadata":"invalid"}`),
+		},
+		{
+			name: "metadata-null",
+			raw:  []byte(`{"apiVersion":"govirta.io/v1alpha1","kind":"StoragePool","metadata":null}`),
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.Put(
+				t.Context(),
+				storeKey(metav1.KindStoragePool, tc.name),
+				tc.raw,
+				"",
+			); err != nil {
+				t.Fatalf("seed malformed metadata object: %v", err)
+			}
 
-	rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool)+"/"+name)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-		t.Fatalf("Content-Type = %q, want application/json", ct)
-	}
-	if msg := decodeError(t, rec); msg == "" {
-		t.Fatalf("expected non-empty error body")
+			rec := doGet(t, srv, "/apis/"+string(metav1.KindStoragePool)+"/"+tc.name)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", ct)
+			}
+			if msg := decodeError(t, rec); msg == "" {
+				t.Fatalf("expected non-empty error body")
+			}
+		})
 	}
 }
 

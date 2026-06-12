@@ -19,6 +19,9 @@ func withBodyResourceVersion(raw []byte, resourceVersion string) ([]byte, error)
 	if err := json.Unmarshal(metadataRaw, &meta); err != nil {
 		return nil, fmt.Errorf("object metadata is missing or not an object")
 	}
+	if meta == nil {
+		return nil, fmt.Errorf("object metadata is missing or not an object")
+	}
 	resourceVersionRaw, err := json.Marshal(resourceVersion)
 	if err != nil {
 		return nil, fmt.Errorf("encode resourceVersion: %w", err)
