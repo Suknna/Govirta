@@ -51,6 +51,7 @@ func replaceCycle(ctx context.Context, t *testing.T, ctl, server, tmpDir string)
 	if !strings.Contains(replaceOut, "VM/"+vmName+" replaced") {
 		t.Fatalf("govirtctl replace output = %q, want VM/%s replaced", replaceOut, vmName)
 	}
+	t.Logf("replace VM/%s with fresh resourceVersion succeeded: %s", vmName, strings.TrimSpace(replaceOut))
 
 	stalePath := filepath.Join(tmpDir, "vm-replace-stale.json")
 	writeJSONManifest(t, stalePath, oldObject)
@@ -61,6 +62,7 @@ func replaceCycle(ctx context.Context, t *testing.T, ctl, server, tmpDir string)
 	if !strings.Contains(staleOut, "409") {
 		t.Fatalf("stale govirtctl replace output = %q, want 409", staleOut)
 	}
+	t.Logf("stale replace VM/%s correctly rejected with 409: %s", vmName, strings.TrimSpace(staleOut))
 }
 
 func cloneJSONMap(t *testing.T, obj map[string]any) map[string]any {
