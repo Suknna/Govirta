@@ -73,6 +73,10 @@ func parseConfig(args []string) (controlplane.Config, error) {
 	macPrefix := fs.String("mac-prefix", "", "3-byte locally-administered unicast OUI for the MAC pool, e.g. 02:00:00 (required)")
 	macStart := fs.Uint("mac-suffix-start", 0, "inclusive start of the MAC pool's 24-bit suffix interval")
 	macEnd := fs.Uint("mac-suffix-end", 0, "inclusive end of the MAC pool's 24-bit suffix interval")
+	imageStoreRoot := fs.String("image-store-root", "", "absolute local filesystem root for uploaded image bytes (required)")
+	imageStorePublicURL := fs.String("image-store-public-url", "", "externally reachable apiserver URL prefix for image downloads (required)")
+	imageCacheRoot := fs.String("image-cache-root", "", "explicit node-local image cache root passed to image cache tasks (required)")
+	imageControllerSyncPeriod := fs.Duration("image-controller-sync-period", 0, "explicit ImageController resync interval (required)")
 	taskNodeName := fs.String("phase-one-node-task-name", "", "internal phase-one NodeTask name (required)")
 	taskNode := fs.String("phase-one-node-task-node", "", "nodeName targeted by the internal phase-one NodeTask (required)")
 	taskClusterName := fs.String("phase-one-cluster-task-name", "", "internal phase-one ClusterTask name (required)")
@@ -100,6 +104,12 @@ func parseConfig(args []string) (controlplane.Config, error) {
 	if *taskNodeName == "" || *taskNode == "" || *taskClusterName == "" || *taskOwnerName == "" || *taskOwnerUID == "" || *taskExecutorID == "" || *taskNoopMarker == "" {
 		return controlplane.Config{}, fmt.Errorf("govirtad: all phase-one task flags are required")
 	}
+	if *imageStoreRoot == "" || *imageStorePublicURL == "" || *imageCacheRoot == "" {
+		return controlplane.Config{}, fmt.Errorf("govirtad: --image-store-root, --image-store-public-url, and --image-cache-root are required")
+	}
+	if *imageControllerSyncPeriod <= 0 {
+		return controlplane.Config{}, fmt.Errorf("govirtad: --image-controller-sync-period must be positive")
+	}
 
 	hw, err := parseOUI(*macPrefix)
 	if err != nil {
@@ -107,13 +117,17 @@ func parseConfig(args []string) (controlplane.Config, error) {
 	}
 
 	return controlplane.Config{
-		EtcdEndpoints:   []string(endpoints),
-		EtcdDialTimeout: *dialTimeout,
-		ListenAddr:      *listenAddr,
-		MACPrefix:       hw,
-		MACSuffixStart:  uint32(*macStart),
-		MACSuffixEnd:    uint32(*macEnd),
-		NodeNames:       []string(nodeNames),
+		EtcdEndpoints:             []string(endpoints),
+		EtcdDialTimeout:           *dialTimeout,
+		ListenAddr:                *listenAddr,
+		MACPrefix:                 hw,
+		MACSuffixStart:            uint32(*macStart),
+		MACSuffixEnd:              uint32(*macEnd),
+		NodeNames:                 []string(nodeNames),
+		ImageStoreRoot:            *imageStoreRoot,
+		ImageStorePublicURL:       strings.TrimRight(*imageStorePublicURL, "/"),
+		ImageCacheRoot:            *imageCacheRoot,
+		ImageControllerSyncPeriod: *imageControllerSyncPeriod,
 		TaskManager: controlcontroller.Config{
 			NodeTaskName:    *taskNodeName,
 			NodeTaskNode:    *taskNode,

@@ -17,6 +17,10 @@ func TestParseConfigValid(t *testing.T) {
 		"--mac-prefix", "02:00:00",
 		"--mac-suffix-start", "0",
 		"--mac-suffix-end", "255",
+		"--image-store-root", "/var/lib/govirta/images",
+		"--image-store-public-url", "http://127.0.0.1:8080/",
+		"--image-cache-root", "/var/lib/govirta/image-cache",
+		"--image-controller-sync-period", "2s",
 		"--phase-one-node-task-name", "phase-one-node-task",
 		"--phase-one-node-task-node", "node-0",
 		"--phase-one-cluster-task-name", "phase-one-cluster-task",
@@ -52,6 +56,9 @@ func TestParseConfigValid(t *testing.T) {
 	if cfg.TaskManager.NodeTaskName != "phase-one-node-task" || cfg.TaskManager.NodeTaskNode != "node-0" || cfg.TaskManager.ClusterTaskName != "phase-one-cluster-task" || cfg.TaskManager.ExecutorID != "govirtad-test" || cfg.TaskManager.NoopMarker != "phase-one" {
 		t.Fatalf("TaskManager = %+v, want explicit phase-one task config", cfg.TaskManager)
 	}
+	if cfg.ImageStoreRoot != "/var/lib/govirta/images" || cfg.ImageStorePublicURL != "http://127.0.0.1:8080" || cfg.ImageCacheRoot != "/var/lib/govirta/image-cache" || cfg.ImageControllerSyncPeriod != 2*time.Second {
+		t.Fatalf("image config = (%q,%q,%q,%v), want explicit image roots/url/sync", cfg.ImageStoreRoot, cfg.ImageStorePublicURL, cfg.ImageCacheRoot, cfg.ImageControllerSyncPeriod)
+	}
 }
 
 func TestParseConfigMissingRequired(t *testing.T) {
@@ -61,6 +68,10 @@ func TestParseConfigMissingRequired(t *testing.T) {
 			"--node-name", "node-0",
 			"--listen-addr", "127.0.0.1:8080",
 			"--mac-prefix", "02:00:00",
+			"--image-store-root", "/var/lib/govirta/images",
+			"--image-store-public-url", "http://127.0.0.1:8080",
+			"--image-cache-root", "/var/lib/govirta/image-cache",
+			"--image-controller-sync-period", "2s",
 			"--phase-one-node-task-name", "phase-one-node-task",
 			"--phase-one-node-task-node", "node-0",
 			"--phase-one-cluster-task-name", "phase-one-cluster-task",
@@ -84,7 +95,15 @@ func TestParseConfigMissingRequired(t *testing.T) {
 			return []string{"--etcd-endpoint", "localhost:2379", "--node-name", "node-0", "--listen-addr", "127.0.0.1:8080"}
 		},
 		"missing phase-one task config": func() []string {
-			return []string{"--etcd-endpoint", "localhost:2379", "--node-name", "node-0", "--listen-addr", "127.0.0.1:8080", "--mac-prefix", "02:00:00"}
+			return []string{"--etcd-endpoint", "localhost:2379", "--node-name", "node-0", "--listen-addr", "127.0.0.1:8080", "--mac-prefix", "02:00:00", "--image-store-root", "/var/lib/govirta/images", "--image-store-public-url", "http://127.0.0.1:8080", "--image-cache-root", "/var/lib/govirta/image-cache", "--image-controller-sync-period", "2s"}
+		},
+		"missing image config": func() []string {
+			args := base()
+			return append(args[:6], args[12:]...)
+		},
+		"missing image controller sync period": func() []string {
+			args := base()
+			return append(args[:14], args[16:]...)
 		},
 	}
 	_ = base
@@ -137,6 +156,10 @@ func TestParseConfigRejectsSixByteMACPrefix(t *testing.T) {
 		"--node-name", "node-0",
 		"--listen-addr", "127.0.0.1:8080",
 		"--mac-prefix", "02:00:00:00:00:00",
+		"--image-store-root", "/var/lib/govirta/images",
+		"--image-store-public-url", "http://127.0.0.1:8080",
+		"--image-cache-root", "/var/lib/govirta/image-cache",
+		"--image-controller-sync-period", "2s",
 		"--phase-one-node-task-name", "phase-one-node-task",
 		"--phase-one-node-task-node", "node-0",
 		"--phase-one-cluster-task-name", "phase-one-cluster-task",

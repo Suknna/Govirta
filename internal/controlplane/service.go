@@ -48,6 +48,12 @@ type Config struct {
 	// NodeNames is the static set of candidate node names the scheduler places
 	// VMs onto (第一刀：静态 node 名单).
 	NodeNames []string
+	// ImageStoreRoot is the explicit local filesystem root for uploaded image bytes.
+	ImageStoreRoot string
+	// ImageCacheRoot is the explicit node-local cache root passed through Image Tasks.
+	ImageCacheRoot string
+	// ImageControllerSyncPeriod is the explicit resync interval for ImageController.
+	ImageControllerSyncPeriod time.Duration
 	// TaskManager carries every explicit input for the phase-one control-plane
 	// controller-manager. The composition root must provide all fields; there are
 	// no hidden defaults inside controlplane.
@@ -62,8 +68,9 @@ type Config struct {
 // over (it constructed it, so it closes it) and the apiserver that serves the
 // /apis surface.
 type Service struct {
-	apiServer   *apiserver.Server
-	taskManager *controlcontroller.Manager
+	apiServer       *apiserver.Server
+	taskManager     *controlcontroller.Manager
+	imageController *controlcontroller.ImageController
 	// store is owned by the Service: NewService constructs it, and Run closes it
 	// on return so the dialed etcd client does not leak past serving life.
 	store store.Store
@@ -80,6 +87,15 @@ type Service struct {
 // is built, the store is closed and its close error joined so nothing leaks and
 // no error is swallowed.
 func NewService(ctx context.Context, cfg Config) (*Service, error) {
+	if cfg.ImageStoreRoot == "" || cfg.ImageStorePublicURL == "" || cfg.ImageCacheRoot == "" || cfg.ImageControllerSyncPeriod <= 0 {
+		return nil, fmt.Errorf("controlplane: ImageStoreRoot, ImageStorePublicURL, ImageCacheRoot, and positive ImageControllerSyncPeriod are required")
+	}
+	imageStore, err := imagestore.NewLocal(cfg.ImageStoreRoot)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: build image store: %w", err)
+	}
+	cfg.ImageStore = imageStore
+
 	st, err := etcd.New(ctx, clientv3.Config{
 		Endpoints:   cfg.EtcdEndpoints,
 		DialTimeout: cfg.EtcdDialTimeout,
@@ -103,6 +119,9 @@ func NewService(ctx context.Context, cfg Config) (*Service, error) {
 // the apiserver without dialing anything. A malformed MAC pool config is the
 // only assembly error.
 func newServiceWithStore(st store.Store, cfg Config) (*Service, error) {
+	if cfg.ImageStore == nil || cfg.ImageStorePublicURL == "" || cfg.ImageCacheRoot == "" || cfg.ImageControllerSyncPeriod <= 0 {
+		return nil, fmt.Errorf("controlplane: ImageStore, ImageStorePublicURL, ImageCacheRoot, and positive ImageControllerSyncPeriod are required")
+	}
 	pool, err := mac.NewPool(cfg.MACPrefix, cfg.MACSuffixStart, cfg.MACSuffixEnd)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: build MAC pool: %w", err)
@@ -119,7 +138,8 @@ func newServiceWithStore(st store.Store, cfg Config) (*Service, error) {
 		ImageStorePublicURL: cfg.ImageStorePublicURL,
 	})
 	mgr := controlcontroller.NewManager(st, cfg.TaskManager)
-	return &Service{apiServer: srv, taskManager: mgr, store: st}, nil
+	imageController := controlcontroller.NewImageController(st, cfg.ImageStore, controlcontroller.ImageControllerConfig{NodeNames: cfg.NodeNames, CacheRoot: cfg.ImageCacheRoot, SyncPeriod: cfg.ImageControllerSyncPeriod})
+	return &Service{apiServer: srv, taskManager: mgr, imageController: imageController, store: st}, nil
 }
 
 // Run starts the apiserver and serves until ctx is cancelled, then closes the
@@ -135,6 +155,10 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() {
 		managerErr <- s.taskManager.Run(runCtx)
 	}()
+	imageControllerErr := make(chan error, 1)
+	go func() {
+		imageControllerErr <- s.imageController.Run(runCtx)
+	}()
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- s.apiServer.Run(runCtx)
@@ -142,13 +166,23 @@ func (s *Service) Run(ctx context.Context) error {
 
 	var serverErrValue error
 	var mgrErr error
+	var imageErr error
 	managerDone := false
+	imageDone := false
 	serverDone := false
 	for !serverDone {
 		select {
 		case err := <-serverErr:
 			serverErrValue = err
 			serverDone = true
+		case err := <-imageControllerErr:
+			imageDone = true
+			if err != nil {
+				imageErr = err
+				cancel()
+				serverErrValue = <-serverErr
+				serverDone = true
+			}
 		case err := <-managerErr:
 			managerDone = true
 			if err != nil {
@@ -168,11 +202,18 @@ func (s *Service) Run(ctx context.Context) error {
 			// canceled or the server itself fails.
 			managerErr = nil
 		}
+		if imageDone && !serverDone {
+			imageControllerErr = nil
+		}
 	}
 	if !managerDone {
 		cancel()
 		mgrErr = <-managerErr
 	}
+	if !imageDone {
+		cancel()
+		imageErr = <-imageControllerErr
+	}
 	closeErr := s.store.Close()
-	return errors.Join(serverErrValue, mgrErr, closeErr)
+	return errors.Join(serverErrValue, mgrErr, imageErr, closeErr)
 }

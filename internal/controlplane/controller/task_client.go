@@ -62,6 +62,38 @@ func (c *TaskClient) CreateOrGetTask(ctx context.Context, task taskv1.Task) (tas
 	return decodeStoredTask(raw)
 }
 
+// GetTask returns one stored Task by name.
+func (c *TaskClient) GetTask(ctx context.Context, name string) (taskv1.Task, error) {
+	if c == nil || c.store == nil {
+		return taskv1.Task{}, fmt.Errorf("controlplane controller: task store is required")
+	}
+	raw, err := c.store.Get(ctx, taskKey(name))
+	if err != nil {
+		return taskv1.Task{}, fmt.Errorf("controlplane controller: get task %q: %w", name, err)
+	}
+	return decodeStoredTask(raw)
+}
+
+// ListTasks returns every stored Task sorted by store key order.
+func (c *TaskClient) ListTasks(ctx context.Context) ([]taskv1.Task, error) {
+	if c == nil || c.store == nil {
+		return nil, fmt.Errorf("controlplane controller: task store is required")
+	}
+	raws, err := c.store.List(ctx, taskKey(""))
+	if err != nil {
+		return nil, fmt.Errorf("controlplane controller: list tasks: %w", err)
+	}
+	tasks := make([]taskv1.Task, 0, len(raws))
+	for _, raw := range raws {
+		task, err := decodeStoredTask(raw)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
+}
+
 // PatchStatus replaces only the Task status field using a store CAS.
 func (c *TaskClient) PatchStatus(ctx context.Context, name string, status taskv1.TaskStatus) (taskv1.Task, error) {
 	if c == nil || c.store == nil {

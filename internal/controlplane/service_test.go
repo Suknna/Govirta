@@ -6,12 +6,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 
 	controlcontroller "github.com/suknna/govirta/internal/controlplane/controller"
+	"github.com/suknna/govirta/internal/controlplane/imagestore"
 	"github.com/suknna/govirta/internal/controlplane/store/fake"
 )
 
@@ -21,11 +23,16 @@ import (
 // free port so the test never collides with a fixed port.
 func testConfig() Config {
 	return Config{
-		ListenAddr:     "127.0.0.1:0",
-		MACPrefix:      net.HardwareAddr{0x02, 0x00, 0x00},
-		MACSuffixStart: 0,
-		MACSuffixEnd:   0xFF,
-		NodeNames:      []string{"node-a"},
+		ListenAddr:                "127.0.0.1:0",
+		MACPrefix:                 net.HardwareAddr{0x02, 0x00, 0x00},
+		MACSuffixStart:            0,
+		MACSuffixEnd:              0xFF,
+		NodeNames:                 []string{"node-a"},
+		ImageStoreRoot:            "/var/lib/govirta/images",
+		ImageCacheRoot:            "/var/lib/govirta/image-cache",
+		ImageStorePublicURL:       "http://127.0.0.1:8080",
+		ImageControllerSyncPeriod: time.Second,
+		ImageStore:                fakeImageStore{},
 		TaskManager: controlcontroller.Config{
 			NodeTaskName:    "phase-one-node-task-node-a",
 			NodeTaskNode:    "node-a",
@@ -37,6 +44,19 @@ func testConfig() Config {
 		},
 	}
 }
+
+type fakeImageStore struct{}
+
+func (fakeImageStore) Put(context.Context, imagestore.PutRequest) (imagestore.ObjectRef, error) {
+	return imagestore.ObjectRef{}, nil
+}
+func (fakeImageStore) Get(context.Context, string, string) (imagestore.ObjectRef, error) {
+	return imagestore.ObjectRef{}, nil
+}
+func (fakeImageStore) Open(context.Context, string, string) (io.ReadCloser, imagestore.ObjectRef, error) {
+	return io.NopCloser(strings.NewReader("")), imagestore.ObjectRef{}, nil
+}
+func (fakeImageStore) Delete(context.Context, string, string, string) error { return nil }
 
 // TestNewServiceWithStoreAssembles verifies the assembly seam wires a real
 // apiserver over an injected fake store (no etcd dial) and that Run serves and
