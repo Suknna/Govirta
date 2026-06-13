@@ -56,6 +56,7 @@ type SpecSummary struct {
 	CPUModel  string     `json:"cpu_model"`
 	Disks     []DiskSpec `json:"disks"`
 	NICs      []NICSpec  `json:"nics"`
+	CDROMs    []CDROM    `json:"cdroms,omitempty"`
 }
 
 // DiskSpec 是一块已解析的物理盘配置。Path 由控制器从 Volume.status.VolumePath
@@ -69,6 +70,27 @@ type DiskSpec struct {
 type NICSpec struct {
 	TapName string `json:"tap_name"`
 	MAC     string `json:"mac"`
+}
+
+// BootIndexMode names how a CD-ROM participates in QEMU boot ordering.
+type BootIndexMode string
+
+const (
+	// BootIndexModeUnset means no boot index is assigned to the CD-ROM.
+	BootIndexModeUnset BootIndexMode = "unset"
+	// BootIndexModeIndex means BootIndex carries an explicit QEMU boot index.
+	BootIndexModeIndex BootIndexMode = "index"
+)
+
+// CDROM is a resolved node-local ISO cache attachment for later argv derivation.
+type CDROM struct {
+	ImageName     string        `json:"image_name"`
+	ImageUID      string        `json:"image_uid"`
+	Version       string        `json:"version"`
+	CachedPath    string        `json:"cached_path"`
+	SHA256        string        `json:"sha256"`
+	BootIndexMode BootIndexMode `json:"boot_index_mode"`
+	BootIndex     *int          `json:"boot_index,omitempty"`
 }
 
 // RuntimePaths 是运行时目录内各文件的绝对路径集（vmm 私有布局产物，spec §5）。

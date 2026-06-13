@@ -130,6 +130,37 @@ func TestCreatePersistsArgvMatchingSpecDerivation(t *testing.T) {
 	}
 }
 
+func TestCreatePersistsCDROMsInSpecSummary(t *testing.T) {
+	fc := newFakeController()
+	svc := newTestService(t, fc, &fakeQMPClient{})
+	bootIndex := 0
+	req := newCreateRequest("vm-cdrom")
+	req.Spec.CDROMs = []CDROM{{
+		ImageName:     "installer",
+		ImageUID:      "uid-installer",
+		Version:       "v1",
+		CachedPath:    "/var/lib/govirta/images/installer.iso",
+		SHA256:        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		BootIndexMode: BootIndexModeIndex,
+		BootIndex:     &bootIndex,
+	}}
+
+	vm, err := svc.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(vm.Spec.CDROMs) != 1 || vm.Spec.CDROMs[0].BootIndex == nil || *vm.Spec.CDROMs[0].BootIndex != 0 {
+		t.Fatalf("returned CDROMs = %+v, want explicit boot index 0 preserved", vm.Spec.CDROMs)
+	}
+	st, err := svc.loadState(context.Background(), req.UUID)
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if len(st.Spec.CDROMs) != 1 || st.Spec.CDROMs[0].CachedPath != req.Spec.CDROMs[0].CachedPath || st.Spec.CDROMs[0].BootIndex == nil || *st.Spec.CDROMs[0].BootIndex != 0 {
+		t.Fatalf("persisted CDROMs = %+v, want resolved CD-ROM spec", st.Spec.CDROMs)
+	}
+}
+
 func TestCreateRejectsDuplicateUUID(t *testing.T) {
 	fc := newFakeController()
 	svc := newTestService(t, fc, &fakeQMPClient{})

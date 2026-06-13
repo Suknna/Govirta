@@ -11,6 +11,7 @@ import (
 	"github.com/suknna/govirta/internal/node/client"
 	"github.com/suknna/govirta/internal/node/controller"
 	"github.com/suknna/govirta/internal/vmm"
+	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
@@ -158,8 +159,15 @@ func (c *VMController) Reconcile(ctx context.Context, ev controller.Event) (cont
 
 func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj vmv1.VM) (controller.ReconcileResult, error) {
 	// Gate on dependencies and collect the resolved disk + NIC config they expose.
-	disks, nics, ready, err := c.gatherDependencies(ctx, obj)
+	disks, nics, cdroms, ready, err := c.gatherDependencies(ctx, obj)
 	if err != nil {
+		if errors.Is(err, vmv1.ErrInvalidSpec) {
+			if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+				return controller.Done(), fmt.Errorf("vm controller: invalid dependency spec %q and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			zerolog.Ctx(ctx).Error().Err(err).Str("key", key).Msg("vm dependency spec rejected permanently; not requeuing")
+			return controller.Done(), nil
+		}
 		// Dependency read transport error: transient, wait and retry.
 		return controller.RequeueAfter(vmDependencyRequeueDelay), fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
 	}
@@ -173,7 +181,7 @@ func (c *VMController) reconcileMissingVM(ctx context.Context, key string, obj v
 	// deterministically derives the argv (arch validation, builder, MAC passthrough)
 	// — the controller no longer constructs a qemu.Builder itself. buildSpecSummary
 	// is shared with the cold-state drift path so the assembly has a single authority.
-	spec := buildSpecSummary(obj, disks, nics, c.cpu)
+	spec := buildSpecSummary(obj, disks, nics, cdroms, c.cpu)
 
 	create := vmm.CreateRequest{UUID: obj.UID, Spec: spec}
 	created, err := c.vmm.Create(ctx, create)
@@ -365,28 +373,28 @@ func (c *VMController) logUnknownPhase(ctx context.Context, key, uuid string, ph
 		Msg("unknown vmm phase mapped to Failed; vmm.Phase enum may have drifted")
 }
 
-// gatherDependencies reads every referenced Volume and NIC object's live status.
-// It returns the ordered resolved disks (from Volume status.VolumePath) and NICs
-// (host tap name from NIC status.TapName + control-plane assigned MAC from NIC
-// spec.MAC). ready is false when any dependency is missing or not yet Ready (a
-// wait, not an error). A non-nil error is a transport failure reading a
-// dependency, which the caller treats as transient — except a Ready NIC missing
-// its allocated MAC, which is a real (non-transient) decode error.
-func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (disks []vmm.DiskSpec, nics []vmm.NICSpec, ready bool, err error) {
+// gatherDependencies reads every referenced Volume, NIC, and CD-ROM Image object's
+// live status. It returns ordered resolved disks, NICs, and node-local ISO cache
+// attachments for the VMM spec. ready is false when any dependency is missing or
+// not yet Ready (a wait, not an error). A non-nil error is a transport failure or
+// fail-closed inconsistent dependency state such as a non-ISO CD-ROM image, a
+// ready cache whose content metadata diverges from Image.spec, or a Ready NIC
+// missing its allocated MAC.
+func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (disks []vmm.DiskSpec, nics []vmm.NICSpec, cdroms []vmm.CDROM, ready bool, err error) {
 	for _, ref := range obj.Spec.VolumeRefs {
 		raw, gerr := c.client.Get(ctx, string(metav1.KindVolume), ref)
 		if gerr != nil {
 			if errors.Is(gerr, client.ErrNotFound) {
-				return nil, nil, false, nil
+				return nil, nil, nil, false, nil
 			}
-			return nil, nil, false, fmt.Errorf("read Volume %q: %w", ref, gerr)
+			return nil, nil, nil, false, fmt.Errorf("read Volume %q: %w", ref, gerr)
 		}
 		var vol volumev1.Volume
 		if uerr := json.Unmarshal(raw, &vol); uerr != nil {
-			return nil, nil, false, fmt.Errorf("decode Volume %q: %w", ref, uerr)
+			return nil, nil, nil, false, fmt.Errorf("decode Volume %q: %w", ref, uerr)
 		}
 		if vol.Status.Phase != volumev1.VolumePhaseReady || vol.Status.VolumePath == "" {
-			return nil, nil, false, nil
+			return nil, nil, nil, false, nil
 		}
 		disks = append(disks, vmm.DiskSpec{Path: vol.Status.VolumePath})
 	}
@@ -395,24 +403,87 @@ func (c *VMController) gatherDependencies(ctx context.Context, obj vmv1.VM) (dis
 		raw, gerr := c.client.Get(ctx, string(metav1.KindNIC), ref)
 		if gerr != nil {
 			if errors.Is(gerr, client.ErrNotFound) {
-				return nil, nil, false, nil
+				return nil, nil, nil, false, nil
 			}
-			return nil, nil, false, fmt.Errorf("read NIC %q: %w", ref, gerr)
+			return nil, nil, nil, false, fmt.Errorf("read NIC %q: %w", ref, gerr)
 		}
 		var nic nicv1.NIC
 		if uerr := json.Unmarshal(raw, &nic); uerr != nil {
-			return nil, nil, false, fmt.Errorf("decode NIC %q: %w", ref, uerr)
+			return nil, nil, nil, false, fmt.Errorf("decode NIC %q: %w", ref, uerr)
 		}
 		if nic.Status.Phase != nicv1.NICPhaseReady || nic.Status.TapName == "" {
-			return nil, nil, false, nil
+			return nil, nil, nil, false, nil
 		}
 		if nic.Spec.MAC == "" {
-			return nil, nil, false, fmt.Errorf("NIC %q ready but spec.MAC empty", ref)
+			return nil, nil, nil, false, fmt.Errorf("NIC %q ready but spec.MAC empty", ref)
 		}
 		nics = append(nics, vmm.NICSpec{TapName: nic.Status.TapName, MAC: nic.Spec.MAC})
 	}
 
-	return disks, nics, true, nil
+	for _, ref := range obj.Spec.CDROMImageRefs {
+		raw, gerr := c.client.Get(ctx, string(metav1.KindImage), ref.ImageRef)
+		if gerr != nil {
+			if errors.Is(gerr, client.ErrNotFound) {
+				return nil, nil, nil, false, nil
+			}
+			return nil, nil, nil, false, fmt.Errorf("read Image %q: %w", ref.ImageRef, gerr)
+		}
+		var img imagev1.Image
+		if uerr := json.Unmarshal(raw, &img); uerr != nil {
+			return nil, nil, nil, false, fmt.Errorf("decode Image %q: %w", ref.ImageRef, uerr)
+		}
+		if img.Spec.Format != imagev1.ImageFormatISO {
+			return nil, nil, nil, false, fmt.Errorf("%w: cdrom image %q format %q must be iso", vmv1.ErrInvalidSpec, ref.ImageRef, img.Spec.Format)
+		}
+		if img.Status.Phase != imagev1.ImagePhaseReady {
+			return nil, nil, nil, false, nil
+		}
+		cache, ok := readyImageCacheForNode(img, obj.NodeName)
+		if !ok {
+			return nil, nil, nil, false, nil
+		}
+		if cache.CachedPath == "" {
+			return nil, nil, nil, false, fmt.Errorf("%w: cdrom image %q ready cache for node %q has empty cachedPath", vmv1.ErrInvalidSpec, ref.ImageRef, obj.NodeName)
+		}
+		if cache.SHA256 != img.Spec.SHA256 || cache.SizeBytes != img.Spec.DeclaredSizeBytes {
+			return nil, nil, nil, false, fmt.Errorf("%w: cdrom image %q ready cache for node %q does not match spec content", vmv1.ErrInvalidSpec, ref.ImageRef, obj.NodeName)
+		}
+		bootIndexMode, merr := mapBootIndexMode(ref.BootIndexMode)
+		if merr != nil {
+			return nil, nil, nil, false, merr
+		}
+		cdroms = append(cdroms, vmm.CDROM{
+			ImageName:     img.Name,
+			ImageUID:      img.UID,
+			Version:       img.Spec.Version,
+			CachedPath:    cache.CachedPath,
+			SHA256:        cache.SHA256,
+			BootIndexMode: bootIndexMode,
+			BootIndex:     ref.BootIndex,
+		})
+	}
+
+	return disks, nics, cdroms, true, nil
+}
+
+func readyImageCacheForNode(img imagev1.Image, nodeName string) (imagev1.NodeCacheStatus, bool) {
+	for _, cache := range img.Status.NodeCaches {
+		if cache.NodeName == nodeName && cache.Phase == imagev1.ImageCachePhaseReady {
+			return cache, true
+		}
+	}
+	return imagev1.NodeCacheStatus{}, false
+}
+
+func mapBootIndexMode(mode vmv1.BootIndexMode) (vmm.BootIndexMode, error) {
+	switch mode {
+	case vmv1.BootIndexModeUnset:
+		return vmm.BootIndexModeUnset, nil
+	case vmv1.BootIndexModeIndex:
+		return vmm.BootIndexModeIndex, nil
+	default:
+		return "", fmt.Errorf("%w: cdrom bootIndexMode %q", vmv1.ErrInvalidSpec, mode)
+	}
 }
 
 // mapVMPhase maps the live vmm.Phase to the apis VMPhase. Both enums mirror each

@@ -15,10 +15,10 @@ import (
 )
 
 // buildSpecSummary 组装落盘的 VM 配置权威 vmm.SpecSummary：从 VM 对象的 spec
-// 标量（Name/Arch/VCPUs/MemoryMiB）、节点 CPU 模型、依赖解析出的 disks/nics
-// 拼出完整配置。create 路径（reconcileMissingVM）与冷态 drift 检测路径
+// 标量（Name/Arch/VCPUs/MemoryMiB）、节点 CPU 模型、依赖解析出的
+// disks/nics/cdroms 拼出完整配置。create 路径（reconcileMissingVM）与冷态 drift 检测路径
 // （reconcileConfigDrift）共用此组装逻辑——唯一权威，杜绝两处重复漂移。
-func buildSpecSummary(obj vmv1.VM, disks []vmm.DiskSpec, nics []vmm.NICSpec, cpuModel cpu.Model) vmm.SpecSummary {
+func buildSpecSummary(obj vmv1.VM, disks []vmm.DiskSpec, nics []vmm.NICSpec, cdroms []vmm.CDROM, cpuModel cpu.Model) vmm.SpecSummary {
 	return vmm.SpecSummary{
 		Name:      obj.Name,
 		Arch:      obj.Spec.Arch,
@@ -27,6 +27,7 @@ func buildSpecSummary(obj vmv1.VM, disks []vmm.DiskSpec, nics []vmm.NICSpec, cpu
 		CPUModel:  string(cpuModel),
 		Disks:     disks,
 		NICs:      nics,
+		CDROMs:    cdroms,
 	}
 }
 
@@ -52,8 +53,15 @@ func specDrifted(live, desired vmm.SpecSummary) bool {
 //     - 其它错误 → 失败 patch + requeue。
 func (c *VMController) reconcileConfigDrift(ctx context.Context, obj vmv1.VM, live vmm.VM) (controller.ReconcileResult, error) {
 	// 闸门依赖并收集其暴露的已解析 disk + NIC 配置。
-	disks, nics, ready, err := c.gatherDependencies(ctx, obj)
+	disks, nics, cdroms, ready, err := c.gatherDependencies(ctx, obj)
 	if err != nil {
+		if errors.Is(err, vmv1.ErrInvalidSpec) {
+			if perr := c.reportFailure(ctx, obj.Name, obj.Spec.PowerState, err); perr != nil {
+				return controller.Done(), fmt.Errorf("vm controller: invalid dependency spec %q and status report failed: %w", obj.Name, errors.Join(err, perr))
+			}
+			zerolog.Ctx(ctx).Error().Err(err).Str("kind", c.Kind()).Str("key", obj.Name).Msg("vm dependency spec rejected permanently; not requeuing")
+			return controller.Done(), nil
+		}
 		// 依赖读传输错误：transient，等待重试，不 Redefine。
 		return controller.RequeueAfter(vmDependencyRequeueDelay), fmt.Errorf("vm controller: gate dependencies for %q: %w", obj.Name, err)
 	}
@@ -65,7 +73,7 @@ func (c *VMController) reconcileConfigDrift(ctx context.Context, obj vmv1.VM, li
 		return controller.RequeueAfter(vmDependencyRequeueDelay), nil
 	}
 
-	desired := buildSpecSummary(obj, disks, nics, c.cpu)
+	desired := buildSpecSummary(obj, disks, nics, cdroms, c.cpu)
 	if !specDrifted(live.Spec, desired) {
 		// 无 drift：原 no-op 收敛。
 		return c.patchLivePowerStatus(ctx, obj, live)
@@ -130,6 +138,9 @@ func driftedFields(live, desired vmm.SpecSummary) []string {
 	}
 	if !reflect.DeepEqual(live.NICs, desired.NICs) {
 		fields = append(fields, "nics")
+	}
+	if !reflect.DeepEqual(live.CDROMs, desired.CDROMs) {
+		fields = append(fields, "cdroms")
 	}
 	return fields
 }

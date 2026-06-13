@@ -11,6 +11,7 @@ import (
 	"github.com/suknna/govirta/internal/node/client"
 	"github.com/suknna/govirta/internal/node/controller"
 	"github.com/suknna/govirta/internal/vmm"
+	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
 	vmv1 "github.com/suknna/govirta/pkg/apis/vm/v1alpha1"
@@ -127,6 +128,7 @@ type fakeVMDepReader struct {
 	mu sync.Mutex
 
 	volumes map[string]volumev1.Volume
+	images  map[string]imagev1.Image
 	nics    map[string]nicv1.NIC
 	vms     map[string]vmv1.VM
 	getErr  map[string]error
@@ -158,6 +160,12 @@ func (f *fakeVMDepReader) Get(ctx context.Context, kind, name string) ([]byte, e
 			return nil, client.ErrNotFound
 		}
 		return json.Marshal(vol)
+	case string(metav1.KindImage):
+		img, ok := f.images[name]
+		if !ok {
+			return nil, client.ErrNotFound
+		}
+		return json.Marshal(img)
 	case string(metav1.KindNIC):
 		nic, ok := f.nics[name]
 		if !ok {
@@ -236,6 +244,36 @@ func readyNIC(name, tap string) nicv1.NIC {
 	}
 }
 
+const testISOChecksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func readyISOImage(name, nodeName, path string) imagev1.Image {
+	return imagev1.Image{
+		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindImage},
+		ObjectMeta: metav1.ObjectMeta{Name: name, UID: "uid-" + name},
+		Spec: imagev1.ImageSpec{
+			Source:            imagev1.ImageSource{Type: imagev1.ImageSourceUpload, Location: "upload://" + name},
+			Format:            imagev1.ImageFormatISO,
+			Version:           "v1",
+			DeclaredSizeBytes: 4096,
+			SHA256:            testISOChecksum,
+		},
+		Status: imagev1.ImageStatus{
+			Phase:             imagev1.ImagePhaseReady,
+			ObservedVersion:   "v1",
+			ObservedSHA256:    testISOChecksum,
+			ObservedSizeBytes: 4096,
+			NodeCaches: []imagev1.NodeCacheStatus{{
+				NodeName:   nodeName,
+				Phase:      imagev1.ImageCachePhaseReady,
+				TaskRef:    imagev1.TaskRef{Name: "task-" + name, UID: "task-uid-" + name},
+				CachedPath: path,
+				SizeBytes:  4096,
+				SHA256:     testISOChecksum,
+			}},
+		},
+	}
+}
+
 func vmEvent(t *testing.T, evType controller.EventType, vm vmv1.VM) controller.Event {
 	t.Helper()
 	raw, err := json.Marshal(vm)
@@ -248,7 +286,7 @@ func vmEvent(t *testing.T, evType controller.EventType, vm vmv1.VM) controller.E
 func validVMObject() vmv1.VM {
 	return vmv1.VM{
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindVM},
-		ObjectMeta: metav1.ObjectMeta{Name: "vm-a", UID: "uid-vm-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: "vm-a", UID: "uid-vm-a", NodeName: "node-a"},
 		Spec: vmv1.VMSpec{
 			Arch:       "x86_64",
 			VCPUs:      2,
@@ -263,6 +301,7 @@ func validVMObject() vmv1.VM {
 func readyVMDepReader(vm vmv1.VM) *fakeVMDepReader {
 	return &fakeVMDepReader{
 		volumes: map[string]volumev1.Volume{"vol-a": readyVolume("vol-a", "/var/lib/govirta/vol-a.qcow2")},
+		images:  map[string]imagev1.Image{},
 		nics:    map[string]nicv1.NIC{"nic-a": readyNIC("nic-a", "gvabc1234.0")},
 		vms:     map[string]vmv1.VM{vm.Name: vm},
 	}
@@ -430,6 +469,188 @@ func TestVMReconcileMissingDependencyRequeues(t *testing.T) {
 	}
 	if runner.createCalls != 0 {
 		t.Fatalf("createCalls = %d, want 0", runner.createCalls)
+	}
+}
+
+func TestVMReconcileCDROMImageMissingOrCacheNotReadyRequeuesWithoutCreate(t *testing.T) {
+	cases := []struct {
+		name   string
+		images map[string]imagev1.Image
+	}{
+		{name: "missing_image", images: map[string]imagev1.Image{}},
+		{name: "image_not_ready", images: map[string]imagev1.Image{"iso-a": func() imagev1.Image {
+			img := readyISOImage("iso-a", "node-a", "/cache/iso-a.iso")
+			img.Status.Phase = imagev1.ImagePhaseCaching
+			return img
+		}()}},
+		{name: "node_cache_missing", images: map[string]imagev1.Image{"iso-a": readyISOImage("iso-a", "other-node", "/cache/iso-a.iso")}},
+		{name: "node_cache_not_ready", images: map[string]imagev1.Image{"iso-a": func() imagev1.Image {
+			img := readyISOImage("iso-a", "node-a", "/cache/iso-a.iso")
+			img.Status.NodeCaches[0].Phase = imagev1.ImageCachePhaseCaching
+			return img
+		}()}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := validVMObject()
+			obj.Spec.CDROMImageRefs = []vmv1.CDROMImageRef{{ImageRef: "iso-a", BootIndexMode: vmv1.BootIndexModeUnset}}
+			runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
+			dep := readyVMDepReader(obj)
+			dep.images = tc.images
+			c := NewVMController(runner, dep, cpu.ModelHost)
+
+			result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want nil", err)
+			}
+			if result.RequeueAfter != vmDependencyRequeueDelay {
+				t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, vmDependencyRequeueDelay)
+			}
+			if runner.createCalls != 0 {
+				t.Fatalf("Create called %d times, want 0 while CD-ROM image/cache waits", runner.createCalls)
+			}
+			if got := dep.patchCount(); got != 0 {
+				t.Fatalf("PatchStatus called %d times, want 0 while waiting", got)
+			}
+		})
+	}
+}
+
+func TestVMReconcileCDROMImageNonISOIsPermanentFailure(t *testing.T) {
+	obj := validVMObject()
+	obj.Spec.CDROMImageRefs = []vmv1.CDROMImageRef{{ImageRef: "disk-image", BootIndexMode: vmv1.BootIndexModeUnset}}
+	img := readyISOImage("disk-image", "node-a", "/cache/disk-image.raw")
+	img.Spec.Format = imagev1.ImageFormatRaw
+	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
+	dep := readyVMDepReader(obj)
+	dep.images = map[string]imagev1.Image{"disk-image": img}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue for permanent non-ISO CD-ROM", result)
+	}
+	if runner.createCalls != 0 || runner.startCalls != 0 {
+		t.Fatalf("create=%d start=%d, want 0/0 for invalid CD-ROM image", runner.createCalls, runner.startCalls)
+	}
+	status := dep.lastPatch(t)
+	if status.Phase != vmv1.VMPhaseFailed || status.Message == "" {
+		t.Fatalf("patched status = %+v, want Failed with message", status)
+	}
+}
+
+func TestVMReconcileCDROMCacheContentMismatchIsPermanentFailure(t *testing.T) {
+	cases := []struct {
+		name  string
+		image func() imagev1.Image
+	}{
+		{name: "empty_cached_path", image: func() imagev1.Image {
+			img := readyISOImage("iso-a", "node-a", "")
+			return img
+		}},
+		{name: "sha_mismatch", image: func() imagev1.Image {
+			img := readyISOImage("iso-a", "node-a", "/cache/iso-a.iso")
+			img.Status.NodeCaches[0].SHA256 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+			return img
+		}},
+		{name: "size_mismatch", image: func() imagev1.Image {
+			img := readyISOImage("iso-a", "node-a", "/cache/iso-a.iso")
+			img.Status.NodeCaches[0].SizeBytes = img.Spec.DeclaredSizeBytes + 1
+			return img
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := validVMObject()
+			obj.Spec.CDROMImageRefs = []vmv1.CDROMImageRef{{ImageRef: "iso-a", BootIndexMode: vmv1.BootIndexModeUnset}}
+			runner := &fakeVMRunner{statusErr: vmm.ErrNotFound}
+			dep := readyVMDepReader(obj)
+			dep.images = map[string]imagev1.Image{"iso-a": tc.image()}
+			c := NewVMController(runner, dep, cpu.ModelHost)
+
+			result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want nil", err)
+			}
+			if result.Requeue || result.RequeueAfter != 0 {
+				t.Fatalf("Reconcile() result = %+v, want no requeue for inconsistent ready cache", result)
+			}
+			if runner.createCalls != 0 {
+				t.Fatalf("Create called %d times, want 0 for inconsistent ready cache", runner.createCalls)
+			}
+			if status := dep.lastPatch(t); status.Phase != vmv1.VMPhaseFailed || status.Message == "" {
+				t.Fatalf("patched status = %+v, want Failed with message", status)
+			}
+		})
+	}
+}
+
+func TestVMReconcileCDROMCreatePassesResolvedCacheAndBootIndex(t *testing.T) {
+	bootIndex := 0
+	obj := validVMObject()
+	obj.Spec.CDROMImageRefs = []vmv1.CDROMImageRef{
+		{ImageRef: "iso-a", BootIndexMode: vmv1.BootIndexModeIndex, BootIndex: &bootIndex},
+		{ImageRef: "iso-b", BootIndexMode: vmv1.BootIndexModeUnset},
+	}
+	runner := &fakeVMRunner{statusErr: vmm.ErrNotFound, startPhase: vmm.PhaseRunning}
+	dep := readyVMDepReader(obj)
+	dep.images = map[string]imagev1.Image{
+		"iso-a": readyISOImage("iso-a", "node-a", "/cache/iso-a.iso"),
+		"iso-b": readyISOImage("iso-b", "node-a", "/cache/iso-b.iso"),
+	}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventAdded, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+	}
+	got := runner.lastCreate.Spec.CDROMs
+	if len(got) != 2 {
+		t.Fatalf("create Spec.CDROMs = %+v, want 2 entries", got)
+	}
+	if got[0].ImageName != "iso-a" || got[0].ImageUID != "uid-iso-a" || got[0].Version != "v1" || got[0].CachedPath != "/cache/iso-a.iso" || got[0].SHA256 != testISOChecksum {
+		t.Fatalf("first CDROM = %+v, want resolved iso-a metadata", got[0])
+	}
+	if got[0].BootIndexMode != vmm.BootIndexModeIndex || got[0].BootIndex == nil || *got[0].BootIndex != 0 {
+		t.Fatalf("first CDROM boot index = mode %q value %v, want explicit 0", got[0].BootIndexMode, got[0].BootIndex)
+	}
+	if got[1].BootIndexMode != vmm.BootIndexModeUnset || got[1].BootIndex != nil {
+		t.Fatalf("second CDROM boot index = mode %q value %v, want unset nil", got[1].BootIndexMode, got[1].BootIndex)
+	}
+}
+
+func TestVMReconcileOffStoppedCDROMDriftRedefines(t *testing.T) {
+	bootIndex := 2
+	obj := validVMObject()
+	obj.Spec.PowerState = vmv1.PowerStateOff
+	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
+	obj.Spec.CDROMImageRefs = []vmv1.CDROMImageRef{{ImageRef: "iso-a", BootIndexMode: vmv1.BootIndexModeIndex, BootIndex: &bootIndex}}
+	liveSpec := buildSpecSummary(obj, []vmm.DiskSpec{{Path: "/var/lib/govirta/vol-a.qcow2"}}, []vmm.NICSpec{{TapName: "gvabc1234.0", MAC: "02:00:00:00:00:01"}}, nil, cpu.ModelHost)
+	runner := &fakeVMRunner{statusPhase: vmm.PhaseStopped, statusSpec: liveSpec, redefinePhase: vmm.PhaseStopped}
+	dep := readyVMDepReader(obj)
+	dep.images = map[string]imagev1.Image{"iso-a": readyISOImage("iso-a", "node-a", "/cache/iso-a.iso")}
+	c := NewVMController(runner, dep, cpu.ModelHost)
+
+	result, err := c.Reconcile(context.Background(), vmEvent(t, controller.EventModified, obj))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want no requeue after cold redefine", result)
+	}
+	if runner.redefineCalls != 1 {
+		t.Fatalf("Redefine called %d times, want 1", runner.redefineCalls)
+	}
+	if got := runner.lastRedefine.CDROMs; len(got) != 1 || got[0].CachedPath != "/cache/iso-a.iso" || got[0].BootIndex == nil || *got[0].BootIndex != 2 {
+		t.Fatalf("Redefine CDROMs = %+v, want resolved iso-a with boot index 2", got)
 	}
 }
 
