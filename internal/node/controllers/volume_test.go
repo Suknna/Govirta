@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/suknna/govirta/internal/node/client"
 	"github.com/suknna/govirta/internal/node/controller"
@@ -140,26 +143,26 @@ func (t *trackingReadCloser) Close() error {
 	return t.closeErr
 }
 
-// fakeImageGetter hands back a configured reader/error and records the request.
-// It honours ctx cancellation, faithful to *storage.ImageService.
-type fakeImageGetter struct {
-	reader   *trackingReadCloser
-	getErr   error
-	gotReq   storage.GetImageRequest
-	getCalls int
+type trackingCachedFile struct {
+	*trackingReadCloser
+	info os.FileInfo
+	err  error
 }
 
-func (f *fakeImageGetter) GetImage(ctx context.Context, req storage.GetImageRequest) (io.ReadCloser, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	f.getCalls++
-	f.gotReq = req
-	if f.getErr != nil {
-		return nil, f.getErr
-	}
-	return f.reader, nil
+func (t *trackingCachedFile) Stat() (os.FileInfo, error) {
+	return t.info, t.err
 }
+
+type fakeFileInfo struct {
+	mode os.FileMode
+}
+
+func (f fakeFileInfo) Name() string       { return "image" }
+func (f fakeFileInfo) Size() int64        { return 5 }
+func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeFileInfo) Sys() any           { return nil }
 
 // fakeDependencyReader serves canned Get responses per (kind,name) and captures
 // status patches. A configured ErrNotFound for a ref models a not-yet-existing
@@ -278,18 +281,17 @@ func storagePoolWithPhase(name string, phase storagepoolv1.PoolPhase) storagepoo
 // (e.g. on the MODIFIED event the ready-patch itself produced) would otherwise
 // call CreateRootVolumeFromReader again, hit ErrVolumeAlreadyExists, and spin
 // the controller forever — the same blind-spot loop the image controller had.
-// A ready volume reconcile must touch neither the creator-create path nor the
-// image getter; instead it drives cold-resize convergence (see the resize tests
-// below). Here the owning VM is cold and already at the target capacity, so the
-// driver's no-op guard converges (Done) without re-creating or re-streaming.
+// A ready volume reconcile must not touch the create path; instead it drives
+// cold-resize convergence (see the resize tests below). Here the owning VM is
+// cold and already at the target capacity, so the driver's no-op guard converges
+// (Done) without re-creating or re-streaming.
 func TestVolumeReconcileReadyVolumeDoesNotRecreate(t *testing.T) {
 	vol := rootVolumeObject("vol-a")
 	vol.Status.Phase = volumev1.VolumePhaseReady
 
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDepsWithColdVM(t, vol)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
@@ -300,9 +302,6 @@ func TestVolumeReconcileReadyVolumeDoesNotRecreate(t *testing.T) {
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times on ready volume, want 0", creator.createCalls)
-	}
-	if getter.getCalls != 0 {
-		t.Errorf("GetImage called %d times on ready volume, want 0", getter.getCalls)
 	}
 }
 
@@ -319,6 +318,34 @@ func imageReadyObject(name string, format imagev1.ImageFormat) imagev1.Image {
 		},
 		Status: imagev1.ImageStatus{Phase: imagev1.ImagePhaseReady, ObservedVersion: "v1", ObservedSHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", ObservedSizeBytes: 1 << 20, NodeCaches: []imagev1.NodeCacheStatus{{NodeName: "node-1", Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}, CachedPath: "/cache/img/v1/image", SizeBytes: 1 << 20, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}},
 	}
+}
+
+func imageReadyObjectWithCache(name string, format imagev1.ImageFormat, nodeName, cachedPath string) imagev1.Image {
+	img := imageReadyObject(name, format)
+	img.Status.NodeCaches = []imagev1.NodeCacheStatus{{NodeName: nodeName, Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}, CachedPath: cachedPath, SizeBytes: img.Spec.DeclaredSizeBytes, SHA256: img.Spec.SHA256}}
+	return img
+}
+
+func writeCachedImage(t *testing.T, root string, img imagev1.Image, contents string) string {
+	t.Helper()
+	resolvedRoot := resolvedCacheRoot(t, root)
+	path := filepath.Join(resolvedRoot, img.Name, img.Spec.Version, "image")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create cache dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write cached image: %v", err)
+	}
+	return path
+}
+
+func resolvedCacheRoot(t *testing.T, root string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(root))
+	if err != nil {
+		t.Fatalf("resolve cache root: %v", err)
+	}
+	return resolved
 }
 
 func mustMarshal(t *testing.T, v any) []byte {
@@ -347,6 +374,16 @@ func readyDeps(t *testing.T, vol volumev1.Volume, imageFormat imagev1.ImageForma
 	}
 }
 
+func readyDepsWithImage(t *testing.T, vol volumev1.Volume, img imagev1.Image) *fakeDependencyReader {
+	t.Helper()
+	return &fakeDependencyReader{
+		objects: map[string][]byte{
+			depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef): mustMarshal(t, storagePoolReady(vol.Spec.PoolRef)),
+			depKey(string(metav1.KindImage), vol.Spec.ImageRef):      mustMarshal(t, img),
+		},
+	}
+}
+
 // --- tests ------------------------------------------------------------------
 
 // dataVolumeObject builds a data-disk Volume (role=data, no image refs — the
@@ -369,9 +406,8 @@ func dataVolumeObject(name string) volumev1.Volume {
 // TestVolumeReconcileDataVolumeCreatesBlankVolume proves a data volume takes the
 // blank-create path: it gates only on its own block StoragePool (NOT the image /
 // image file pool refs it doesn't carry) and calls CreateDataVolume, never
-// GetImage / CreateRootVolumeFromReader. This is the path the cold-config-change
-// "add a second disk" scenario exercises — the first data volume the spine
-// creates.
+// root CreateRootVolumeFromReader path. This is the path the cold-config-change
+// "add a second disk" scenario exercises — the first data volume the spine creates.
 func TestVolumeReconcileDataVolumeCreatesBlankVolume(t *testing.T) {
 	vol := dataVolumeObject("vol-data")
 
@@ -384,14 +420,13 @@ func TestVolumeReconcileDataVolumeCreatesBlankVolume(t *testing.T) {
 			Context:  map[string]string{"path": wantPath},
 		},
 	}
-	getter := &fakeImageGetter{}
-	// Only the block pool is wired ready; no image / image file pool objects exist.
+	// Only the block pool is wired ready; no image objects exist.
 	dep := &fakeDependencyReader{
 		objects: map[string][]byte{
 			depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef): mustMarshal(t, storagePoolReady(vol.Spec.PoolRef)),
 		},
 	}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -401,10 +436,7 @@ func TestVolumeReconcileDataVolumeCreatesBlankVolume(t *testing.T) {
 		t.Fatalf("Reconcile() result = %+v, want Done on a created data volume", result)
 	}
 
-	// Data volume derives no bytes: GetImage / CreateRootVolumeFromReader untouched.
-	if getter.getCalls != 0 {
-		t.Errorf("GetImage called %d times on a data volume, want 0", getter.getCalls)
-	}
+	// Data volume derives no bytes: CreateRootVolumeFromReader untouched.
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times on a data volume, want 0", creator.createCalls)
 	}
@@ -452,10 +484,9 @@ func TestVolumeReconcileDataVolumeCreatesBlankVolume(t *testing.T) {
 func TestVolumeReconcileDataVolumeWaitsForPool(t *testing.T) {
 	vol := dataVolumeObject("vol-data")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{}
 	// No objects wired: the block pool Get returns ErrNotFound → not ready.
 	dep := &fakeDependencyReader{objects: map[string][]byte{}}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -472,64 +503,292 @@ func TestVolumeReconcileDataVolumeWaitsForPool(t *testing.T) {
 	}
 }
 
-func TestVolumeReconcileRootImageReadyWaitsForCacheConsumption(t *testing.T) {
+func TestVolumeControllerCreatesRootFromNodeImageCache(t *testing.T) {
 	vol := rootVolumeObject("vol-a")
+	vol.NodeName = "node-1"
+	cacheRoot := t.TempDir()
+	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatQCOW2)
+	img.Status.NodeCaches = nil
+	cachedPath := writeCachedImage(t, cacheRoot, img, "cached-qcow2-bytes")
+	img.Status.NodeCaches = []imagev1.NodeCacheStatus{
+		{NodeName: "other-node", Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "other-task", UID: "other-task-uid"}, CachedPath: filepath.Join(cacheRoot, "other", "image"), SizeBytes: img.Spec.DeclaredSizeBytes, SHA256: img.Spec.SHA256},
+		{NodeName: "node-1", Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}, CachedPath: cachedPath, SizeBytes: img.Spec.DeclaredSizeBytes, SHA256: img.Spec.SHA256},
+	}
+	wantPath := "/srv/pool/block-pool/vm-uid/root.qcow2"
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
-	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	creator.created = volume.Volume{ID: "vm-uid-root-0", Name: vol.Name, PoolName: vol.Spec.PoolRef, Context: map[string]string{"path": wantPath}}
+	dep := readyDepsWithImage(t, vol, img)
+	c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
-		t.Fatalf("Reconcile() error = %v, want nil while root image consumption waits", err)
+		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if !result.Requeue {
-		t.Fatalf("Reconcile() result.Requeue = false, want true while root image consumption waits for Task 7")
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() result = %+v, want Done", result)
 	}
-	if getter.getCalls != 0 {
-		t.Fatalf("GetImage called %d times, want 0 in Task 6", getter.getCalls)
+	if creator.createCalls != 1 {
+		t.Fatalf("CreateRootVolumeFromReader called %d times, want 1", creator.createCalls)
 	}
-	if creator.createCalls != 0 {
-		t.Fatalf("CreateRootVolumeFromReader called %d times, want 0 in Task 6", creator.createCalls)
+	if string(creator.gotReader) != "cached-qcow2-bytes" {
+		t.Fatalf("reader bytes = %q, want cached bytes", string(creator.gotReader))
 	}
-	if dep.patchCalls != 0 {
-		t.Fatalf("PatchStatus called %d times, want 0 while waiting for Task 7", dep.patchCalls)
+	if got := creator.gotReq; got.VMID != vol.Spec.VMRef || got.VMName != vol.Spec.VMName || got.PoolName != vol.Spec.PoolRef || got.Name != vol.Name || got.DiskIndex != vol.Spec.DiskIndex || got.CapacityBytes != vol.Spec.CapacityBytes {
+		t.Fatalf("CreateRootVolumeFromReader request = %+v, want volume spec fields", got)
+	}
+	if creator.gotReq.Format != "qcow2" {
+		t.Fatalf("CreateRootVolumeFromReader Format = %q, want qcow2", creator.gotReq.Format)
+	}
+	if len(dep.patches) != 1 || dep.patches[0].status.Phase != volumev1.VolumePhaseReady || dep.patches[0].status.VolumePath != wantPath {
+		t.Fatalf("patches = %+v, want ready path %q", dep.patches, wantPath)
 	}
 }
 
-func TestVolumeReconcileRawImageFormatMapsBeforeWaitingForConsumption(t *testing.T) {
+func TestVolumeControllerRawImageCachePassesRawFormat(t *testing.T) {
 	vol := rootVolumeObject("vol-raw")
-	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{}
-	dep := readyDeps(t, vol, imagev1.ImageFormatRaw)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	vol.NodeName = "node-1"
+	cacheRoot := t.TempDir()
+	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatRaw)
+	img.Status.NodeCaches = nil
+	cachedPath := writeCachedImage(t, cacheRoot, img, "raw-bytes")
+	img.Status.NodeCaches = []imagev1.NodeCacheStatus{{NodeName: "node-1", Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}, CachedPath: cachedPath, SizeBytes: img.Spec.DeclaredSizeBytes, SHA256: img.Spec.SHA256}}
+	creator := &fakeRootVolumeCreator{created: volume.Volume{Context: map[string]string{"path": "/volume/raw"}}}
+	dep := readyDepsWithImage(t, vol, img)
+	c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
-		t.Fatalf("Reconcile() error = %v, want nil while root image consumption waits", err)
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
+	}
+	if creator.gotReq.Format != "raw" {
+		t.Fatalf("CreateRootVolumeFromReader Format = %q, want raw", creator.gotReq.Format)
+	}
+}
+
+func TestVolumeControllerWaitsForThisNodeImageCache(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cache  []imagev1.NodeCacheStatus
+		patch  int
+		create int
+	}{
+		{name: "missing", cache: []imagev1.NodeCacheStatus{{NodeName: "other-node", Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}, CachedPath: "/cache/img/v1/image", SizeBytes: 1 << 20, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}},
+		{name: "not-ready", cache: []imagev1.NodeCacheStatus{{NodeName: "node-1", Phase: imagev1.ImageCachePhaseCaching, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vol := rootVolumeObject("vol-" + tc.name)
+			vol.NodeName = "node-1"
+			img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatQCOW2)
+			img.Status.NodeCaches = tc.cache
+			creator := &fakeRootVolumeCreator{}
+			dep := readyDepsWithImage(t, vol, img)
+			c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
+
+			result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want nil", err)
+			}
+			if !result.Requeue {
+				t.Fatalf("Reconcile() result.Requeue = false, want true")
+			}
+			if creator.createCalls != tc.create || dep.patchCalls != tc.patch {
+				t.Fatalf("calls create/patch = %d/%d, want %d/%d", creator.createCalls, dep.patchCalls, tc.create, tc.patch)
+			}
+		})
+	}
+}
+
+func TestVolumeControllerRejectsImageCacheMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*imagev1.NodeCacheStatus)
+	}{
+		{name: "sha", mutate: func(cache *imagev1.NodeCacheStatus) {
+			cache.SHA256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		}},
+		{name: "size", mutate: func(cache *imagev1.NodeCacheStatus) { cache.SizeBytes++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vol := rootVolumeObject("vol-mismatch-" + tc.name)
+			vol.NodeName = "node-1"
+			img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatQCOW2)
+			cache := img.Status.NodeCaches[0]
+			cache.NodeName = "node-1"
+			tc.mutate(&cache)
+			img.Status.NodeCaches = []imagev1.NodeCacheStatus{cache}
+			creator := &fakeRootVolumeCreator{}
+			dep := readyDepsWithImage(t, vol, img)
+			c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
+
+			result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+			if err == nil {
+				t.Fatalf("Reconcile() error = nil, want mismatch error")
+			}
+			if !result.Requeue {
+				t.Fatalf("Reconcile() result.Requeue = false, want true for corrupt dependency status")
+			}
+			if creator.createCalls != 0 || dep.patchCalls != 0 {
+				t.Fatalf("create/patch calls = %d/%d, want 0/0", creator.createCalls, dep.patchCalls)
+			}
+		})
+	}
+}
+
+func TestVolumeControllerRejectsISOAsRootDiskSource(t *testing.T) {
+	vol := rootVolumeObject("vol-iso")
+	vol.NodeName = "node-1"
+	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatISO)
+	img.Status.NodeCaches[0].NodeName = "node-1"
+	creator := &fakeRootVolumeCreator{}
+	dep := readyDepsWithImage(t, vol, img)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for permanent format failure", err)
+	}
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false")
+	}
+	if creator.createCalls != 0 {
+		t.Fatalf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
+	}
+	if len(dep.patches) != 1 || dep.patches[0].status.Phase != volumev1.VolumePhaseFailed {
+		t.Fatalf("patches = %+v, want failed status", dep.patches)
+	}
+}
+
+func TestVolumeControllerRejectsISOWithoutReadyNodeCache(t *testing.T) {
+	vol := rootVolumeObject("vol-iso-no-cache")
+	vol.NodeName = "node-1"
+	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatISO)
+	img.Status.NodeCaches = nil
+	creator := &fakeRootVolumeCreator{}
+	dep := readyDepsWithImage(t, vol, img)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for permanent ISO rejection", err)
+	}
+	if result.Requeue {
+		t.Fatalf("Reconcile() result.Requeue = true, want false even without node cache")
+	}
+	if creator.createCalls != 0 {
+		t.Fatalf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
+	}
+	if len(dep.patches) != 1 || dep.patches[0].status.Phase != volumev1.VolumePhaseFailed {
+		t.Fatalf("patches = %+v, want failed status", dep.patches)
+	}
+}
+
+func TestVolumeControllerCreateAndCloseErrorsAreJoined(t *testing.T) {
+	vol := rootVolumeObject("vol-close-join")
+	vol.NodeName = "node-1"
+	cacheRoot := t.TempDir()
+	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatQCOW2)
+	cachedPath := writeCachedImage(t, cacheRoot, img, "bytes")
+	img.Status.NodeCaches = []imagev1.NodeCacheStatus{{NodeName: "node-1", Phase: imagev1.ImageCachePhaseReady, TaskRef: imagev1.TaskRef{Name: "task", UID: "task-uid"}, CachedPath: cachedPath, SizeBytes: img.Spec.DeclaredSizeBytes, SHA256: img.Spec.SHA256}}
+	createErr := errors.New("create failed")
+	closeErr := errors.New("close failed")
+	creator := &fakeRootVolumeCreator{createErr: createErr}
+	dep := readyDepsWithImage(t, vol, img)
+	c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
+	c.openCachedFile = func(_, _ string) (cachedFile, error) {
+		return &trackingCachedFile{
+			trackingReadCloser: &trackingReadCloser{r: strings.NewReader("bytes"), closeErr: closeErr},
+			info:               fakeFileInfo{mode: 0o644},
+		}, nil
+	}
+
+	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+	if err == nil {
+		t.Fatalf("Reconcile() error = nil, want joined create/close error")
+	}
+	if !errors.Is(err, createErr) {
+		t.Fatalf("Reconcile() error = %v, want errors.Is createErr", err)
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("Reconcile() error = %v, want errors.Is closeErr", err)
 	}
 	if !result.Requeue {
 		t.Fatalf("Reconcile() result.Requeue = false, want true")
 	}
-	if getter.getCalls != 0 || creator.createCalls != 0 {
-		t.Fatalf("downstream called in Task 6: get=%d create=%d", getter.getCalls, creator.createCalls)
-	}
 	if dep.patchCalls != 0 {
-		t.Fatalf("PatchStatus called %d times, want 0 while waiting for Task 7", dep.patchCalls)
+		t.Fatalf("PatchStatus called %d times, want 0 for transient create failure", dep.patchCalls)
+	}
+}
+
+func TestVolumeControllerRejectsUnsafeCachedPath(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		makePath  func(t *testing.T, cacheRoot string) string
+		wantError string
+	}{
+		{name: "missing-outside-root", makePath: func(t *testing.T, cacheRoot string) string {
+			return filepath.Join(filepath.Dir(cacheRoot), "missing-outside.img")
+		}, wantError: "escapes cache root"},
+		{name: "outside-root", makePath: func(t *testing.T, cacheRoot string) string {
+			path := filepath.Join(filepath.Dir(cacheRoot), "outside.img")
+			if err := os.WriteFile(path, []byte("outside"), 0o644); err != nil {
+				t.Fatalf("write outside image: %v", err)
+			}
+			return path
+		}, wantError: "escapes cache root"},
+		{name: "symlink-leaf", makePath: func(t *testing.T, cacheRoot string) string {
+			outside := filepath.Join(filepath.Dir(cacheRoot), "outside.img")
+			if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+				t.Fatalf("write outside target: %v", err)
+			}
+			link := filepath.Join(cacheRoot, "img-a", "v1", "image")
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatalf("create link dir: %v", err)
+			}
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatalf("create symlink: %v", err)
+			}
+			return link
+		}, wantError: "symlink"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vol := rootVolumeObject("vol-unsafe-" + tc.name)
+			vol.NodeName = "node-1"
+			cacheRoot := t.TempDir()
+			img := imageReadyObjectWithCache(vol.Spec.ImageRef, imagev1.ImageFormatQCOW2, "node-1", tc.makePath(t, cacheRoot))
+			creator := &fakeRootVolumeCreator{}
+			dep := readyDepsWithImage(t, vol, img)
+			c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
+
+			result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
+			if err == nil {
+				t.Fatalf("Reconcile() error = nil, want cached path rejection")
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("Reconcile() error = %v, want substring %q", err, tc.wantError)
+			}
+			if !result.Requeue {
+				t.Fatalf("Reconcile() result.Requeue = false, want true")
+			}
+			if creator.createCalls != 0 || dep.patchCalls != 0 {
+				t.Fatalf("create/patch calls = %d/%d, want 0/0", creator.createCalls, dep.patchCalls)
+			}
+		})
 	}
 }
 
 func TestVolumeReconcileImageNotReadyRequeues(t *testing.T) {
 	vol := rootVolumeObject("vol-img-pending")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	// Override the image to pending.
 	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormatQCOW2)
 	img.Status.Phase = imagev1.ImagePhasePending
 	dep.objects[depKey(string(metav1.KindImage), vol.Spec.ImageRef)] = mustMarshal(t, img)
 
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -537,9 +796,6 @@ func TestVolumeReconcileImageNotReadyRequeues(t *testing.T) {
 	}
 	if !result.Requeue {
 		t.Fatalf("Reconcile() result.Requeue = false, want true when image not ready")
-	}
-	if getter.getCalls != 0 {
-		t.Errorf("GetImage called %d times, want 0 when image not ready", getter.getCalls)
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0 when image not ready", creator.createCalls)
@@ -553,12 +809,11 @@ func TestVolumeReconcileImageNotFoundRequeues(t *testing.T) {
 	// 被引用 Image 还不存在（ErrNotFound）→ 等待（result.Requeue, 不报 failed）。
 	vol := rootVolumeObject("vol-img-missing")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	delete(dep.objects, depKey(string(metav1.KindImage), vol.Spec.ImageRef))
 	dep.notFound = map[string]bool{depKey(string(metav1.KindImage), vol.Spec.ImageRef): true}
 
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -578,12 +833,11 @@ func TestVolumeReconcileImageNotFoundRequeues(t *testing.T) {
 func TestVolumeReconcileBlockPoolNotReadyRequeues(t *testing.T) {
 	vol := rootVolumeObject("vol-pool-pending")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	dep.objects[depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef)] =
 		mustMarshal(t, storagePoolWithPhase(vol.Spec.PoolRef, storagepoolv1.PoolPhasePending))
 
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -591,9 +845,6 @@ func TestVolumeReconcileBlockPoolNotReadyRequeues(t *testing.T) {
 	}
 	if !result.Requeue {
 		t.Fatalf("Reconcile() result.Requeue = false, want true when block pool not ready")
-	}
-	if getter.getCalls != 0 {
-		t.Errorf("GetImage called %d times, want 0 when block pool not ready", getter.getCalls)
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
@@ -605,14 +856,14 @@ func TestVolumeReconcileBlockPoolNotReadyRequeues(t *testing.T) {
 
 func TestVolumeReconcileUnsupportedFormatIsPermanentFailure(t *testing.T) {
 	vol := rootVolumeObject("vol-bad-fmt")
+	vol.NodeName = "node-1"
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	// Image is Ready but carries an unmappable format.
 	img := imageReadyObject(vol.Spec.ImageRef, imagev1.ImageFormat("vmdk"))
 	dep.objects[depKey(string(metav1.KindImage), vol.Spec.ImageRef)] = mustMarshal(t, img)
 
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -620,9 +871,6 @@ func TestVolumeReconcileUnsupportedFormatIsPermanentFailure(t *testing.T) {
 	}
 	if result.Requeue {
 		t.Fatalf("Reconcile() result.Requeue = true, want false for unsupported image format")
-	}
-	if getter.getCalls != 0 {
-		t.Errorf("GetImage called %d times, want 0; format maps before any byte work", getter.getCalls)
 	}
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times, want 0", creator.createCalls)
@@ -637,11 +885,10 @@ func TestVolumeReconcileDependencyReadErrorRequeuesWithoutPatch(t *testing.T) {
 	vol := rootVolumeObject("vol-dep-err")
 	readErr := errors.New("master unreachable")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 	dep.getErr = map[string]error{depKey(string(metav1.KindStoragePool), vol.Spec.PoolRef): readErr}
 
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err == nil || !errors.Is(err, readErr) {
@@ -663,11 +910,9 @@ func TestVolumeReconcileMissingHostPathRequeues(t *testing.T) {
 	// must wait without reaching CreateRootVolumeFromReader in Task 6.
 	vol := rootVolumeObject("vol-no-path")
 	creator := &fakeRootVolumeCreator{created: volume.Volume{Context: map[string]string{}}}
-	reader := &trackingReadCloser{r: strings.NewReader("bytes")}
-	getter := &fakeImageGetter{reader: reader}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
 
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -684,9 +929,8 @@ func TestVolumeReconcileMissingHostPathRequeues(t *testing.T) {
 func TestVolumeReconcileDeletedIsNoOp(t *testing.T) {
 	vol := rootVolumeObject("vol-del")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventDeleted, vol))
 	if err != nil {
@@ -695,8 +939,8 @@ func TestVolumeReconcileDeletedIsNoOp(t *testing.T) {
 	if result.Requeue {
 		t.Fatalf("Reconcile() result.Requeue = true, want false")
 	}
-	if getter.getCalls != 0 || creator.createCalls != 0 {
-		t.Errorf("downstream called on DELETED: get=%d create=%d, want 0/0", getter.getCalls, creator.createCalls)
+	if creator.createCalls != 0 {
+		t.Errorf("CreateRootVolumeFromReader called %d times on DELETED, want 0", creator.createCalls)
 	}
 	if dep.getCalls != 0 || dep.patchCalls != 0 {
 		t.Errorf("client called on DELETED: get=%d patch=%d, want 0/0", dep.getCalls, dep.patchCalls)
@@ -706,9 +950,8 @@ func TestVolumeReconcileDeletedIsNoOp(t *testing.T) {
 func TestVolumeReconcileContextCancelledPropagates(t *testing.T) {
 	vol := rootVolumeObject("vol-ctx")
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDeps(t, vol, imagev1.ImageFormatQCOW2)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -720,8 +963,8 @@ func TestVolumeReconcileContextCancelledPropagates(t *testing.T) {
 	if result.Requeue {
 		t.Fatalf("Reconcile() result.Requeue = true, want false when context cancelled before work")
 	}
-	if getter.getCalls != 0 || creator.createCalls != 0 {
-		t.Errorf("downstream called after ctx cancel: get=%d create=%d, want 0/0", getter.getCalls, creator.createCalls)
+	if creator.createCalls != 0 {
+		t.Errorf("CreateRootVolumeFromReader called %d times after ctx cancel, want 0", creator.createCalls)
 	}
 	if dep.getCalls != 0 || dep.patchCalls != 0 {
 		t.Errorf("client called after ctx cancel: get=%d patch=%d, want 0/0", dep.getCalls, dep.patchCalls)
@@ -752,12 +995,11 @@ func wantTeardownVolumeID(vol volumev1.Volume) volume.ID {
 // SERVER-DERIVED volume id (<VMRef>-<role>-<DiskIndex>, the same key the create
 // path stored it under — NOT the object name) and the spec PoolRef, and, once
 // deleted, the node-teardown finalizer is removed so apiserver can finalize the
-// delete. The ensure path (GetImage / CreateRootVolumeFromReader) must not run.
+// delete. The ensure path (CreateRootVolumeFromReader) must not run.
 func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	vol := deletingVolume("vol-del")
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
@@ -782,9 +1024,6 @@ func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 	if creator.createCalls != 0 {
 		t.Errorf("CreateRootVolumeFromReader called %d times during teardown, want 0", creator.createCalls)
 	}
-	if getter.getCalls != 0 {
-		t.Errorf("GetImage called %d times during teardown, want 0", getter.getCalls)
-	}
 	if dep.removeFinalizerCalls != 1 {
 		t.Fatalf("RemoveFinalizer called %d times, want 1", dep.removeFinalizerCalls)
 	}
@@ -801,9 +1040,8 @@ func TestVolumeReconcileTeardownDeletesAndRemovesFinalizer(t *testing.T) {
 // already-deleted volume is a tear-down success, not a stall.
 func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 	creator := &fakeRootVolumeCreator{deleteErr: volume.ErrVolumeNotFound}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	vol := deletingVolume("vol-gone")
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
@@ -833,9 +1071,8 @@ func TestVolumeReconcileTeardownAlreadyGoneIsIdempotent(t *testing.T) {
 // execution-layer backstop behind the apiserver reference guard.
 func TestVolumeReconcileTeardownDeleteFailureRequeuesKeepingFinalizer(t *testing.T) {
 	creator := &fakeRootVolumeCreator{deleteErr: volume.ErrVolumeInUse}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{}, dep)
 
 	vol := deletingVolume("vol-busy")
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
@@ -889,10 +1126,9 @@ func TestVolumeReconcileResizeVMNotFoundRequeues(t *testing.T) {
 	vol.Status.Phase = volumev1.VolumePhaseReady
 
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	// No VM object registered → fakeDependencyReader.Get returns client.ErrNotFound.
 	dep := &fakeDependencyReader{}
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
@@ -918,9 +1154,8 @@ func TestVolumeReconcileResizeVMNotColdDefers(t *testing.T) {
 	vol.Status.Phase = volumev1.VolumePhaseReady
 
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDepsWithColdVM(t, vol)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseRunning}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{phase: vmm.PhaseRunning}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
@@ -947,9 +1182,8 @@ func TestVolumeReconcileResizeColdConverges(t *testing.T) {
 	vol.Status.Phase = volumev1.VolumePhaseReady
 
 	creator := &fakeRootVolumeCreator{}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDepsWithColdVM(t, vol)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err != nil {
@@ -972,8 +1206,8 @@ func TestVolumeReconcileResizeColdConverges(t *testing.T) {
 		t.Errorf("ResizeVolume CapacityBytes = %d, want %d (absolute target)", got.CapacityBytes, vol.Spec.CapacityBytes)
 	}
 	// 决策2: 控制器不读 live、不创建、不重新流式喂入。
-	if creator.createCalls != 0 || getter.getCalls != 0 {
-		t.Errorf("create/getImage touched on resize path: create=%d get=%d, want 0/0", creator.createCalls, getter.getCalls)
+	if creator.createCalls != 0 {
+		t.Errorf("CreateRootVolumeFromReader called %d times on resize path, want 0", creator.createCalls)
 	}
 	if dep.patchCalls != 0 {
 		t.Errorf("PatchStatus called %d times, want 0 (already Ready, no-op guard)", dep.patchCalls)
@@ -990,9 +1224,8 @@ func TestVolumeReconcileResizeFailureKeepsReady(t *testing.T) {
 
 	resizeErr := errors.New("qemu-img resize: no space left on device")
 	creator := &fakeRootVolumeCreator{resizeErr: resizeErr}
-	getter := &fakeImageGetter{reader: &trackingReadCloser{r: strings.NewReader("x")}}
 	dep := readyDepsWithColdVM(t, vol)
-	c := NewVolumeController(creator, getter, &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
+	c := NewVolumeController(creator, "/cache", &fakeVMStatusReader{phase: vmm.PhaseStopped}, dep)
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventModified, vol))
 	if err == nil || !errors.Is(err, resizeErr) {

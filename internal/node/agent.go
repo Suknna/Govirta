@@ -1,8 +1,8 @@
 // Package node assembles govirtlet's controller-manager: it wires the master
 // apiserver client, the streaming watch source, the local execution-plane
-// services (storage / network / VM process), and the six first-class
-// controllers into one runnable Agent. The Agent watches the master and
-// reconciles each kind onto the local node.
+// services (storage / network / VM process), the node-local image cache, and
+// the first-class controllers into one runnable Agent. The Agent watches the
+// master and reconciles each kind onto the local node.
 package node
 
 import (
@@ -89,8 +89,9 @@ type Agent struct {
 
 // NewAgent assembles a production node agent from cfg. It builds the master
 // client + watch source, the platform-specific host primitive managers, the real
-// execution-plane services (pool / volume / image / network / NIC / VM process),
-// the six first-class controllers, and the controller manager.
+// execution-plane services (pool / volume / network / NIC / VM process), the
+// node image cache, TaskController, the cache-backed VolumeController, and the
+// controller manager.
 //
 // It returns an error if a host manager or the VM process service cannot be
 // constructed (e.g. the nftables handle on Linux, or missing runtime config).
@@ -105,7 +106,6 @@ func NewAgent(cfg Config) (*Agent, error) {
 
 	poolSvc := pool.NewService()
 	volumeSvc := storage.NewVolumeService(poolSvc)
-	imageSvc := storage.NewImageService(poolSvc)
 
 	netpoolSvc := netpool.NewService(hm.link, hm.route, hm.firewall, hm.dhcp)
 	networkSvc := network.NewNetworkService(netpoolSvc)
@@ -126,7 +126,7 @@ func NewAgent(cfg Config) (*Agent, error) {
 	list := []controller.Controller{
 		controllers.NewTaskControllerWithImageCache(cfg.NodeName, master, imageCache, nil),
 		controllers.NewStoragePoolController(poolSvc, master),
-		controllers.NewVolumeController(volumeSvc, imageSvc, vmmSvc, master),
+		controllers.NewVolumeController(volumeSvc, imageCache.Root(), vmmSvc, master),
 		controllers.NewNetworkController(networkSvc, master),
 		controllers.NewNICController(nicSvc, master, cfg.OwnerUID, cfg.OwnerGID),
 		controllers.NewVMController(vmmSvc, master, cfg.GuestCPU),

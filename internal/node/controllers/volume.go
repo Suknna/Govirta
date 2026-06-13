@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	"github.com/rs/zerolog"
 
@@ -37,13 +40,6 @@ type RootVolumeCreator interface {
 	ResizeVolume(ctx context.Context, req storage.ResizeVolumeRequest) error
 }
 
-// ImageGetter is the narrow slice of the image service the controller needs:
-// open a ready image for reading from a file pool. *storage.ImageService
-// satisfies it.
-type ImageGetter interface {
-	GetImage(ctx context.Context, req storage.GetImageRequest) (io.ReadCloser, error)
-}
-
 // DependencyReader is the narrow slice of the master client the controller
 // needs: read a referenced object's status for gating, PATCH this volume's own
 // status, and remove a finalizer once live resources are torn down.
@@ -58,32 +54,38 @@ type DependencyReader interface {
 // 编译期证明真实生产类型满足窄接口。
 var (
 	_ RootVolumeCreator     = (*storage.VolumeService)(nil)
-	_ ImageGetter           = (*storage.ImageService)(nil)
 	_ DependencyReader      = (*client.Client)(nil)
 	_ controller.Controller = (*VolumeController)(nil)
 )
 
-// VolumeController reconciles Volume objects: it gates on the referenced block
-// StoragePool, the image file StoragePool, and the source Image all being live
-// Ready, then streams the image bytes (via ImageService.GetImage) into
-// VolumeService.CreateRootVolumeFromReader to derive an independent qcow2 root
-// volume, and reports a ready status carrying the volume's host path.
+// VolumeController reconciles Volume objects: root volumes gate on the referenced
+// block StoragePool, source Image, and this node's ready image-cache entry, then
+// streams cached image bytes into VolumeService.CreateRootVolumeFromReader to
+// derive an independent qcow2 root volume. Data volumes gate only on their block
+// StoragePool and create blank qcow2 disks.
 //
 // The byte format authority is the referenced Image's spec format
 // (Image.Spec.Format), mapped explicitly to a storage diskformat.
 type VolumeController struct {
-	volumes RootVolumeCreator
-	images  ImageGetter
-	vmm     VMStatusReader
-	client  DependencyReader
+	volumes        RootVolumeCreator
+	cacheRoot      string
+	vmm            VMStatusReader
+	client         DependencyReader
+	cacheRootValid bool
+	openCachedFile func(string, string) (cachedFile, error)
+}
+
+type cachedFile interface {
+	io.ReadCloser
+	Stat() (os.FileInfo, error)
 }
 
 // NewVolumeController wires a VolumeController against the volume service, the
-// image service, the VM process manager (for the live cold gate on resize), and
-// the master dependency/status client. The runner parameter sits after images
-// and before client, mirroring NewSnapshotController(volumes, runner, client).
-func NewVolumeController(volumes RootVolumeCreator, images ImageGetter, runner VMStatusReader, client DependencyReader) *VolumeController {
-	return &VolumeController{volumes: volumes, images: images, vmm: runner, client: client}
+// explicit node-local image cache root, the VM process manager (for the live cold
+// gate on resize), and the master dependency/status client.
+func NewVolumeController(volumes RootVolumeCreator, imageCacheRoot string, runner VMStatusReader, client DependencyReader) *VolumeController {
+	cacheRoot, ok := cleanAbsoluteRoot(imageCacheRoot)
+	return &VolumeController{volumes: volumes, cacheRoot: cacheRoot, vmm: runner, client: client, cacheRootValid: ok, openCachedFile: openNoFollow}
 }
 
 // Kind is the apis kind this controller watches.
@@ -101,8 +103,8 @@ func (c *VolumeController) Kind() string {
 //     wrapped error, no status patch (readiness could not be assessed);
 //   - the Image's format does not map to a storage format → permanent config
 //     failure: patch failed and do NOT requeue;
-//   - GetImage / CreateRootVolumeFromReader fails → transient: patch failed and
-//     requeue with a wrapped error.
+//   - cached image open / CreateRootVolumeFromReader fails → transient: requeue
+//     with a wrapped error and no failed status patch.
 func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (controller.ReconcileResult, error) {
 	if err := ctx.Err(); err != nil {
 		return controller.Done(), fmt.Errorf("volume controller: context done before reconcile: %w", err)
@@ -151,10 +153,9 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 		return c.reconcileResize(ctx, vol)
 	}
 
-	// Role-based create dispatch. A root volume is a full copy of image bytes
-	// (gate on block pool + image file pool + Image, format from Image.Spec). A
-	// data volume is a blank qcow2 with no image source (gate only on its block
-	// pool; VolumeSpec.Validate forbids a data volume from carrying image refs).
+	// Role-based create dispatch. A root volume is a full copy of this node's
+	// cached image bytes (gate on block pool + Image + node cache, format from
+	// Image.Spec). A data volume is a blank qcow2 with no image source.
 	// 刀6「增删硬件」的第二块盘是 data 盘——这是 e2e 首次走 data 创建路径。
 	if vol.Spec.Role == volumev1.VolumeRoleData {
 		return c.reconcileCreateData(ctx, ev, vol)
@@ -162,14 +163,14 @@ func (c *VolumeController) Reconcile(ctx context.Context, ev controller.Event) (
 	return c.reconcileCreateRoot(ctx, ev, vol)
 }
 
-// reconcileCreateRoot derives an independent root qcow2 by copying the source
-// Image's bytes. It gates on all three dependencies (block pool, image file
-// pool, Image) being live Ready, maps the Image's authoritative format, and
-// streams the bytes into CreateRootVolumeFromReader.
+// reconcileCreateRoot derives an independent root qcow2 by copying this node's
+// cached Image bytes. It gates on the block pool and Image readiness first,
+// rejects unsupported root formats before waiting for node cache readiness, then
+// streams the verified cache file into CreateRootVolumeFromReader.
 func (c *VolumeController) reconcileCreateRoot(ctx context.Context, ev controller.Event, vol volumev1.Volume) (controller.ReconcileResult, error) {
 	logger := zerolog.Ctx(ctx)
 
-	img, ready, err := c.gate(ctx, vol)
+	img, ready, err := c.gateRootDependencies(ctx, vol)
 	if err != nil {
 		// A dependency read failed transiently: requeue without patching failed
 		// (the volume itself has not failed; readiness could not be assessed).
@@ -193,10 +194,21 @@ func (c *VolumeController) reconcileCreateRoot(ctx context.Context, ev controlle
 		return controller.Done(), nil
 	}
 
-	created, err := c.createRootVolume(ctx, vol, imageFormat)
+	cache, cacheReady, err := nodeImageCacheReady(img, vol.NodeName)
+	if err != nil {
+		return controller.Requeue(), err
+	}
+	if !cacheReady {
+		logger.Info().
+			Str("key", ev.Key).
+			Msg("volume node image cache not ready; requeueing")
+		return controller.Requeue(), nil
+	}
+
+	created, err := c.createRootVolume(ctx, vol, cache, imageFormat)
 	if err != nil {
 		logger.Info().Err(err).Str("key", ev.Key).Msg("root volume image bytes not ready; requeueing")
-		return controller.Requeue(), nil
+		return controller.Requeue(), err
 	}
 
 	return c.patchCreatedVolumeReady(ctx, ev, vol, created, "volume ready")
@@ -272,7 +284,7 @@ func (c *VolumeController) patchCreatedVolumeReady(ctx context.Context, ev contr
 // ready it returns the referenced Image so the caller can read its authoritative
 // format. ready=false with a nil error means a dependency is missing or not yet
 // ready (wait); a non-nil error is a transient read failure.
-func (c *VolumeController) gate(ctx context.Context, vol volumev1.Volume) (imagev1.Image, bool, error) {
+func (c *VolumeController) gateRootDependencies(ctx context.Context, vol volumev1.Volume) (imagev1.Image, bool, error) {
 	poolReady, err := c.storagePoolReady(ctx, vol.Spec.PoolRef)
 	if err != nil {
 		return imagev1.Image{}, false, err
@@ -329,14 +341,89 @@ func (c *VolumeController) imageReady(ctx context.Context, name string) (imagev1
 	return img, img.Status.Phase == imagev1.ImagePhaseReady, nil
 }
 
+func nodeImageCacheReady(img imagev1.Image, nodeName string) (imagev1.NodeCacheStatus, bool, error) {
+	for _, cache := range img.Status.NodeCaches {
+		if cache.NodeName != nodeName {
+			continue
+		}
+		if cache.Phase != imagev1.ImageCachePhaseReady || cache.CachedPath == "" {
+			return imagev1.NodeCacheStatus{}, false, nil
+		}
+		if cache.SHA256 != img.Spec.SHA256 {
+			return imagev1.NodeCacheStatus{}, false, fmt.Errorf("volume controller: image %q cache for node %q sha256 %q does not match spec %q", img.Name, nodeName, cache.SHA256, img.Spec.SHA256)
+		}
+		if cache.SizeBytes != img.Spec.DeclaredSizeBytes {
+			return imagev1.NodeCacheStatus{}, false, fmt.Errorf("volume controller: image %q cache for node %q size %d does not match spec %d", img.Name, nodeName, cache.SizeBytes, img.Spec.DeclaredSizeBytes)
+		}
+		return cache, true, nil
+	}
+	return imagev1.NodeCacheStatus{}, false, nil
+}
+
 // createRootVolume opens the image byte reader and derives an independent root
 // volume from it. The reader is always closed after the copy completes; its
 // close error is joined with any create error (项目铁律: 不吞 close 错误).
-func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Volume, format diskformat.Format) (volume.Volume, error) {
+func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Volume, cache imagev1.NodeCacheStatus, format diskformat.Format) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
-	return volume.Volume{}, fmt.Errorf("volume controller: root volume image bytes for image %q format %q are not ready for node consumption in this task", vol.Spec.ImageRef, format)
+	reader, err := c.openCachedImage(cache.CachedPath)
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	created, createErr := c.volumes.CreateRootVolumeFromReader(ctx, storage.CreateRootVolumeFromReaderRequest{
+		VMID:          vol.Spec.VMRef,
+		VMName:        vol.Spec.VMName,
+		PoolName:      vol.Spec.PoolRef,
+		Name:          vol.Name,
+		DiskIndex:     vol.Spec.DiskIndex,
+		CapacityBytes: vol.Spec.CapacityBytes,
+		Format:        format,
+		Reader:        reader,
+	})
+	closeErr := reader.Close()
+	if createErr != nil || closeErr != nil {
+		return volume.Volume{}, fmt.Errorf("volume controller: create root volume %q from cached image %q: %w", vol.Name, cache.CachedPath, errors.Join(createErr, closeErr))
+	}
+	return created, nil
+}
+
+func (c *VolumeController) openCachedImage(path string) (io.ReadCloser, error) {
+	if !c.cacheRootValid {
+		return nil, fmt.Errorf("volume controller: image cache root must be an absolute path")
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return nil, fmt.Errorf("volume controller: cached image path %q escapes cache root %q", path, c.cacheRoot)
+	}
+	if !pathWithin(c.cacheRoot, clean) {
+		return nil, fmt.Errorf("volume controller: cached image path %q escapes cache root %q", clean, c.cacheRoot)
+	}
+	reader, err := c.openCachedFile(c.cacheRoot, clean)
+	if err != nil {
+		return nil, fmt.Errorf("volume controller: open cached image %q: %w", clean, err)
+	}
+	openedInfo, err := reader.Stat()
+	if err != nil {
+		closeErr := reader.Close()
+		return nil, fmt.Errorf("volume controller: stat opened cached image %q: %w", clean, errors.Join(err, closeErr))
+	}
+	if openedInfo.Mode()&fs.ModeType != 0 || !openedInfo.Mode().IsRegular() {
+		closeErr := reader.Close()
+		return nil, fmt.Errorf("volume controller: opened cached image %q is not a regular file: %w", clean, closeErr)
+	}
+	return reader, nil
+}
+
+func cleanAbsoluteRoot(root string) (string, bool) {
+	if root == "" || !filepath.IsAbs(root) {
+		return "", false
+	}
+	clean := filepath.Clean(root)
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		return resolved, true
+	}
+	return clean, true
 }
 
 // teardown deletes the live volume from its block pool. The storage layer keys a
