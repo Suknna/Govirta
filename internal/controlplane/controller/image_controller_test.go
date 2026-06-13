@@ -3,12 +3,14 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/suknna/govirta/internal/controlplane/imagestore"
+	"github.com/suknna/govirta/internal/controlplane/store"
 	"github.com/suknna/govirta/internal/controlplane/store/fake"
 	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
@@ -107,7 +109,7 @@ func TestImageControllerFailsClosedOnNodeTaskFailure(t *testing.T) {
 
 func TestImageControllerDeleteObservedFalseKeepsFinalizer(t *testing.T) {
 	st, controller := newTestImageController(t)
-	store := controller.imageStore.(*recordingImageStore)
+	imageStore := controller.imageStore.(*recordingImageStore)
 	img := deletingReadyImage()
 	seedImage(t, st, img)
 	if err := controller.Reconcile(context.Background()); err != nil {
@@ -121,8 +123,8 @@ func TestImageControllerDeleteObservedFalseKeepsFinalizer(t *testing.T) {
 	}
 
 	got := mustGetImage(t, st, img.Name)
-	if !hasFinalizer(got, metav1.FinalizerImageCache) || store.deleteCalls != 0 {
-		t.Fatalf("Deleted=false removed finalizer or store object: finalizers=%v deleteCalls=%d", got.Finalizers, store.deleteCalls)
+	if !hasFinalizer(got, metav1.FinalizerImageCache) || imageStore.deleteCalls != 0 {
+		t.Fatalf("Deleted=false removed finalizer or store object: finalizers=%v deleteCalls=%d", got.Finalizers, imageStore.deleteCalls)
 	}
 }
 
@@ -272,7 +274,7 @@ func TestImageTaskNameIsBoundedForLongIdentityFields(t *testing.T) {
 
 func TestImageControllerDeleteWaitsForCacheDeletionBeforeFinalizerRemoval(t *testing.T) {
 	st, controller := newTestImageController(t)
-	store := controller.imageStore.(*recordingImageStore)
+	imageStore := controller.imageStore.(*recordingImageStore)
 	img := testImage()
 	img.Finalizers = []metav1.Finalizer{metav1.FinalizerImageCache}
 	img.Status = imagev1.ImageStatus{Phase: imagev1.ImagePhaseReady, ObservedVersion: img.Spec.Version, ObservedSHA256: img.Spec.SHA256, ObservedSizeBytes: img.Spec.DeclaredSizeBytes, NodeCaches: []imagev1.NodeCacheStatus{
@@ -286,8 +288,8 @@ func TestImageControllerDeleteWaitsForCacheDeletionBeforeFinalizerRemoval(t *tes
 		t.Fatalf("delete reconcile: %v", err)
 	}
 	got := mustGetImage(t, st, img.Name)
-	if !hasFinalizer(got, metav1.FinalizerImageCache) || store.deleteCalls != 0 {
-		t.Fatalf("delete before task success removed finalizer or store object: finalizers=%v deleteCalls=%d", got.Finalizers, store.deleteCalls)
+	if !hasFinalizer(got, metav1.FinalizerImageCache) || imageStore.deleteCalls != 0 {
+		t.Fatalf("delete before task success removed finalizer or store object: finalizers=%v deleteCalls=%d", got.Finalizers, imageStore.deleteCalls)
 	}
 	patchDeleteSucceeded(t, st, img, "node-a")
 	patchDeleteSucceeded(t, st, img, "node-b")
@@ -295,9 +297,11 @@ func TestImageControllerDeleteWaitsForCacheDeletionBeforeFinalizerRemoval(t *tes
 	if err := controller.Reconcile(context.Background()); err != nil {
 		t.Fatalf("delete completion reconcile: %v", err)
 	}
-	got = mustGetImage(t, st, img.Name)
-	if hasFinalizer(got, metav1.FinalizerImageCache) || store.deleteCalls != 1 {
-		t.Fatalf("finalizers=%v deleteCalls=%d, want finalizer removed and store deleted", got.Finalizers, store.deleteCalls)
+	if _, err := st.Get(context.Background(), imageKey(img.Name)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("get finalized image error = %v, want ErrNotFound", err)
+	}
+	if imageStore.deleteCalls != 1 {
+		t.Fatalf("deleteCalls=%d, want image store deleted once", imageStore.deleteCalls)
 	}
 }
 

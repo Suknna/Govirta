@@ -531,24 +531,26 @@ func cdromArgvProbe(lineExpr string) string {
 		"scsi-cd",
 		"drive=cdrom0-",
 	}
-	parts := make([]string, 0, len(checks)+1)
+	parts := make([]string, 0, len(checks)+2)
+	parts = append(parts, "missing=''")
 	for _, token := range checks {
-		parts = append(parts, "printf '%s' \""+lineExpr+"\" | grep -F "+shellQuote(token)+" >/dev/null 2>&1")
+		parts = append(parts, "printf '%s' \""+lineExpr+"\" | grep -F "+shellQuote(token)+" >/dev/null 2>&1 || missing=\"$missing "+token+"\"")
 	}
-	parts = append(parts, "! printf '%s' \""+lineExpr+"\" | grep -F -- '-cdrom' >/dev/null 2>&1")
-	return strings.Join(parts, " && ") + "; case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
+	parts = append(parts, "case \" "+lineExpr+" \" in *\" -cdrom \"*) missing=\"$missing forbidden:-cdrom\";; esac")
+	parts = append(parts, "if [ -z \"$missing\" ]; then echo PRESENT; else echo \"ABSENT:$missing\"; fi")
+	return strings.Join(parts, "; ")
 }
 
 func assertCDROMProbeResult(t *testing.T, vmUID, label, stdout, stderr string, code int) {
 	t.Helper()
-	switch strings.TrimSpace(stdout) {
-	case "PRESENT":
+	got := strings.TrimSpace(stdout)
+	if got == "PRESENT" {
 		return
-	case "ABSENT":
-		t.Fatalf("%s for VM uid %q does not carry typed CD-ROM blockdev/device argv with read-only cache path, or contains forbidden -cdrom; exit=%d", label, vmUID, code)
-	default:
-		t.Fatalf("probe for VM uid %q %s CD-ROM was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", vmUID, label, stdout, code, stderr)
 	}
+	if got == "ABSENT" || strings.HasPrefix(got, "ABSENT:") {
+		t.Fatalf("%s for VM uid %q does not carry typed CD-ROM blockdev/device argv with read-only cache path, or contains forbidden -cdrom; exit=%d stdout=%q stderr=%q", label, vmUID, code, stdout, stderr)
+	}
+	t.Fatalf("probe for VM uid %q %s CD-ROM was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", vmUID, label, stdout, code, stderr)
 }
 
 // shellQuote single-quotes a path for safe `sh -c` interpolation.

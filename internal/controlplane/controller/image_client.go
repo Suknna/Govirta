@@ -67,6 +67,15 @@ func (c *ImageClient) PatchImage(ctx context.Context, image imagev1.Image) (imag
 		if !shouldWrite {
 			return current, nil
 		}
+		if shouldHardDeleteImage(merged) {
+			if err := c.store.DeleteIfVersion(ctx, key, raw.ResourceVersion); err != nil {
+				if errors.Is(err, store.ErrRevisionConflict) {
+					continue
+				}
+				return imagev1.Image{}, fmt.Errorf("controlplane image controller: delete finalized image %q: %w", image.Name, err)
+			}
+			return merged, nil
+		}
 		data, err := json.Marshal(merged)
 		if err != nil {
 			return imagev1.Image{}, fmt.Errorf("controlplane image controller: marshal image %q: %w", image.Name, err)
@@ -115,6 +124,10 @@ func hasImageCacheFinalizer(finalizers []metav1.Finalizer) bool {
 		}
 	}
 	return false
+}
+
+func shouldHardDeleteImage(image imagev1.Image) bool {
+	return image.DeletionTimestamp != "" && len(image.Finalizers) == 0
 }
 
 func removeFinalizerCopy(finalizers []metav1.Finalizer, target metav1.Finalizer) []metav1.Finalizer {

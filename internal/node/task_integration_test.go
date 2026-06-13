@@ -21,6 +21,7 @@ import (
 	"github.com/suknna/govirta/internal/controlplane/imagestore"
 	"github.com/suknna/govirta/internal/controlplane/mac"
 	"github.com/suknna/govirta/internal/controlplane/scheduler"
+	"github.com/suknna/govirta/internal/controlplane/store"
 	"github.com/suknna/govirta/internal/controlplane/store/fake"
 	"github.com/suknna/govirta/internal/node/client"
 	nodectrl "github.com/suknna/govirta/internal/node/controller"
@@ -162,9 +163,8 @@ func TestDistributedImageCacheTaskIntegration(t *testing.T) {
 	if err := imageController.Reconcile(ctx); err != nil {
 		t.Fatalf("delete completion reconcile: %v", err)
 	}
-	deleted := mustGetIntegrationImage(t, st, "cirros")
-	if hasIntegrationFinalizer(deleted, metav1.FinalizerImageCache) {
-		t.Fatalf("finalizers = %v, want image cache finalizer removed", deleted.Finalizers)
+	if _, err := st.Get(ctx, admission.StoreKey(metav1.KindImage, "cirros")); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("get finalized image error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -345,15 +345,6 @@ func assertCachedFile(t *testing.T, path string, want []byte, wantSHA string) {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-func hasIntegrationFinalizer(img imagev1.Image, finalizer metav1.Finalizer) bool {
-	for _, existing := range img.Finalizers {
-		if existing == finalizer {
-			return true
-		}
-	}
-	return false
 }
 
 type integrationImageStore struct{}

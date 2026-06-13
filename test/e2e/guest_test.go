@@ -167,3 +167,30 @@ func TestSudoReadStateFileOneLineOpensStateInsideSudoShell(t *testing.T) {
 		t.Fatalf("sudo state reader = %q, want redirection inside the sudo shell command", cmd)
 	}
 }
+
+func TestCDROMArgvProbeDoesNotRejectImageNamesContainingCDROM(t *testing.T) {
+	line := "driver=raw,node-name=cdrom0-abc,read-only=on,file.driver=file,file.filename=/var/lib/govirta/image-cache/image-cdrom/v1/image " +
+		"virtio-scsi-pci scsi-cd drive=cdrom0-abc"
+	stdout := runLocalCDROMProbe(t, line)
+	if strings.TrimSpace(stdout) != "PRESENT" {
+		t.Fatalf("cdromArgvProbe with image-cdrom path = %q, want PRESENT", stdout)
+	}
+}
+
+func TestCDROMArgvProbeRejectsRawCDROMShortcutArgument(t *testing.T) {
+	line := "driver=raw,node-name=cdrom0-abc,read-only=on,file.driver=file,file.filename=/var/lib/govirta/image-cache/image-cdrom/v1/image " +
+		"virtio-scsi-pci scsi-cd drive=cdrom0-abc -cdrom /var/lib/govirta/image-cache/image-cdrom/v1/image"
+	stdout := runLocalCDROMProbe(t, line)
+	if !strings.Contains(stdout, "forbidden:-cdrom") {
+		t.Fatalf("cdromArgvProbe with raw -cdrom arg = %q, want forbidden:-cdrom", stdout)
+	}
+}
+
+func runLocalCDROMProbe(t *testing.T, line string) string {
+	t.Helper()
+	out, err := exec.Command("sh", "-c", "line="+shellQuote(line)+"; "+cdromArgvProbe("$line")).Output()
+	if err != nil {
+		t.Fatalf("run local cdrom probe: %v", err)
+	}
+	return string(out)
+}
