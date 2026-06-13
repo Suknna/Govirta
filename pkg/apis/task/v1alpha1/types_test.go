@@ -53,6 +53,93 @@ func TestTaskValidateRejectsMissingNoopInputMarker(t *testing.T) {
 	}
 }
 
+func TestTaskValidateAcceptsCacheImageNode(t *testing.T) {
+	task := validImageTask(t, TaskOperationCacheImageNode, validCacheImageInput())
+	if err := task.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestTaskValidateRejectsCacheImageWithoutNodeName(t *testing.T) {
+	task := validImageTask(t, TaskOperationCacheImageNode, validCacheImageInput())
+	task.NodeName = ""
+	err := task.Validate()
+	if !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidTask", err)
+	}
+}
+
+func TestTaskValidateRejectsCacheImageBadChecksum(t *testing.T) {
+	input := validCacheImageInput()
+	input.SHA256 = "ABCDEF"
+	task := validImageTask(t, TaskOperationCacheImageNode, input)
+	err := task.Validate()
+	if !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidTask", err)
+	}
+}
+
+func TestTaskValidateRejectsDeleteCachedImageBadScope(t *testing.T) {
+	task := validImageTask(t, TaskOperationDeleteCachedImageNode, validDeleteCachedImageInput())
+	task.Spec.Scope = TaskScopeCluster
+	task.NodeName = ""
+	err := task.Validate()
+	if !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidTask", err)
+	}
+}
+
+func TestDecodeCacheImageObservedAcceptsValidPayload(t *testing.T) {
+	raw := mustMarshal(t, CacheImageObserved{
+		NodeName:   "node0",
+		ImageName:  "alpine",
+		Version:    "v1",
+		Format:     "qcow2",
+		CachedPath: "/var/lib/govirta/cache/alpine.qcow2",
+		SizeBytes:  1024,
+		SHA256:     validSHA256(),
+	})
+	observed, err := DecodeCacheImageObserved(raw)
+	if err != nil {
+		t.Fatalf("DecodeCacheImageObserved() error = %v, want nil", err)
+	}
+	if observed.NodeName != "node0" || observed.ImageName != "alpine" {
+		t.Fatalf("observed mismatch: %+v", observed)
+	}
+}
+
+func TestDecodeCacheImageObservedRejectsMalformedPayload(t *testing.T) {
+	raw := json.RawMessage(`{"nodeName":"node0","imageName":"alpine","version":"v1","format":"qcow2","cachedPath":"/cache/alpine.qcow2","sizeBytes":1024,"sha256":"not-hex"}`)
+	_, err := DecodeCacheImageObserved(raw)
+	if !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("DecodeCacheImageObserved() error = %v, want ErrInvalidTask", err)
+	}
+}
+
+func TestDecodeDeleteCachedImageObservedAcceptsValidPayload(t *testing.T) {
+	raw := mustMarshal(t, DeleteCachedImageObserved{
+		NodeName:  "node0",
+		ImageName: "alpine",
+		Version:   "v1",
+		Deleted:   false,
+	})
+	observed, err := DecodeDeleteCachedImageObserved(raw)
+	if err != nil {
+		t.Fatalf("DecodeDeleteCachedImageObserved() error = %v, want nil", err)
+	}
+	if observed.NodeName != "node0" || observed.Deleted {
+		t.Fatalf("observed mismatch: %+v", observed)
+	}
+}
+
+func TestDecodeDeleteCachedImageObservedRejectsMalformedPayload(t *testing.T) {
+	raw := json.RawMessage(`{"nodeName":"node0","imageName":"alpine","deleted":true}`)
+	_, err := DecodeDeleteCachedImageObserved(raw)
+	if !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("DecodeDeleteCachedImageObserved() error = %v, want ErrInvalidTask", err)
+	}
+}
+
 func TestTaskValidateRejectsEmptyStatusPhase(t *testing.T) {
 	task := validTask(t, TaskScopeNode, TaskOperationNoopNode)
 	task.Status.Phase = ""
@@ -114,10 +201,7 @@ func TestTaskJSONRoundTripPreservesEnvelope(t *testing.T) {
 
 func validTask(t *testing.T, scope TaskScope, operation TaskOperation) Task {
 	t.Helper()
-	input, err := json.Marshal(NoopInput{Marker: "phase-one"})
-	if err != nil {
-		t.Fatalf("marshal input: %v", err)
-	}
+	input := mustMarshal(t, NoopInput{Marker: "phase-one"})
 	meta := metav1.ObjectMeta{
 		Name:     "task-phase-one",
 		UID:      "task-phase-one-uid",
@@ -139,4 +223,56 @@ func validTask(t *testing.T, scope TaskScope, operation TaskOperation) Task {
 		},
 		Status: TaskStatus{Phase: TaskPhasePending},
 	}
+}
+
+func validImageTask(t *testing.T, operation TaskOperation, input any) Task {
+	t.Helper()
+	task := validTask(t, TaskScopeNode, TaskOperationNoopNode)
+	task.Name = "task-image-cache"
+	task.UID = "task-image-cache-uid"
+	task.Spec.OwnerKind = metav1.KindImage
+	task.Spec.OwnerName = "alpine"
+	task.Spec.OwnerUID = "image-uid"
+	task.Spec.Operation = operation
+	task.Spec.Input = mustMarshal(t, input)
+	return task
+}
+
+func validCacheImageInput() CacheImageInput {
+	return CacheImageInput{
+		ImageName: "alpine",
+		ImageUID:  "image-uid",
+		Version:   "v1",
+		Format:    "qcow2",
+		Source: ImageTaskSource{
+			Type:     ImageTaskSourceHTTP,
+			Location: "https://images.example/alpine.qcow2",
+		},
+		DeclaredSizeBytes: 1024,
+		SHA256:            validSHA256(),
+		CacheRoot:         "/var/lib/govirta/image-cache",
+	}
+}
+
+func validDeleteCachedImageInput() DeleteCachedImageInput {
+	return DeleteCachedImageInput{
+		ImageName: "alpine",
+		ImageUID:  "image-uid",
+		Version:   "v1",
+		SHA256:    validSHA256(),
+		CacheRoot: "/var/lib/govirta/image-cache",
+	}
+}
+
+func validSHA256() string {
+	return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+
+func mustMarshal(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	return b
 }

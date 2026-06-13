@@ -34,15 +34,22 @@ func (s TaskScope) Valid() bool {
 type TaskOperation string
 
 const (
-	// TaskOperationNoopNode is the phase-one no-op operation for node executors.
-	TaskOperationNoopNode TaskOperation = "NoopNode"
 	// TaskOperationNoopCluster is the phase-one no-op operation for the control plane.
 	TaskOperationNoopCluster TaskOperation = "NoopCluster"
+	// TaskOperationNoopNode is the phase-one no-op operation for node executors.
+	TaskOperationNoopNode TaskOperation = "NoopNode"
+	// TaskOperationCacheImageNode instructs a node executor to cache an image locally.
+	TaskOperationCacheImageNode TaskOperation = "CacheImageNode"
+	// TaskOperationDeleteCachedImageNode instructs a node executor to delete a local cached image.
+	TaskOperationDeleteCachedImageNode TaskOperation = "DeleteCachedImageNode"
 )
 
-// Valid reports whether o is a known phase-one task operation.
+// Valid reports whether o is a known task operation.
 func (o TaskOperation) Valid() bool {
-	return o == TaskOperationNoopNode || o == TaskOperationNoopCluster
+	return o == TaskOperationNoopCluster ||
+		o == TaskOperationNoopNode ||
+		o == TaskOperationCacheImageNode ||
+		o == TaskOperationDeleteCachedImageNode
 }
 
 // TaskPhase is the observed lifecycle phase of a task.
@@ -144,18 +151,48 @@ func (s TaskSpec) Validate() error {
 	if len(s.Input) == 0 || string(s.Input) == "null" {
 		return fmt.Errorf("%w: spec.input is required", ErrInvalidTask)
 	}
-	var input NoopInput
-	if err := json.Unmarshal(s.Input, &input); err != nil {
-		return fmt.Errorf("%w: decode noop input: %v", ErrInvalidTask, err)
-	}
-	if input.Marker == "" {
-		return fmt.Errorf("%w: noop input marker is required", ErrInvalidTask)
-	}
 	if s.Scope == TaskScopeNode && s.Operation != TaskOperationNoopNode {
-		return fmt.Errorf("%w: node task operation must be %q", ErrInvalidTask, TaskOperationNoopNode)
+		if s.Operation != TaskOperationCacheImageNode && s.Operation != TaskOperationDeleteCachedImageNode {
+			return fmt.Errorf("%w: node task operation %q is invalid", ErrInvalidTask, s.Operation)
+		}
 	}
 	if s.Scope == TaskScopeCluster && s.Operation != TaskOperationNoopCluster {
 		return fmt.Errorf("%w: cluster task operation must be %q", ErrInvalidTask, TaskOperationNoopCluster)
+	}
+	if err := s.validateInput(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s TaskSpec) validateInput() error {
+	switch s.Operation {
+	case TaskOperationNoopCluster, TaskOperationNoopNode:
+		var input NoopInput
+		if err := json.Unmarshal(s.Input, &input); err != nil {
+			return fmt.Errorf("%w: decode noop input: %v", ErrInvalidTask, err)
+		}
+		if input.Marker == "" {
+			return fmt.Errorf("%w: noop input marker is required", ErrInvalidTask)
+		}
+	case TaskOperationCacheImageNode:
+		var input CacheImageInput
+		if err := json.Unmarshal(s.Input, &input); err != nil {
+			return fmt.Errorf("%w: decode cache image input: %v", ErrInvalidTask, err)
+		}
+		if err := input.Validate(); err != nil {
+			return err
+		}
+	case TaskOperationDeleteCachedImageNode:
+		var input DeleteCachedImageInput
+		if err := json.Unmarshal(s.Input, &input); err != nil {
+			return fmt.Errorf("%w: decode delete cached image input: %v", ErrInvalidTask, err)
+		}
+		if err := input.Validate(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%w: spec.operation %q is invalid", ErrInvalidTask, s.Operation)
 	}
 	return nil
 }
