@@ -159,6 +159,13 @@ func TestCreatePersistsCDROMsInSpecSummary(t *testing.T) {
 	if len(st.Spec.CDROMs) != 1 || st.Spec.CDROMs[0].CachedPath != req.Spec.CDROMs[0].CachedPath || st.Spec.CDROMs[0].BootIndex == nil || *st.Spec.CDROMs[0].BootIndex != 0 {
 		t.Fatalf("persisted CDROMs = %+v, want resolved CD-ROM spec", st.Spec.CDROMs)
 	}
+	id := cdromID(0, req.Spec.CDROMs[0])
+	if !argvContainsValue(st.Argv, "-blockdev", "driver=raw,node-name="+id+",read-only=on,file.driver=file,file.filename=/var/lib/govirta/images/installer.iso,file.cache.direct=off,file.aio=threads") {
+		t.Fatalf("persisted argv missing CDROM blockdev: %v", st.Argv)
+	}
+	if !argvContainsValue(st.Argv, "-device", "scsi-cd,drive="+id+",bus="+id+"-scsi.0,scsi-id=0,bootindex=0,id="+id+"-device") {
+		t.Fatalf("persisted argv missing explicit CDROM bootindex 0: %v", st.Argv)
+	}
 }
 
 func TestCreateRejectsDuplicateUUID(t *testing.T) {

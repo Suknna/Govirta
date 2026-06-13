@@ -1,6 +1,7 @@
 package vmm
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,166 @@ func TestDeriveBuilderDeterministic(t *testing.T) {
 	if a1 != a2 {
 		t.Fatalf("derivation must be deterministic:\n%s\n%s", a1, a2)
 	}
+}
+
+func TestDeriveBuilderRendersCDROMsFromSummary(t *testing.T) {
+	bootIndex := 0
+	spec := SpecSummary{
+		Name:      "vm-cdrom",
+		Arch:      "aarch64",
+		VCPUs:     1,
+		MemoryMiB: 256,
+		CPUModel:  "host",
+		Disks:     []DiskSpec{{Path: "/var/lib/govirta/root.qcow2"}},
+		NICs:      []NICSpec{{TapName: "gvtap0", MAC: "02:00:00:00:00:03"}},
+		CDROMs: []CDROM{
+			{
+				ImageName:     "installer",
+				ImageUID:      "uid-installer",
+				Version:       "v1",
+				CachedPath:    "/var/lib/govirta/images/installer.iso",
+				BootIndexMode: BootIndexModeUnset,
+			},
+			{
+				ImageName:     "drivers",
+				ImageUID:      "uid-drivers",
+				Version:       "v2",
+				CachedPath:    "/var/lib/govirta/images/drivers.iso",
+				BootIndexMode: BootIndexModeIndex,
+				BootIndex:     &bootIndex,
+			},
+		},
+	}
+	b, err := deriveBuilder(spec, testNodeEnv)
+	if err != nil {
+		t.Fatalf("deriveBuilder: %v", err)
+	}
+	vm, err := b.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	id0 := cdromID(0, spec.CDROMs[0])
+	id1 := cdromID(1, spec.CDROMs[1])
+	argv := vm.Argv()
+	if id0 == id1 || !strings.HasPrefix(id0, "cdrom0-") || !strings.HasPrefix(id1, "cdrom1-") {
+		t.Fatalf("cdrom IDs must be bounded and order-scoped, got %q and %q", id0, id1)
+	}
+	if !argvContainsValue(argv, "-blockdev", "driver=raw,node-name="+id0+",read-only=on,file.driver=file,file.filename=/var/lib/govirta/images/installer.iso,file.cache.direct=off,file.aio=threads") {
+		t.Fatalf("argv missing first CDROM blockdev: %v", argv)
+	}
+	if !argvContainsValue(argv, "-device", "scsi-cd,drive="+id0+",bus="+id0+"-scsi.0,scsi-id=0,id="+id0+"-device") {
+		t.Fatalf("argv must omit bootindex for nil BootIndex: %v", argv)
+	}
+	if !argvContainsValue(argv, "-blockdev", "driver=raw,node-name="+id1+",read-only=on,file.driver=file,file.filename=/var/lib/govirta/images/drivers.iso,file.cache.direct=off,file.aio=threads") {
+		t.Fatalf("argv missing second CDROM blockdev: %v", argv)
+	}
+	if !argvContainsValue(argv, "-device", "scsi-cd,drive="+id1+",bus="+id1+"-scsi.0,scsi-id=0,bootindex=0,id="+id1+"-device") {
+		t.Fatalf("argv must preserve explicit bootindex 0: %v", argv)
+	}
+	if !argvOrdered(argv, "driver=qcow2,node-name=disk0", "driver=raw,node-name="+id0, "tap,id=net0") {
+		t.Fatalf("argv must render disks before CDROMs before NICs: %v", argv)
+	}
+}
+
+func TestDeriveBuilderRejectsInvalidCDROMBootIndex(t *testing.T) {
+	value := 1
+	zero := 0
+	negative := -1
+	cases := []struct {
+		name  string
+		cdrom CDROM
+	}{
+		{
+			name: "unknown_mode",
+			cdrom: CDROM{
+				ImageName:     "installer",
+				ImageUID:      "uid-installer",
+				Version:       "v1",
+				CachedPath:    "/var/lib/govirta/images/installer.iso",
+				BootIndexMode: BootIndexMode("legacy"),
+			},
+		},
+		{
+			name: "index_mode_without_value",
+			cdrom: CDROM{
+				ImageName:     "installer",
+				ImageUID:      "uid-installer",
+				Version:       "v1",
+				CachedPath:    "/var/lib/govirta/images/installer.iso",
+				BootIndexMode: BootIndexModeIndex,
+			},
+		},
+		{
+			name: "unset_mode_with_value",
+			cdrom: CDROM{
+				ImageName:     "installer",
+				ImageUID:      "uid-installer",
+				Version:       "v1",
+				CachedPath:    "/var/lib/govirta/images/installer.iso",
+				BootIndexMode: BootIndexModeUnset,
+				BootIndex:     &value,
+			},
+		},
+		{
+			name: "index_mode_negative_value",
+			cdrom: CDROM{
+				ImageName:     "installer",
+				ImageUID:      "uid-installer",
+				Version:       "v1",
+				CachedPath:    "/var/lib/govirta/images/installer.iso",
+				BootIndexMode: BootIndexModeIndex,
+				BootIndex:     &negative,
+			},
+		},
+		{
+			name: "index_mode_explicit_zero_is_valid",
+			cdrom: CDROM{
+				ImageName:     "installer",
+				ImageUID:      "uid-installer",
+				Version:       "v1",
+				CachedPath:    "/var/lib/govirta/images/installer.iso",
+				BootIndexMode: BootIndexModeIndex,
+				BootIndex:     &zero,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := SpecSummary{
+				Name:      "vm-cdrom-invalid",
+				Arch:      "aarch64",
+				VCPUs:     1,
+				MemoryMiB: 256,
+				CPUModel:  "host",
+				Disks:     []DiskSpec{{Path: "/var/lib/govirta/root.qcow2"}},
+				CDROMs:    []CDROM{tc.cdrom},
+			}
+			_, err := deriveBuilder(spec, testNodeEnv)
+			if tc.name == "index_mode_explicit_zero_is_valid" {
+				if err != nil {
+					t.Fatalf("deriveBuilder() error = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("deriveBuilder() error = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+}
+
+func argvOrdered(argv []string, want ...string) bool {
+	next := 0
+	for _, arg := range argv {
+		if strings.Contains(arg, want[next]) {
+			next++
+			if next == len(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TestDeriveBuilderRendersNoNICWhenDiskOnly pins the fix for the QEMU default

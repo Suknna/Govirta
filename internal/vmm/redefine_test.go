@@ -140,6 +140,55 @@ func TestRedefineIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestRedefineUpdatesCDROMArgv(t *testing.T) {
+	fc := newFakeController()
+	svc := newTestService(t, fc, &fakeQMPClient{})
+	req := newCreateRequest("vm-1")
+	req.Spec.CDROMs = []CDROM{{
+		ImageName:     "installer",
+		ImageUID:      "uid-installer",
+		Version:       "v1",
+		CachedPath:    "/var/lib/govirta/images/installer-v1.iso",
+		BootIndexMode: BootIndexModeUnset,
+	}}
+	if _, err := svc.Create(context.Background(), req); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	before, err := svc.loadState(context.Background(), "vm-1")
+	if err != nil {
+		t.Fatalf("loadState() before = %v", err)
+	}
+	bootIndex := 0
+	newSpec := redefineSpec()
+	newSpec.CDROMs = []CDROM{{
+		ImageName:     "installer",
+		ImageUID:      "uid-installer",
+		Version:       "v2",
+		CachedPath:    "/var/lib/govirta/images/installer-v2.iso",
+		BootIndexMode: BootIndexModeIndex,
+		BootIndex:     &bootIndex,
+	}}
+
+	if _, err := svc.Redefine(context.Background(), "vm-1", newSpec); err != nil {
+		t.Fatalf("Redefine() error = %v", err)
+	}
+	after, err := svc.loadState(context.Background(), "vm-1")
+	if err != nil {
+		t.Fatalf("loadState() after = %v", err)
+	}
+	if sameArgv(before.Argv, after.Argv) {
+		t.Fatalf("Redefine() did not update argv for changed CDROM: %v", after.Argv)
+	}
+	id := cdromID(0, newSpec.CDROMs[0])
+	if !argvContainsValue(after.Argv, "-blockdev", "driver=raw,node-name="+id+",read-only=on,file.driver=file,file.filename=/var/lib/govirta/images/installer-v2.iso,file.cache.direct=off,file.aio=threads") {
+		t.Fatalf("persisted argv missing updated CDROM path: %v", after.Argv)
+	}
+	if !argvContainsValue(after.Argv, "-device", "scsi-cd,drive="+id+",bus="+id+"-scsi.0,scsi-id=0,bootindex=0,id="+id+"-device") {
+		t.Fatalf("persisted argv missing updated CDROM bootindex: %v", after.Argv)
+	}
+}
+
 func TestRedefineMissingVMReturnsNotFound(t *testing.T) {
 	fc := newFakeController()
 	svc := newTestService(t, fc, &fakeQMPClient{})

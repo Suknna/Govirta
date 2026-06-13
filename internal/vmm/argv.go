@@ -1,6 +1,8 @@
 package vmm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/suknna/govirta/pkg/virt/qemu"
@@ -58,6 +60,20 @@ func deriveBuilder(spec SpecSummary, env NodeEnv) (*qemu.Builder, error) {
 		})
 	}
 
+	for i, cdrom := range spec.CDROMs {
+		bootIndex, err := cdromBootIndex(cdrom)
+		if err != nil {
+			return nil, err
+		}
+		b = b.AddCDROM(qemu.CDROM{
+			ID:        cdromID(i, cdrom),
+			Path:      cdrom.CachedPath,
+			Cache:     blockdev.Cache{Direct: qemu.Off},
+			AIO:       blockdev.AIOThreads,
+			BootIndex: bootIndex,
+		})
+	}
+
 	for i, nic := range spec.NICs {
 		netID := fmt.Sprintf("net%d", i)
 		b = b.AddNetdev(netdev.Tap{
@@ -83,6 +99,33 @@ func deriveBuilder(spec SpecSummary, env NodeEnv) (*qemu.Builder, error) {
 	}
 
 	return b, nil
+}
+
+func cdromID(index int, cdrom CDROM) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d\x00%s\x00%s\x00%s", index, cdrom.ImageName, cdrom.ImageUID, cdrom.Version)
+	sum := h.Sum(nil)
+	return fmt.Sprintf("cdrom%d-%s", index, hex.EncodeToString(sum[:])[:12])
+}
+
+func cdromBootIndex(cdrom CDROM) (qflag.OptionalInt, error) {
+	switch cdrom.BootIndexMode {
+	case BootIndexModeUnset:
+		if cdrom.BootIndex != nil {
+			return qflag.OptionalInt{}, fmt.Errorf("%w: cdrom %q boot index must be unset when mode is %q", ErrInvalidRequest, cdrom.ImageName, BootIndexModeUnset)
+		}
+		return qflag.OptionalInt{}, nil
+	case BootIndexModeIndex:
+		if cdrom.BootIndex == nil {
+			return qflag.OptionalInt{}, fmt.Errorf("%w: cdrom %q boot index is required when mode is %q", ErrInvalidRequest, cdrom.ImageName, BootIndexModeIndex)
+		}
+		if *cdrom.BootIndex < 0 {
+			return qflag.OptionalInt{}, fmt.Errorf("%w: cdrom %q boot index must be non-negative", ErrInvalidRequest, cdrom.ImageName)
+		}
+		return qflag.Int(*cdrom.BootIndex), nil
+	default:
+		return qflag.OptionalInt{}, fmt.Errorf("%w: cdrom %q unsupported boot index mode %q", ErrInvalidRequest, cdrom.ImageName, cdrom.BootIndexMode)
+	}
 }
 
 // mapArch maps an arch string to typed qemu.Arch + KVM machine profile.
