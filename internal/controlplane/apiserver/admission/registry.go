@@ -3,10 +3,11 @@ package admission
 // PreApplyChain returns validators that check a caller-submitted apply object
 // before apiserver-owned mutation such as finalizer injection, MAC allocation,
 // or VM node binding runs.
-func PreApplyChain(st StoreReader) Chain {
+func PreApplyChain(st StoreReader, uploadPublicURL string) Chain {
 	return NewChain(
 		EnvelopeValidator{},
 		SpecValidator{},
+		ImageSourceValidator{UploadPublicURL: uploadPublicURL},
 		ApplyOperationValidator{},
 		VMPowerStateValidator{},
 		FieldPolicyValidator{},
@@ -22,10 +23,11 @@ func PostApplyChain() Chain {
 
 // PreReplaceChain returns validators for resourceVersion-guarded full-object
 // replacement before apiserver-owned preservation runs.
-func PreReplaceChain(st StoreReader) Chain {
+func PreReplaceChain(st StoreReader, uploadPublicURL string) Chain {
 	return NewChain(
 		EnvelopeValidator{},
 		SpecValidator{},
+		ImageSourceValidator{UploadPublicURL: uploadPublicURL},
 		ReplaceOperationValidator{},
 		VMPowerStateValidator{},
 		FieldPolicyValidator{},

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/suknna/govirta/internal/controlplane/imagestore"
 	"github.com/suknna/govirta/internal/controlplane/mac"
 	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
@@ -43,19 +45,40 @@ type Server struct {
 	// addr is the TCP listen address Run binds. The caller passes it explicitly;
 	// "" would bind an arbitrary port, so callers that want a fixed port must say so.
 	addr string
+	// imageStore stores uploaded Image bytes outside etcd. etcd only stores Image metadata.
+	imageStore imagestore.Store
+	// imageStorePublicURL is the explicit externally reachable URL prefix used in Image specs.
+	imageStorePublicURL string
+}
+
+// ServerConfig carries every apiserver dependency and behavior-affecting option.
+type ServerConfig struct {
+	Store               store.Store
+	MACAllocator        mac.MACAllocator
+	Scheduler           scheduler.Scheduler
+	NodeNames           []string
+	ListenAddr          string
+	ImageStore          imagestore.Store
+	ImageStorePublicURL string
 }
 
 // NewServer constructs a Server over its required collaborators and listen
 // address. st, alloc, and sched are mandatory; nodeNames is the static placement
 // candidate set; addr is the TCP address Run will listen on. None are defaulted —
 // every behavior-affecting input is the caller's explicit choice.
-func NewServer(st store.Store, alloc mac.MACAllocator, sched scheduler.Scheduler, nodeNames []string, addr string) *Server {
+func NewServer(cfg ServerConfig) *Server {
+	if cfg.ImageStore != nil && cfg.ImageStorePublicURL == "" {
+		panic(fmt.Errorf("apiserver: imageStorePublicURL is required when imageStore is configured"))
+	}
+	imageStorePublicURL := strings.TrimRight(cfg.ImageStorePublicURL, "/")
 	return &Server{
-		store:     st,
-		alloc:     alloc,
-		sched:     sched,
-		nodeNames: nodeNames,
-		addr:      addr,
+		store:               cfg.Store,
+		alloc:               cfg.MACAllocator,
+		sched:               cfg.Scheduler,
+		nodeNames:           cfg.NodeNames,
+		addr:                cfg.ListenAddr,
+		imageStore:          cfg.ImageStore,
+		imageStorePublicURL: imageStorePublicURL,
 	}
 }
 
@@ -68,6 +91,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /apis/{kind}/{name}", s.Apply)
 	mux.HandleFunc("PUT /apis/{kind}/{name}", s.Replace)
+	mux.HandleFunc("PUT /apis/Image/{name}/store/{version}", s.UploadImageStore)
+	mux.HandleFunc("GET /apis/Image/{name}/store/{version}", s.DownloadImageStore)
 	// Read routes (get/list) are registered alongside apply so a single
 	// Handler() serves the full /apis surface.
 	s.getHandler(mux)

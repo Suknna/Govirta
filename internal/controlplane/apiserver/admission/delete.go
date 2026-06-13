@@ -17,7 +17,7 @@ import (
 // points at a missing/deleting target; this rejects deleting a target that is
 // still depended on. The dependency graph (by object NAME):
 //
-//	StoragePool <- Volume.poolRef, Volume.imageFilePoolRef, Image.filePoolRef
+//	StoragePool <- Volume.poolRef
 //	Image       <- Volume.imageRef
 //	Network     <- NIC.networkRef
 //	Volume      <- VM.volumeRefs[]
@@ -48,29 +48,16 @@ type ReverseReferenceValidator struct {
 func (ReverseReferenceValidator) Name() string { return "ReverseReferenceValidator" }
 
 // volumeDeleteRefProjection decodes the StoragePool/Image-bearing ref fields a
-// Volume can hold: poolRef (block pool) and imageFilePoolRef (root volume's image
-// file pool) both name a StoragePool; imageRef names an Image. The vmRef
-// ownership backpointer is intentionally not decoded here — it is not a delete
-// dependency (see ReverseReferenceValidator doc).
+// Volume can hold: poolRef names a block StoragePool; imageRef names an Image.
+// The vmRef ownership backpointer is intentionally not decoded here — it is not
+// a delete dependency (see ReverseReferenceValidator doc).
 type volumeDeleteRefProjection struct {
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
-		PoolRef          string `json:"poolRef"`
-		ImageRef         string `json:"imageRef"`
-		ImageFilePoolRef string `json:"imageFilePoolRef"`
-	} `json:"spec"`
-}
-
-// imageDeleteRefProjection decodes an Image's filePoolRef, which names the file
-// StoragePool the image bytes live in.
-type imageDeleteRefProjection struct {
-	Metadata struct {
-		Name string `json:"name"`
-	} `json:"metadata"`
-	Spec struct {
-		FilePoolRef string `json:"filePoolRef"`
+		PoolRef  string `json:"poolRef"`
+		ImageRef string `json:"imageRef"`
 	} `json:"spec"`
 }
 
@@ -119,10 +106,7 @@ func (v ReverseReferenceValidator) Validate(ctx context.Context, req Request) er
 
 	switch req.Kind {
 	case metav1.KindStoragePool:
-		// Three edges name a StoragePool: Volume.poolRef, Volume.imageFilePoolRef,
-		// and Image.filePoolRef. Scan Volume first, then Image — a file pool that
-		// holds only an Image (no Volume) is still referenced via Image.filePoolRef,
-		// and missing it would orphan the image.
+		// Only Volume.poolRef names a StoragePool. Legacy imageFilePoolRef is ignored.
 		vols, err := v.list(ctx, metav1.KindVolume, req.Kind)
 		if err != nil {
 			return err
@@ -132,21 +116,8 @@ func (v ReverseReferenceValidator) Validate(ctx context.Context, req Request) er
 			if derr := json.Unmarshal(raw.Value, &proj); derr != nil {
 				return v.decodeReject(metav1.KindVolume, raw.Key, derr)
 			}
-			if proj.Spec.PoolRef == req.Name || proj.Spec.ImageFilePoolRef == req.Name {
+			if proj.Spec.PoolRef == req.Name {
 				return v.reject(req.Kind, req.Name, metav1.KindVolume, proj.Metadata.Name)
-			}
-		}
-		imgs, err := v.list(ctx, metav1.KindImage, req.Kind)
-		if err != nil {
-			return err
-		}
-		for _, raw := range imgs {
-			var proj imageDeleteRefProjection
-			if derr := json.Unmarshal(raw.Value, &proj); derr != nil {
-				return v.decodeReject(metav1.KindImage, raw.Key, derr)
-			}
-			if proj.Spec.FilePoolRef == req.Name {
-				return v.reject(req.Kind, req.Name, metav1.KindImage, proj.Metadata.Name)
 			}
 		}
 		return nil

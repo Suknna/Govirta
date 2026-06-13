@@ -288,7 +288,7 @@ func TestDeleteConcurrentWriteReturns409(t *testing.T) {
 	// ErrRevisionConflict — exactly the delete-stamp CAS. Unconditional seeds
 	// (apply) pass through, so the Volume is created normally.
 	wrapped := &stalePatchStore{Store: st, failsRemaining: 1}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	// Seed an unreferenced Volume so the reference guard passes and the handler
 	// reaches the stamping CAS Put.

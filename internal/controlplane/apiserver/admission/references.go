@@ -47,7 +47,7 @@ func (v ReferenceValidator) Validate(ctx context.Context, req Request) error {
 
 	switch o := obj.(type) {
 	case imagev1.Image:
-		return v.requireByName(ctx, metav1.KindStoragePool, o.Spec.FilePoolRef)
+		return nil
 	case volumev1.Volume:
 		if err := v.requireByName(ctx, metav1.KindStoragePool, o.Spec.PoolRef); err != nil {
 			return err
@@ -57,11 +57,6 @@ func (v ReferenceValidator) Validate(ctx context.Context, req Request) error {
 		}
 		if o.Spec.ImageRef != "" {
 			if err := v.requireByName(ctx, metav1.KindImage, o.Spec.ImageRef); err != nil {
-				return err
-			}
-		}
-		if o.Spec.ImageFilePoolRef != "" {
-			if err := v.requireByName(ctx, metav1.KindStoragePool, o.Spec.ImageFilePoolRef); err != nil {
 				return err
 			}
 		}

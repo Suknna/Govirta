@@ -21,21 +21,6 @@ func deleteRequest(kind metav1.Kind, name, uid string) Request {
 	}
 }
 
-// TestDeleteReferenceValidatorRejectsStoragePoolReferencedByImageFilePool proves
-// the Image.filePoolRef edge is scanned: a StoragePool that holds only an Image
-// (no Volume references it) is still reference-blocked, naming the Image.
-func TestDeleteReferenceValidatorRejectsStoragePoolReferencedByImageFilePool(t *testing.T) {
-	st := newReferenceTestStore(t)
-	img := validAdmissionImage()
-	img.Spec.FilePoolRef = "pool-a"
-	seedReferenceObject(t, st, img)
-
-	err := ReverseReferenceValidator{Store: st}.Validate(
-		context.Background(), deleteRequest(metav1.KindStoragePool, "pool-a", "uid-pool-a"))
-	assertAdmissionReason(t, err, ReasonConflict)
-	assertReferencedBy(t, err, "Image/img-a")
-}
-
 // TestDeleteReferenceValidatorRejectsStoragePoolReferencedByVolumePoolRef proves
 // the Volume.poolRef edge is scanned and reported before Image.
 func TestDeleteReferenceValidatorRejectsStoragePoolReferencedByVolumePoolRef(t *testing.T) {
@@ -48,6 +33,20 @@ func TestDeleteReferenceValidatorRejectsStoragePoolReferencedByVolumePoolRef(t *
 		context.Background(), deleteRequest(metav1.KindStoragePool, "block-pool", "uid-block-pool"))
 	assertAdmissionReason(t, err, ReasonConflict)
 	assertReferencedBy(t, err, "Volume/vol-on-pool")
+}
+
+func TestDeleteReferenceValidatorIgnoresLegacyVolumeImageFilePoolRef(t *testing.T) {
+	st := newReferenceTestStore(t)
+	legacy := []byte(`{"apiVersion":"govirta.io/v1alpha1","kind":"Volume","metadata":{"name":"legacy-vol","uid":"uid-legacy-vol"},"spec":{"poolRef":"block-pool","imageRef":"img-a","imageFilePoolRef":"legacy-file-pool"}}`)
+	if _, err := st.Put(context.Background(), StoreKey(metav1.KindVolume, "legacy-vol"), legacy, ""); err != nil {
+		t.Fatalf("seed legacy Volume JSON: %v", err)
+	}
+
+	err := ReverseReferenceValidator{Store: st}.Validate(
+		context.Background(), deleteRequest(metav1.KindStoragePool, "legacy-file-pool", "uid-legacy-file-pool"))
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil (legacy imageFilePoolRef must not block StoragePool delete)", err)
+	}
 }
 
 // TestDeleteReferenceValidatorRejectsImageReferencedByVolume proves an Image is

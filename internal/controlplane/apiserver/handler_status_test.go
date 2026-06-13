@@ -269,7 +269,7 @@ func TestStatusPatchRechecksTargetLifecycleAfterGet(t *testing.T) {
 	seedStoreObject(t, base, metav1.KindVM, vm.Name, vm)
 
 	wrapped := &statusFinalizerClearingStore{Store: base, targetKey: storeKey(metav1.KindVM, vm.Name), clearOnGet: 2}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 	statusBody, err := json.Marshal(vmv1.VMStatus{
 		Phase:              vmv1.VMPhaseStopped,
 		ObservedPowerState: vmv1.ObservedPowerStateOff,
@@ -309,7 +309,7 @@ func TestStatusPatchRechecksTargetLifecycleAfterCASConflict(t *testing.T) {
 		clearOnGet:         3,
 		conflictsRemaining: 1,
 	}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 	statusBody, err := json.Marshal(vmv1.VMStatus{
 		Phase:              vmv1.VMPhaseStopped,
 		ObservedPowerState: vmv1.ObservedPowerStateOff,
@@ -344,7 +344,7 @@ func TestStatusPatchRetriesThenSucceedsOnConflict(t *testing.T) {
 	// One forced conflict: under statusRetryLimit (3), so the loop re-reads and
 	// the second attempt commits.
 	wrapped := &stalePatchStore{Store: st, failsRemaining: 1}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	vm := validVM()
 	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {
@@ -394,7 +394,7 @@ func TestStatusPatchExhaustedRetriesReturns409(t *testing.T) {
 	// Force more conflicts than statusRetryLimit so every attempt fails and the
 	// handler surfaces 409 rather than looping forever.
 	wrapped := &stalePatchStore{Store: st, failsRemaining: statusRetryLimit + 1}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	vm := validVM()
 	if rec := doApply(t, srv, metav1.KindVM, vm.Name, vm); rec.Code != http.StatusCreated {

@@ -41,15 +41,16 @@ func TestObjectHelpersAcceptFullResourceObjects(t *testing.T) {
 				TypeMeta:   typeMeta(metav1.KindImage),
 				ObjectMeta: objectMeta("image-a"),
 				Spec: imagev1.ImageSpec{
-					FilePoolRef: "file-pool-a",
 					Source: imagev1.ImageSource{
-						Type:     imagev1.ImageSourceFile,
-						Location: "/var/lib/govirta/images/base.qcow2",
+						Type:     imagev1.ImageSourceHTTP,
+						Location: "https://images.example/base.qcow2",
 					},
 					Format:            imagev1.ImageFormatQCOW2,
+					Version:           "v1",
 					DeclaredSizeBytes: 1024,
+					SHA256:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				},
-				Status: imagev1.ImageStatus{Phase: imagev1.ImagePhaseReady},
+				Status: validReadyImageStatus(),
 			},
 		},
 		{
@@ -59,14 +60,13 @@ func TestObjectHelpersAcceptFullResourceObjects(t *testing.T) {
 				TypeMeta:   typeMeta(metav1.KindVolume),
 				ObjectMeta: objectMeta("volume-a"),
 				Spec: volumev1.VolumeSpec{
-					PoolRef:          "block-pool-a",
-					VMRef:            "vm-uid-a",
-					VMName:           "vm-a",
-					DiskIndex:        0,
-					CapacityBytes:    1024,
-					Role:             volumev1.VolumeRoleRoot,
-					ImageRef:         "image-a",
-					ImageFilePoolRef: "file-pool-a",
+					PoolRef:       "block-pool-a",
+					VMRef:         "vm-uid-a",
+					VMName:        "vm-a",
+					DiskIndex:     0,
+					CapacityBytes: 1024,
+					Role:          volumev1.VolumeRoleRoot,
+					ImageRef:      "image-a",
 				},
 				Status: volumev1.VolumeStatus{Phase: volumev1.VolumePhaseReady},
 			},
@@ -182,7 +182,7 @@ func TestStatusAcceptsBareStatusObjects(t *testing.T) {
 		obj  any
 	}{
 		{name: "storagepool", obj: storagepoolv1.StoragePoolStatus{Phase: storagepoolv1.PoolPhaseReady}},
-		{name: "image", obj: imagev1.ImageStatus{Phase: imagev1.ImagePhaseReady}},
+		{name: "image", obj: validReadyImageStatus()},
 		{name: "volume", obj: volumev1.VolumeStatus{Phase: volumev1.VolumePhaseReady}},
 		{name: "network", obj: networkv1.NetworkStatus{Phase: networkv1.NetworkPhaseReady}},
 		{name: "nic", obj: nicv1.NICStatus{Phase: nicv1.NICPhaseReady}},
@@ -200,6 +200,24 @@ func TestStatusAcceptsBareStatusObjects(t *testing.T) {
 				t.Fatalf("Status().Validate() error = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func validReadyImageStatus() imagev1.ImageStatus {
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	return imagev1.ImageStatus{
+		Phase:             imagev1.ImagePhaseReady,
+		ObservedVersion:   "v1",
+		ObservedSHA256:    sha,
+		ObservedSizeBytes: 1024,
+		NodeCaches: []imagev1.NodeCacheStatus{{
+			NodeName:   "node-a",
+			Phase:      imagev1.ImageCachePhaseReady,
+			TaskRef:    imagev1.TaskRef{Name: "task-a", UID: "uid-task-a"},
+			CachedPath: "/var/lib/govirta/images/image-a/v1",
+			SizeBytes:  1024,
+			SHA256:     sha,
+		}},
 	}
 }
 

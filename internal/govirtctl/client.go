@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 )
 
 // ErrNotFound is returned by Get when the master has no object of that kind/name.
@@ -171,6 +173,43 @@ func (c *Client) Delete(ctx context.Context, kind, name string) (err error) {
 		return fmt.Errorf("govirtctl: delete %s/%s: master returned %d: %s", kind, name, resp.StatusCode, errorMessage(respBody))
 	}
 	return nil
+}
+
+// UploadImage uploads bytes for one explicit Image identity and content version via the ImageStore route.
+func (c *Client) UploadImage(ctx context.Context, name, uid, version, format string, size int64, sha256 string, reader io.Reader) (_ []byte, err error) {
+	values := url.Values{}
+	values.Set("uid", uid)
+	values.Set("format", format)
+	values.Set("sha256", sha256)
+	values.Set("declaredSizeBytes", strconv.FormatInt(size, 10))
+	endpoint := fmt.Sprintf("%s/apis/Image/%s/store/%s?%s", c.baseURL, url.PathEscape(name), url.PathEscape(version), values.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, reader)
+	if err != nil {
+		return nil, fmt.Errorf("govirtctl: build image upload request for Image/%s version %s: %w", name, version, err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if size >= 0 {
+		req.ContentLength = size
+	}
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("govirtctl: upload Image/%s version %s: %w", name, version, err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("govirtctl: close image upload response body: %w", cerr)
+		}
+	}()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("govirtctl: read image upload response for Image/%s version %s: %w", name, version, readErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("govirtctl: upload Image/%s version %s: master returned %d: %s", name, version, resp.StatusCode, errorMessage(respBody))
+	}
+	return respBody, nil
 }
 
 // errorMessage extracts the apiserver {"error":"..."} message, falling back to

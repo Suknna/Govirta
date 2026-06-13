@@ -43,7 +43,7 @@ func TestWatchSourceReceivesEveryRapidLiveEventThroughRealAPIServer(t *testing.T
 		t.Fatalf("new mac pool: %v", err)
 	}
 	alloc := mac.NewAllocator(pool, st)
-	srv := apiserver.NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{nodeName}, "")
+	srv := apiserver.NewServer(apiserver.ServerConfig{Store: st, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{nodeName}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

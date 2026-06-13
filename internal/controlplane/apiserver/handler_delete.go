@@ -115,10 +115,10 @@ func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 	}
 
 	// 状态2：首次删除。打戳：deletionTimestamp = 当前 UTC RFC3339，并防御性确保
-	// node-teardown finalizer 在列表里（理论上 apply 时 admission 已注入，这里兜底防止
-	// 漏注入即被删导致 node 侧 live 资源无人拆除的泄漏）。
+	// 该资源的删除守卫在列表里（理论上 apply 时 admission 已注入，这里兜底防止
+	// 漏注入即被删导致 live 资源无人拆除的泄漏）。
 	obj.Metadata.DeletionTimestamp = time.Now().UTC().Format(time.RFC3339)
-	ensureFinalizer(&obj.Metadata)
+	ensureFinalizer(kind, &obj.Metadata)
 
 	newValue, err := obj.marshal()
 	if err != nil {
@@ -143,8 +143,12 @@ func (s *Server) delete(ctx context.Context, r *http.Request) *apiError {
 // injectFinalizer (which only injects into an empty list), this defends an
 // in-progress delete: the object must never lose its teardown guard, even if a
 // future caller added other finalizers alongside it.
-func ensureFinalizer(meta *metav1.ObjectMeta) {
-	if !slices.Contains(meta.Finalizers, metav1.FinalizerNodeTeardown) {
-		meta.Finalizers = append(meta.Finalizers, metav1.FinalizerNodeTeardown)
+func ensureFinalizer(kind metav1.Kind, meta *metav1.ObjectMeta) {
+	finalizer := metav1.FinalizerNodeTeardown
+	if kind == metav1.KindImage {
+		finalizer = metav1.FinalizerImageCache
+	}
+	if !slices.Contains(meta.Finalizers, finalizer) {
+		meta.Finalizers = append(meta.Finalizers, finalizer)
 	}
 }

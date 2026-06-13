@@ -19,6 +19,7 @@ import (
 
 	"github.com/suknna/govirta/internal/controlplane/apiserver"
 	controlcontroller "github.com/suknna/govirta/internal/controlplane/controller"
+	"github.com/suknna/govirta/internal/controlplane/imagestore"
 	"github.com/suknna/govirta/internal/controlplane/mac"
 	"github.com/suknna/govirta/internal/controlplane/scheduler"
 	"github.com/suknna/govirta/internal/controlplane/store"
@@ -51,6 +52,10 @@ type Config struct {
 	// controller-manager. The composition root must provide all fields; there are
 	// no hidden defaults inside controlplane.
 	TaskManager controlcontroller.Config
+	// ImageStore stores uploaded image bytes outside etcd.
+	ImageStore imagestore.Store
+	// ImageStorePublicURL is the explicit public apiserver URL prefix used in Image specs.
+	ImageStorePublicURL string
 }
 
 // Service coordinates control-plane components. It owns the store it was built
@@ -104,7 +109,15 @@ func newServiceWithStore(st store.Store, cfg Config) (*Service, error) {
 	}
 	alloc := mac.NewAllocator(pool, st)
 	sched := scheduler.NewNoopScheduler()
-	srv := apiserver.NewServer(st, alloc, sched, cfg.NodeNames, cfg.ListenAddr)
+	srv := apiserver.NewServer(apiserver.ServerConfig{
+		Store:               st,
+		MACAllocator:        alloc,
+		Scheduler:           sched,
+		NodeNames:           cfg.NodeNames,
+		ListenAddr:          cfg.ListenAddr,
+		ImageStore:          cfg.ImageStore,
+		ImageStorePublicURL: cfg.ImageStorePublicURL,
+	})
 	mgr := controlcontroller.NewManager(st, cfg.TaskManager)
 	return &Service{apiServer: srv, taskManager: mgr, store: st}, nil
 }

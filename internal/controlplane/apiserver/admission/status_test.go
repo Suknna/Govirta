@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/suknna/govirta/internal/controlplane/store"
-	imagev1 "github.com/suknna/govirta/pkg/apis/image/v1alpha1"
 	metav1 "github.com/suknna/govirta/pkg/apis/meta/v1alpha1"
 	networkv1 "github.com/suknna/govirta/pkg/apis/network/v1alpha1"
 	nicv1 "github.com/suknna/govirta/pkg/apis/nic/v1alpha1"
@@ -85,7 +84,7 @@ func TestStatusTypeValidatorAcceptsAllKnownStatuses(t *testing.T) {
 		status any
 	}{
 		{name: "storagepool", kind: metav1.KindStoragePool, status: storagepoolv1.StoragePoolStatus{Phase: storagepoolv1.PoolPhaseReady}},
-		{name: "image", kind: metav1.KindImage, status: imagev1.ImageStatus{Phase: imagev1.ImagePhaseReady}},
+		{name: "image", kind: metav1.KindImage, status: validReadyImageStatus()},
 		{name: "volume", kind: metav1.KindVolume, status: volumev1.VolumeStatus{Phase: volumev1.VolumePhaseReady}},
 		{name: "network", kind: metav1.KindNetwork, status: networkv1.NetworkStatus{Phase: networkv1.NetworkPhaseReady}},
 		{name: "nic", kind: metav1.KindNIC, status: nicv1.NICStatus{Phase: nicv1.NICPhaseReady}},

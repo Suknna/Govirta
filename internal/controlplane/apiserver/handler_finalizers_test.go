@@ -246,7 +246,7 @@ func TestPatchFinalizersConcurrentWriteReturns409(t *testing.T) {
 	// ErrRevisionConflict — exactly the finalizers write-back CAS. Unconditional
 	// seeds (apply) pass through, so the Volume is created normally.
 	wrapped := &stalePatchStore{Store: st, failsRemaining: 1}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	// Seed a Volume carrying two finalizers, so removing one leaves the list
 	// non-empty and the handler reaches the write-back CAS Put (rather than the
@@ -302,7 +302,7 @@ func TestPatchFinalizersRealDeleteConflictReturns409AndKeepsObject(t *testing.T)
 	}
 	alloc := mac.NewAllocator(pool, st)
 	wrapped := &conflictDeleteIfVersionStore{Store: st, failsRemaining: 1}
-	srv := NewServer(wrapped, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: wrapped, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	vol := validVolume()
 	if rec := doApply(t, srv, metav1.KindVolume, vol.Name, vol); rec.Code != http.StatusCreated {

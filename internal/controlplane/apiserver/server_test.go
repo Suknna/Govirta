@@ -34,7 +34,7 @@ func runTestServer(t *testing.T) (string, func()) {
 	seedApplyReferences(t, st, validVM())
 	// A real node candidate so the apply VM branch binds rather than 503s, and a
 	// noop scheduler so the chosen node is deterministic (the first candidate).
-	srv := NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: st, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -233,7 +233,7 @@ func TestServerRunCtxCancelShutsDown(t *testing.T) {
 		t.Fatalf("new pool: %v", err)
 	}
 	alloc := mac.NewAllocator(pool, st)
-	srv := NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, "")
+	srv := NewServer(ServerConfig{Store: st, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"})
 	t.Cleanup(func() {
 		if err := st.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -290,7 +290,7 @@ func TestServerRunListenError(t *testing.T) {
 		}
 	}()
 
-	srv := NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, occupied.Addr().String())
+	srv := NewServer(ServerConfig{Store: st, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: occupied.Addr().String(), ImageStorePublicURL: "http://images.example"})
 	err = srv.Run(context.Background())
 	if err == nil {
 		t.Fatalf("Run returned nil, want a bind error on an occupied port")

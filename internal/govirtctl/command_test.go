@@ -3,7 +3,10 @@ package govirtctl
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -152,6 +155,61 @@ func TestRunUnknownCommand(t *testing.T) {
 	code := Run(context.Background(), []string{"frobnicate"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("Run code = 0, want non-zero for unknown command")
+	}
+}
+
+func TestRunImageUploadComputesSizeAndSHA256(t *testing.T) {
+	content := []byte("image-bytes")
+	wantSum := sha256.Sum256(content)
+	wantSHA := hex.EncodeToString(wantSum[:])
+	var gotPath, gotUID, gotFormat, gotSHA, gotSize, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.Method + " " + r.URL.Path
+		gotUID = r.URL.Query().Get("uid")
+		gotFormat = r.URL.Query().Get("format")
+		gotSHA = r.URL.Query().Get("sha256")
+		gotSize = r.URL.Query().Get("declaredSizeBytes")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upload body: %v", err)
+		}
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"kind":"Image","metadata":{"name":"img-a"}}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "image.qcow2")
+	if err := os.WriteFile(file, content, 0o600); err != nil {
+		t.Fatalf("write image file: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"image", "upload", "--server", srv.URL, "--name", "img-a", "--uid", "uid-img-a", "--version", "v1", "--format", "qcow2", "--file", file}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run image upload code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotPath != "PUT /apis/Image/img-a/store/v1" {
+		t.Fatalf("master saw %q, want PUT /apis/Image/img-a/store/v1", gotPath)
+	}
+	if gotUID != "uid-img-a" || gotFormat != "qcow2" || gotSHA != wantSHA || gotSize != "11" || gotBody != string(content) {
+		t.Fatalf("upload fields uid=%q format=%q sha=%q size=%q body=%q, want computed fields", gotUID, gotFormat, gotSHA, gotSize, gotBody)
+	}
+}
+
+func TestRunImageUploadRequiresUID(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "image.qcow2")
+	if err := os.WriteFile(file, []byte("image-bytes"), 0o600); err != nil {
+		t.Fatalf("write image file: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"image", "upload", "--server", "http://unused", "--name", "img-a", "--version", "v1", "--format", "qcow2", "--file", file}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run image upload code = %d, want 2", code)
+	}
+	if got := stderr.String(); !contains(got, "--uid") {
+		t.Fatalf("stderr = %q, want --uid guidance", got)
 	}
 }
 

@@ -3,8 +3,10 @@ package govirtctl
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -205,6 +207,41 @@ func TestClientDeleteServerErrorIsGeneric(t *testing.T) {
 	}
 	if got := err.Error(); !contains(got, "boom") {
 		t.Fatalf("Delete error = %q, want it to carry the envelope message", got)
+	}
+}
+
+func TestClientUploadImageSendsExplicitQueryFields(t *testing.T) {
+	var gotMethod, gotPath, gotUID, gotFormat, gotSHA, gotSize, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotUID = r.URL.Query().Get("uid")
+		gotFormat = r.URL.Query().Get("format")
+		gotSHA = r.URL.Query().Get("sha256")
+		gotSize = r.URL.Query().Get("declaredSizeBytes")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"kind":"Image","metadata":{"name":"img-a"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	_, err := c.UploadImage(context.Background(), "img-a", "uid-img-a", "v1", "qcow2", 5, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", strings.NewReader("bytes"))
+	if err != nil {
+		t.Fatalf("UploadImage error = %v, want nil", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/apis/Image/img-a/store/v1" {
+		t.Fatalf("server saw %s %s, want PUT /apis/Image/img-a/store/v1", gotMethod, gotPath)
+	}
+	if gotUID != "uid-img-a" || gotFormat != "qcow2" || gotSHA != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || gotSize != "5" {
+		t.Fatalf("query uid=%q format=%q sha=%q size=%q, want explicit upload fields", gotUID, gotFormat, gotSHA, gotSize)
+	}
+	if gotBody != "bytes" {
+		t.Fatalf("body = %q, want bytes", gotBody)
 	}
 }
 

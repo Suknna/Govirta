@@ -198,13 +198,79 @@ func TestFieldPolicyRejectsNetworkOptionOrderChange(t *testing.T) {
 	}
 }
 
-func TestFieldPolicyRejectsImageSpecChange(t *testing.T) {
+func TestFieldPolicyAllowsImageContentIdentityChange(t *testing.T) {
 	old := validAdmissionImage()
+	old.Status = readyAdmissionImageStatus(old.Spec.Version, old.Spec.SHA256, old.Spec.DeclaredSizeBytes)
 	obj := old
 	obj.Spec.DeclaredSizeBytes++
 
 	err := validateFieldPolicyUpdate(metav1.KindImage, old.Name, old, obj)
-	assertAdmissionReason(t, err, ReasonConflict)
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestImageSourceValidatorRejectsUploadOutsidePublicURL(t *testing.T) {
+	image := validAdmissionImage()
+	image.Spec.Source = imagev1.ImageSource{Type: imagev1.ImageSourceUpload, Location: "https://other.example/apis/Image/img-a/store/v1"}
+
+	err := ImageSourceValidator{UploadPublicURL: "https://images.example"}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindImage,
+		Name:      image.Name,
+		NewObject: image,
+	})
+	assertAdmissionReason(t, err, ReasonBadRequest)
+}
+
+func TestImageSourceValidatorRejectsUploadLocationWrongImageNameOrVersion(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+	}{
+		{name: "wrong image name", location: "https://images.example/apis/Image/other/store/v1"},
+		{name: "wrong version", location: "https://images.example/apis/Image/img-a/store/v2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			image := validAdmissionImage()
+			image.Spec.Source = imagev1.ImageSource{Type: imagev1.ImageSourceUpload, Location: tt.location}
+
+			err := ImageSourceValidator{UploadPublicURL: "https://images.example"}.Validate(context.Background(), Request{
+				Operation: OperationCreate,
+				Kind:      metav1.KindImage,
+				Name:      image.Name,
+				NewObject: image,
+			})
+			assertAdmissionReason(t, err, ReasonBadRequest)
+		})
+	}
+}
+
+func TestImageSourceValidatorRejectsUploadLocationWeirdPrefixPath(t *testing.T) {
+	image := validAdmissionImage()
+	image.Spec.Source = imagev1.ImageSource{Type: imagev1.ImageSourceUpload, Location: "https://images.example/apis/Image/img-a/store/v1/../v2"}
+
+	err := ImageSourceValidator{UploadPublicURL: "https://images.example"}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindImage,
+		Name:      image.Name,
+		NewObject: image,
+	})
+	assertAdmissionReason(t, err, ReasonBadRequest)
+}
+
+func TestImageSourceValidatorRejectsInvalidHTTPURL(t *testing.T) {
+	image := validAdmissionImage()
+	image.Spec.Source = imagev1.ImageSource{Type: imagev1.ImageSourceHTTP, Location: "file:///var/lib/govirta/base.qcow2"}
+
+	err := ImageSourceValidator{UploadPublicURL: "https://images.example"}.Validate(context.Background(), Request{
+		Operation: OperationCreate,
+		Kind:      metav1.KindImage,
+		Name:      image.Name,
+		NewObject: image,
+	})
+	assertAdmissionReason(t, err, ReasonBadRequest)
 }
 
 func TestFieldPolicyRejectsStoragePoolSpecChange(t *testing.T) {
@@ -280,11 +346,30 @@ func validAdmissionImage() imagev1.Image {
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindImage},
 		ObjectMeta: metav1.ObjectMeta{Name: "img-a", UID: "uid-img-a"},
 		Spec: imagev1.ImageSpec{
-			FilePoolRef:       "pool-a",
-			Source:            imagev1.ImageSource{Type: imagev1.ImageSourceFile, Location: "/srv/images/base.qcow2"},
+			Source:            imagev1.ImageSource{Type: imagev1.ImageSourceHTTP, Location: "https://images.example/base.qcow2"},
 			Format:            imagev1.ImageFormatQCOW2,
+			Version:           "v1",
 			DeclaredSizeBytes: 1 << 28,
+			SHA256:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
+		Status: readyAdmissionImageStatus("v1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1<<28),
+	}
+}
+
+func readyAdmissionImageStatus(version, sha string, size int64) imagev1.ImageStatus {
+	return imagev1.ImageStatus{
+		Phase:             imagev1.ImagePhaseReady,
+		ObservedVersion:   version,
+		ObservedSHA256:    sha,
+		ObservedSizeBytes: size,
+		NodeCaches: []imagev1.NodeCacheStatus{{
+			NodeName:   "node-a",
+			Phase:      imagev1.ImageCachePhaseReady,
+			TaskRef:    imagev1.TaskRef{Name: "task-a", UID: "uid-task-a"},
+			CachedPath: "/var/lib/govirta/images/img-a/v1",
+			SizeBytes:  size,
+			SHA256:     sha,
+		}},
 	}
 }
 
@@ -293,14 +378,13 @@ func validAdmissionVolume() volumev1.Volume {
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindVolume},
 		ObjectMeta: metav1.ObjectMeta{Name: "vol-a", UID: "uid-vol-a"},
 		Spec: volumev1.VolumeSpec{
-			PoolRef:          "block-pool",
-			VMRef:            "uid-vm-a",
-			VMName:           "vm-a",
-			DiskIndex:        0,
-			CapacityBytes:    1 << 30,
-			Role:             volumev1.VolumeRoleRoot,
-			ImageRef:         "img-a",
-			ImageFilePoolRef: "pool-a",
+			PoolRef:       "block-pool",
+			VMRef:         "uid-vm-a",
+			VMName:        "vm-a",
+			DiskIndex:     0,
+			CapacityBytes: 1 << 30,
+			Role:          volumev1.VolumeRoleRoot,
+			ImageRef:      "img-a",
 		},
 	}
 }

@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"reflect"
 	"slices"
 
@@ -169,9 +170,6 @@ func (v FieldPolicyValidator) validateVolume(oldVolume, newVolume volumev1.Volum
 	if oldSpec.ImageRef != newSpec.ImageRef {
 		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.imageRef is immutable for Volume update: existing %q vs requested %q", oldSpec.ImageRef, newSpec.ImageRef))
 	}
-	if oldSpec.ImageFilePoolRef != newSpec.ImageFilePoolRef {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.imageFilePoolRef is immutable for Volume update: existing %q vs requested %q", oldSpec.ImageFilePoolRef, newSpec.ImageFilePoolRef))
-	}
 	if newSpec.CapacityBytes < oldSpec.CapacityBytes {
 		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.capacityBytes cannot decrease for Volume update: existing %d vs requested %d", oldSpec.CapacityBytes, newSpec.CapacityBytes))
 	}
@@ -232,23 +230,45 @@ func (v FieldPolicyValidator) validateNetwork(oldNetwork, newNetwork networkv1.N
 	return nil
 }
 
-func (v FieldPolicyValidator) validateImage(oldImage, newImage imagev1.Image) error {
-	oldSpec := oldImage.Spec
-	newSpec := newImage.Spec
-	if oldSpec.FilePoolRef != newSpec.FilePoolRef {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.filePoolRef is immutable for Image update: existing %q vs requested %q", oldSpec.FilePoolRef, newSpec.FilePoolRef))
+func (v FieldPolicyValidator) validateImage(imagev1.Image, imagev1.Image) error {
+	return nil
+}
+
+type ImageSourceValidator struct {
+	UploadPublicURL string
+}
+
+func (ImageSourceValidator) Name() string { return "ImageSourceValidator" }
+
+func (v ImageSourceValidator) Validate(ctx context.Context, req Request) error {
+	if req.Kind != metav1.KindImage || (req.Operation != OperationCreate && req.Operation != OperationUpdate && req.Operation != OperationReplace) {
+		return nil
 	}
-	if oldSpec.Source.Type != newSpec.Source.Type {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.source.type is immutable for Image update: existing %q vs requested %q", oldSpec.Source.Type, newSpec.Source.Type))
+	obj, err := normalizeObject(req.NewObject)
+	if err != nil {
+		return Reject(v.Name(), ReasonInternal, err)
 	}
-	if oldSpec.Source.Location != newSpec.Source.Location {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.source.location is immutable for Image update: existing %q vs requested %q", oldSpec.Source.Location, newSpec.Source.Location))
+	image, ok := obj.(imagev1.Image)
+	if !ok {
+		return Reject(v.Name(), ReasonInternal, fmt.Errorf("new object type %T is not Image", req.NewObject))
 	}
-	if oldSpec.Format != newSpec.Format {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.format is immutable for Image update: existing %q vs requested %q", oldSpec.Format, newSpec.Format))
-	}
-	if oldSpec.DeclaredSizeBytes != newSpec.DeclaredSizeBytes {
-		return Reject(v.Name(), ReasonConflict, fmt.Errorf("spec.declaredSizeBytes is immutable for Image update: existing %d vs requested %d", oldSpec.DeclaredSizeBytes, newSpec.DeclaredSizeBytes))
+	spec := image.Spec
+	switch spec.Source.Type {
+	case imagev1.ImageSourceUpload:
+		if v.UploadPublicURL == "" {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("upload image source requires configured image store public URL"))
+		}
+		wantLocation := v.UploadPublicURL + "/apis/Image/" + image.Name + "/store/" + spec.Version
+		if spec.Source.Location != wantLocation {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("upload image source location %q must equal %q", spec.Source.Location, wantLocation))
+		}
+	case imagev1.ImageSourceHTTP:
+		parsed, err := url.Parse(spec.Source.Location)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("http image source location must be an explicit http(s) URL"))
+		}
+	default:
+		return Reject(v.Name(), ReasonBadRequest, fmt.Errorf("unsupported image source type %q", spec.Source.Type))
 	}
 	return nil
 }

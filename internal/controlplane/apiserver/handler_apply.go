@@ -101,7 +101,7 @@ func (s *Server) apply(ctx context.Context, r *http.Request) ([]byte, *apiError)
 			return nil, aerr
 		}
 		image := obj.(imagev1.Image)
-		injectFinalizer(&image.ObjectMeta)
+		injectImageFinalizer(&image.ObjectMeta)
 		if aerr := preserveUpdateObjectMeta(req, &image.ObjectMeta); aerr != nil {
 			return nil, aerr
 		}
@@ -220,7 +220,7 @@ func (s *Server) decodeAndAdmitApply(ctx context.Context, kind metav1.Kind, name
 	if len(oldRaw.Value) != 0 {
 		req.OldRaw = oldRaw.Value
 	}
-	if err := admission.PreApplyChain(s.store).Validate(ctx, req); err != nil {
+	if err := admission.PreApplyChain(s.store, s.imageStorePublicURL).Validate(ctx, req); err != nil {
 		return nil, admission.Request{}, admissionToAPIError(err)
 	}
 
@@ -262,6 +262,10 @@ func preserveUpdateStatus(req admission.Request, obj any) (any, *apiError) {
 		old, ok := req.OldObject.(imagev1.Image)
 		if !ok {
 			return nil, mismatch()
+		}
+		if imageContentIdentityChanged(old, newObj) {
+			newObj.Status = imagev1.ImageStatus{Phase: imagev1.ImagePhasePending}
+			return newObj, nil
 		}
 		newObj.Status = old.Status
 		return newObj, nil
@@ -312,6 +316,18 @@ func injectFinalizer(meta *metav1.ObjectMeta) {
 	if len(meta.Finalizers) == 0 {
 		meta.Finalizers = []metav1.Finalizer{metav1.FinalizerNodeTeardown}
 	}
+}
+
+func injectImageFinalizer(meta *metav1.ObjectMeta) {
+	if len(meta.Finalizers) == 0 {
+		meta.Finalizers = []metav1.Finalizer{metav1.FinalizerImageCache}
+	}
+}
+
+func imageContentIdentityChanged(oldImage, newImage imagev1.Image) bool {
+	oldSpec := oldImage.Spec
+	newSpec := newImage.Spec
+	return oldSpec.Source != newSpec.Source || oldSpec.Format != newSpec.Format || oldSpec.Version != newSpec.Version || oldSpec.DeclaredSizeBytes != newSpec.DeclaredSizeBytes || oldSpec.SHA256 != newSpec.SHA256
 }
 
 // applyNIC persists a NIC, allocating a platform MAC when Spec.MAC is empty. The

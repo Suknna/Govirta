@@ -31,7 +31,7 @@ func TestTaskWatchExecutorPatchStatusClosure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new mac pool: %v", err)
 	}
-	srv := apiserver.NewServer(st, mac.NewAllocator(pool, st), scheduler.NewNoopScheduler(), []string{"node-1"}, "127.0.0.1:0")
+	srv := apiserver.NewServer(apiserver.ServerConfig{Store: st, MACAllocator: mac.NewAllocator(pool, st), Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "127.0.0.1:0", ImageStorePublicURL: "http://images.example"})
 	httpSrv := httptest.NewServer(srv.Handler())
 	t.Cleanup(httpSrv.Close)
 

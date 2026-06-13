@@ -62,7 +62,7 @@ func (v WhitelistFinalizerValidator) Validate(ctx context.Context, req Request) 
 	if err != nil {
 		return Reject(v.Name(), ReasonBadRequest, err)
 	}
-	if patch.Remove != metav1.FinalizerNodeTeardown {
+	if patch.Remove != metav1.FinalizerNodeTeardown && patch.Remove != metav1.FinalizerImageCache {
 		return Reject(v.Name(), ReasonConflict, fmt.Errorf("finalizer %q is not removable through this endpoint", patch.Remove))
 	}
 	return nil

@@ -43,7 +43,7 @@ func newTestServer(t *testing.T) (*Server, *fake.Store) {
 	// The handler tests drive routing through Handler() directly and never call
 	// Run, so the listen address is irrelevant here; a noop scheduler over a
 	// single static node makes VM apply deterministic.
-	return NewServer(st, alloc, scheduler.NewNoopScheduler(), []string{"node-1"}, ""), st
+	return NewServer(ServerConfig{Store: st, MACAllocator: alloc, Scheduler: scheduler.NewNoopScheduler(), NodeNames: []string{"node-1"}, ListenAddr: "", ImageStorePublicURL: "http://images.example"}), st
 }
 
 // doApply submits obj to POST /apis/{kind}/{name} through the server's handler and
@@ -70,15 +70,12 @@ func seedApplyReferences(t *testing.T, st store.Store, obj any) {
 	t.Helper()
 	switch o := obj.(type) {
 	case imagev1.Image:
-		seedStoragePoolRef(t, st, o.Spec.FilePoolRef, storagepoolv1.PoolTypeFile)
+		return
 	case volumev1.Volume:
 		seedStoragePoolRef(t, st, o.Spec.PoolRef, storagepoolv1.PoolTypeBlock)
 		seedOwnerVMRef(t, st, o.Spec.VMRef)
 		if o.Spec.ImageRef != "" {
-			seedImageRef(t, st, o.Spec.ImageRef, o.Spec.ImageFilePoolRef)
-		}
-		if o.Spec.ImageFilePoolRef != "" {
-			seedStoragePoolRef(t, st, o.Spec.ImageFilePoolRef, storagepoolv1.PoolTypeFile)
+			seedImageRef(t, st, o.Spec.ImageRef)
 		}
 	case nicv1.NIC:
 		seedNetworkRef(t, st, o.Spec.NetworkRef)
@@ -128,7 +125,7 @@ func seedStoragePoolRef(t *testing.T, st store.Store, name string, poolType stor
 	seedStoreObject(t, st, metav1.KindStoragePool, name, pool)
 }
 
-func seedImageRef(t *testing.T, st store.Store, name, filePoolRef string) {
+func seedImageRef(t *testing.T, st store.Store, name string) {
 	t.Helper()
 	if name == "" {
 		return
@@ -136,7 +133,6 @@ func seedImageRef(t *testing.T, st store.Store, name, filePoolRef string) {
 	image := validImage()
 	image.Name = name
 	image.UID = "uid-" + name
-	image.Spec.FilePoolRef = filePoolRef
 	seedStoreObject(t, st, metav1.KindImage, name, image)
 }
 
@@ -263,10 +259,11 @@ func validImage() imagev1.Image {
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindImage},
 		ObjectMeta: metav1.ObjectMeta{Name: "img-a", UID: "uid-img-a"},
 		Spec: imagev1.ImageSpec{
-			FilePoolRef:       "pool-a",
-			Source:            imagev1.ImageSource{Type: imagev1.ImageSourceFile, Location: "/srv/images/base.qcow2"},
+			Source:            imagev1.ImageSource{Type: imagev1.ImageSourceHTTP, Location: "https://images.example/base.qcow2"},
 			Format:            imagev1.ImageFormatQCOW2,
+			Version:           "v1",
 			DeclaredSizeBytes: 1 << 28,
+			SHA256:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 	}
 }
@@ -276,14 +273,13 @@ func validVolume() volumev1.Volume {
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindVolume},
 		ObjectMeta: metav1.ObjectMeta{Name: "vol-a", UID: "uid-vol-a"},
 		Spec: volumev1.VolumeSpec{
-			PoolRef:          "block-pool",
-			VMRef:            "uid-vm-a",
-			VMName:           "vm-a",
-			DiskIndex:        0,
-			CapacityBytes:    1 << 30,
-			Role:             volumev1.VolumeRoleRoot,
-			ImageRef:         "img-a",
-			ImageFilePoolRef: "pool-a",
+			PoolRef:       "block-pool",
+			VMRef:         "uid-vm-a",
+			VMName:        "vm-a",
+			DiskIndex:     0,
+			CapacityBytes: 1 << 30,
+			Role:          volumev1.VolumeRoleRoot,
+			ImageRef:      "img-a",
 		},
 	}
 }

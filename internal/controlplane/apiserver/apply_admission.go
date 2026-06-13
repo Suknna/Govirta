@@ -1,10 +1,12 @@
 package apiserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/suknna/govirta/internal/controlplane/apiserver/admission"
 	"github.com/suknna/govirta/internal/controlplane/store"
@@ -72,6 +74,9 @@ func decodeObjectByKind(kind metav1.Kind, raw []byte) (any, error) {
 		}
 		return obj, nil
 	case metav1.KindImage:
+		if err := validateImageRawFields(raw); err != nil {
+			return nil, fmt.Errorf("decode Image: %w", err)
+		}
 		var obj imagev1.Image
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return nil, fmt.Errorf("decode Image: %w", err)
@@ -116,6 +121,28 @@ func decodeObjectByKind(kind metav1.Kind, raw []byte) (any, error) {
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownKind, kind)
 	}
+}
+
+func validateImageRawFields(raw []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return err
+	}
+	specRaw, ok := top["spec"]
+	if !ok {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(specRaw))
+	dec.DisallowUnknownFields()
+	var spec imagev1.ImageSpec
+	if err := dec.Decode(&spec); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("spec contains trailing JSON values")
+	}
+	return nil
 }
 
 // applyVM applies VM-specific admission. Creates still use bindVM placement;

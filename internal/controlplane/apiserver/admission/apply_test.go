@@ -64,7 +64,7 @@ func TestPreApplyChainRejectsCreateOffMissingPowerOffMode(t *testing.T) {
 	obj.Spec.PowerState = vmv1.PowerStateOff
 	obj.Spec.PowerOffMode = ""
 
-	err := PreApplyChain(st).Validate(context.Background(), Request{
+	err := PreApplyChain(st, "").Validate(context.Background(), Request{
 		Operation: OperationCreate,
 		Kind:      metav1.KindVM,
 		Name:      obj.Name,
@@ -85,7 +85,7 @@ func TestPreApplyChainRejectsCreateOnWithPowerOffMode(t *testing.T) {
 	obj.Spec.PowerState = vmv1.PowerStateOn
 	obj.Spec.PowerOffMode = vmv1.PowerOffModeAcpi
 
-	err := PreApplyChain(st).Validate(context.Background(), Request{
+	err := PreApplyChain(st, "").Validate(context.Background(), Request{
 		Operation: OperationCreate,
 		Kind:      metav1.KindVM,
 		Name:      obj.Name,

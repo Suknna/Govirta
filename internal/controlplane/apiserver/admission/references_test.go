@@ -238,7 +238,6 @@ func dataAdmissionVolume(name string) volumev1.Volume {
 	volume.UID = "uid-" + name
 	volume.Spec.Role = volumev1.VolumeRoleData
 	volume.Spec.ImageRef = ""
-	volume.Spec.ImageFilePoolRef = ""
 	return volume
 }
 

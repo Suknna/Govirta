@@ -155,7 +155,7 @@ func (s *Server) decodeAndAdmitReplace(ctx context.Context, kind metav1.Kind, na
 		OldObject: oldObj,
 		NewObject: obj,
 	}
-	if err := admission.PreReplaceChain(s.store).Validate(ctx, req); err != nil {
+	if err := admission.PreReplaceChain(s.store, s.imageStorePublicURL).Validate(ctx, req); err != nil {
 		return nil, admission.Request{}, "", admissionToAPIError(err)
 	}
 	submittedMeta, err := admission.Metadata(obj)
