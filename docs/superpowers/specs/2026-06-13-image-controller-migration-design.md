@@ -1,7 +1,7 @@
 # Image Controller Migration Design
 
 **日期**：2026-06-13  
-**状态**：待确认设计  
+**状态**：已实现，本地验证通过
 **上位设计**：`docs/superpowers/specs/2026-06-12-controlplane-controller-manager-design.md`、`docs/superpowers/specs/2026-06-12-task-phase-one-design.md`
 
 ## 1. 目标
@@ -414,3 +414,16 @@ scripts/verify.sh
 - StoragePool/Volume 控制器已完成 control-plane 迁移。
 - Ceph/RBD、NFS、S3/RGW 后端已经实现。
 - ISO guest 内安装流程已完成，除非后续计划显式实现并验证。
+
+## 17. 实施结果摘要
+
+Tasks 1-12 已完成实现，当前落地形态与本设计保持一致：
+
+- ImageStore 成为 `govirtad` 本地权威镜像字节库；Image 元数据和状态仍以 etcd 中的 Image 对象为事实源。
+- control-plane ImageController 聚合 Image cache 状态，并按节点生成 `CacheImage` / `DeleteCachedImage` Task；`govirtlet` TaskController 只执行节点本地 cache/delete 任务并 patch `Task.status`。
+- root Volume 从目标节点本地 image-cache materialize 独立根盘，不再通过旧 ImageController 从 file pool 读取镜像源。
+- `VM.spec.cdromImageRefs` 引用 ISO Image cache，VMM `CDROMs` 派生为 typed QEMU CD-ROM argv；QEMU builder 保持禁止 generic `-cdrom`/`-drive` bypass。
+- `govirtad` 显式新增 `--image-store-root`、`--image-store-public-url`、`--image-cache-root`、`--image-controller-sync-period`；`govirtlet` 使用 sibling/default image cache root，并移除旧 `--image-source-root`。
+- distributed spine E2E 路径改为通过 `govirtctl image upload` 上传 CirrOS/root image 和 ISO，再等待 Image cache ready 后创建 root Volume 和启动 VM。
+
+未改变的边界：StoragePool/Volume 控制器未完整迁移；ISO guest 内安装流程未实现；完整 Lima E2E/acceptance 仍需在最终验收阶段按需运行。

@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-13-image-controller-migration-design.md`
 
+**Implementation Status:** Tasks 1-12 are complete as of `ef09f24 test(e2e): boot from cached images`; Task 13 completed documentation updates and final local verification in this changeset.
+
+**Implemented Result:** `govirtad` owns the authoritative ImageStore bytes under its configured root while Image metadata/status remain in etcd. The control-plane ImageController fans out typed `CacheImage` / `DeleteCachedImage` NodeTasks, `govirtlet` executes cache/delete through TaskController, root Volume creation consumes node-local image-cache, and VM ISO CD-ROM references produce typed QEMU CD-ROM argv. E2E now uploads images through `govirtctl image upload` before waiting for node cache readiness.
+
+**Config Result:** `govirtad` exposes explicit `--image-store-root`, `--image-store-public-url`, `--image-cache-root`, and `--image-controller-sync-period`. `govirtlet` uses the sibling/default image cache root flow and no longer exposes the old `--image-source-root` path.
+
 ---
 
 ## File Structure
@@ -1429,6 +1435,8 @@ git commit -m "docs: document image controller migration"
 ```
 
 If an AGENTS file proves fully current after review, leave it unchanged and record that in the final implementation handoff.
+
+**Task 13 result:** scoped AGENTS knowledge was intentionally left unchanged for this subtask per final scope; the spec and plan now carry the migration result summary. Production code was not modified during final verification, and the local verification chain passed.
 
 ---
 
