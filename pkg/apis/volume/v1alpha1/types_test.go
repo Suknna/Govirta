@@ -7,14 +7,13 @@ import (
 
 func validRootSpec() VolumeSpec {
 	return VolumeSpec{
-		PoolRef:          "blocks",
-		VMRef:            "vm-uid-1",
-		VMName:           "vm1",
-		DiskIndex:        0,
-		CapacityBytes:    2 << 30,
-		Role:             VolumeRoleRoot,
-		ImageRef:         "cirros",
-		ImageFilePoolRef: "files",
+		PoolRef:       "blocks",
+		VMRef:         "vm-uid-1",
+		VMName:        "vm1",
+		DiskIndex:     0,
+		CapacityBytes: 2 << 30,
+		Role:          VolumeRoleRoot,
+		ImageRef:      "cirros",
 	}
 }
 
@@ -42,7 +41,6 @@ func TestVolumeSpecValidate(t *testing.T) {
 		mut  func(s *VolumeSpec)
 	}{
 		{"root missing imageRef", func(s *VolumeSpec) { s.ImageRef = "" }},
-		{"root missing imageFilePoolRef", func(s *VolumeSpec) { s.ImageFilePoolRef = "" }},
 		{"empty poolRef", func(s *VolumeSpec) { s.PoolRef = "" }},
 		{"empty vmRef", func(s *VolumeSpec) { s.VMRef = "" }},
 		{"negative disk index", func(s *VolumeSpec) { s.DiskIndex = -1 }},
@@ -66,6 +64,25 @@ func TestVolumeSpecValidate(t *testing.T) {
 			t.Fatalf("got %v, want ErrInvalidSpec", err)
 		}
 	})
+}
+
+func TestVolumeSpecValidateRootRequiresOnlyImageRef(t *testing.T) {
+	spec := validRootSpec()
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("valid root rejected: %v", err)
+	}
+	spec.ImageRef = ""
+	if err := spec.Validate(); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestVolumeSpecValidateDataRejectsImageRef(t *testing.T) {
+	spec := validDataSpec()
+	spec.ImageRef = "cirros"
+	if err := spec.Validate(); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
+	}
 }
 
 func TestVolumeStatusValidateAcceptsKnownPhase(t *testing.T) {

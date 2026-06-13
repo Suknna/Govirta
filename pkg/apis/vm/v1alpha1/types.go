@@ -121,6 +121,28 @@ func (p PowerTransition) Valid() bool {
 	}
 }
 
+// BootIndexMode names how a CD-ROM participates in QEMU boot ordering.
+type BootIndexMode string
+
+const (
+	// BootIndexModeUnset means no boot index is assigned to the CD-ROM.
+	BootIndexModeUnset BootIndexMode = "unset"
+	// BootIndexModeIndex means BootIndex carries an explicit QEMU boot index.
+	BootIndexModeIndex BootIndexMode = "index"
+)
+
+// Valid reports whether m is a known boot-index mode.
+func (m BootIndexMode) Valid() bool {
+	return m == BootIndexModeUnset || m == BootIndexModeIndex
+}
+
+// CDROMImageRef references an Image attached to the VM as a CD-ROM.
+type CDROMImageRef struct {
+	ImageRef      string        `json:"imageRef"`
+	BootIndexMode BootIndexMode `json:"bootIndexMode"`
+	BootIndex     *int          `json:"bootIndex,omitempty"`
+}
+
 // ErrInvalidSpec is returned when a VMSpec is not internally valid.
 var ErrInvalidSpec = errors.New("vm: invalid spec")
 
@@ -130,13 +152,14 @@ var ErrInvalidStatus = errors.New("vm: invalid status")
 // VMSpec is the desired state of a VM. VolumeRefs and NICRefs name the Volume
 // and NIC objects this VM depends on; the VM controller gates on their readiness.
 type VMSpec struct {
-	Arch         string       `json:"arch"`
-	VCPUs        int          `json:"vcpus"`
-	MemoryMiB    int          `json:"memoryMiB"`
-	VolumeRefs   []string     `json:"volumeRefs"`
-	NICRefs      []string     `json:"nicRefs"`
-	PowerState   PowerState   `json:"powerState"`
-	PowerOffMode PowerOffMode `json:"powerOffMode,omitempty"`
+	Arch           string          `json:"arch"`
+	VCPUs          int             `json:"vcpus"`
+	MemoryMiB      int             `json:"memoryMiB"`
+	VolumeRefs     []string        `json:"volumeRefs"`
+	NICRefs        []string        `json:"nicRefs"`
+	CDROMImageRefs []CDROMImageRef `json:"cdromImageRefs,omitempty"`
+	PowerState     PowerState      `json:"powerState"`
+	PowerOffMode   PowerOffMode    `json:"powerOffMode,omitempty"`
 }
 
 // Validate reports whether the spec carries explicit, internally consistent fields.
@@ -156,6 +179,9 @@ func (s VMSpec) Validate() error {
 	if len(s.NICRefs) == 0 {
 		return fmt.Errorf("%w: at least one nicRef is required", ErrInvalidSpec)
 	}
+	if err := validateCDROMImageRefs(s.CDROMImageRefs); err != nil {
+		return err
+	}
 	if !s.PowerState.Valid() {
 		return fmt.Errorf("%w: powerState %q must be one of On, Off", ErrInvalidSpec, s.PowerState)
 	}
@@ -170,6 +196,36 @@ func (s VMSpec) Validate() error {
 		}
 		if !s.PowerOffMode.Valid() {
 			return fmt.Errorf("%w: powerOffMode %q must be one of Acpi, Force", ErrInvalidSpec, s.PowerOffMode)
+		}
+	}
+	return nil
+}
+
+func validateCDROMImageRefs(refs []CDROMImageRef) error {
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref.ImageRef == "" {
+			return fmt.Errorf("%w: cdrom imageRef is required", ErrInvalidSpec)
+		}
+		if _, ok := seen[ref.ImageRef]; ok {
+			return fmt.Errorf("%w: duplicate cdrom imageRef %q", ErrInvalidSpec, ref.ImageRef)
+		}
+		seen[ref.ImageRef] = struct{}{}
+		if !ref.BootIndexMode.Valid() {
+			return fmt.Errorf("%w: cdrom bootIndexMode %q", ErrInvalidSpec, ref.BootIndexMode)
+		}
+		switch ref.BootIndexMode {
+		case BootIndexModeUnset:
+			if ref.BootIndex != nil {
+				return fmt.Errorf("%w: unset cdrom bootIndexMode requires absent bootIndex", ErrInvalidSpec)
+			}
+		case BootIndexModeIndex:
+			if ref.BootIndex == nil {
+				return fmt.Errorf("%w: indexed cdrom bootIndex is required", ErrInvalidSpec)
+			}
+			if *ref.BootIndex < 0 {
+				return fmt.Errorf("%w: indexed cdrom bootIndex must be non-negative", ErrInvalidSpec)
+			}
 		}
 	}
 	return nil

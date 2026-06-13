@@ -14,6 +14,10 @@ import (
 	volumev1 "github.com/suknna/govirta/pkg/apis/volume/v1alpha1"
 )
 
+func intPtr(value int) *int {
+	return &value
+}
+
 // TestEnvelopeRoundTrip proves all six first-class objects share an inline
 // envelope (apiVersion/kind/metadata at top level) and survive a JSON
 // marshal→unmarshal round-trip without loss. Each case marshals a fully
@@ -71,12 +75,26 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 					TypeMeta:   tm,
 					ObjectMeta: om,
 					Spec: imagev1.ImageSpec{
-						FilePoolRef:       "files",
 						Source:            imagev1.ImageSource{Type: imagev1.ImageSourceHTTP, Location: "https://example/cirros.img"},
 						Format:            imagev1.ImageFormatQCOW2,
+						Version:           "2026.06.13",
 						DeclaredSizeBytes: 1 << 20,
+						SHA256:            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 					},
-					Status: imagev1.ImageStatus{Phase: imagev1.ImagePhaseReady},
+					Status: imagev1.ImageStatus{
+						Phase:             imagev1.ImagePhaseReady,
+						ObservedVersion:   "2026.06.13",
+						ObservedSHA256:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+						ObservedSizeBytes: 1 << 20,
+						NodeCaches: []imagev1.NodeCacheStatus{{
+							NodeName:   "node0",
+							Phase:      imagev1.ImageCachePhaseReady,
+							TaskRef:    imagev1.TaskRef{Name: "task-cache-cirros", UID: "task-uid"},
+							CachedPath: "/var/lib/govirta/images/cirros.qcow2",
+							SizeBytes:  1 << 20,
+							SHA256:     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+						}},
+					},
 				}
 			}(),
 			verify: func(t *testing.T, b []byte) {
@@ -87,11 +105,18 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 				if out.Kind != metav1.KindImage || out.Name != "cirros" {
 					t.Fatalf("identity mismatch: %+v", out)
 				}
-				if out.Spec.Format != imagev1.ImageFormatQCOW2 || out.Spec.Source.Type != imagev1.ImageSourceHTTP {
+				if out.Spec.Source.Type != imagev1.ImageSourceHTTP || out.Spec.Source.Location != "https://example/cirros.img" {
+					t.Fatalf("source mismatch: %+v", out.Spec.Source)
+				}
+				if out.Spec.Format != imagev1.ImageFormatQCOW2 || out.Spec.Version != "2026.06.13" || out.Spec.DeclaredSizeBytes != 1<<20 || out.Spec.SHA256 != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
 					t.Fatalf("spec mismatch: %+v", out.Spec)
 				}
-				if out.Status.Phase != imagev1.ImagePhaseReady {
+				if out.Status.Phase != imagev1.ImagePhaseReady || out.Status.ObservedVersion != "2026.06.13" || out.Status.ObservedSHA256 != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" || out.Status.ObservedSizeBytes != 1<<20 || len(out.Status.NodeCaches) != 1 {
 					t.Fatalf("status mismatch: %+v", out.Status)
+				}
+				cache := out.Status.NodeCaches[0]
+				if cache.NodeName != "node0" || cache.Phase != imagev1.ImageCachePhaseReady || cache.TaskRef.Name != "task-cache-cirros" || cache.TaskRef.UID != "task-uid" || cache.CachedPath != "/var/lib/govirta/images/cirros.qcow2" || cache.SizeBytes != 1<<20 || cache.SHA256 != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+					t.Fatalf("node cache mismatch: %+v", cache)
 				}
 			},
 		},
@@ -103,14 +128,13 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 					TypeMeta:   tm,
 					ObjectMeta: om,
 					Spec: volumev1.VolumeSpec{
-						PoolRef:          "blocks",
-						VMRef:            "vm-uid-1",
-						VMName:           "vm1",
-						DiskIndex:        0,
-						CapacityBytes:    2 << 30,
-						Role:             volumev1.VolumeRoleRoot,
-						ImageRef:         "cirros",
-						ImageFilePoolRef: "files",
+						PoolRef:       "blocks",
+						VMRef:         "vm-uid-1",
+						VMName:        "vm1",
+						DiskIndex:     0,
+						CapacityBytes: 2 << 30,
+						Role:          volumev1.VolumeRoleRoot,
+						ImageRef:      "cirros",
 					},
 					Status: volumev1.VolumeStatus{Phase: volumev1.VolumePhaseReady},
 				}
@@ -123,7 +147,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 				if out.Kind != metav1.KindVolume || out.Name != "vol-root" {
 					t.Fatalf("identity mismatch: %+v", out)
 				}
-				if out.Spec.Role != volumev1.VolumeRoleRoot || out.Spec.ImageRef != "cirros" || out.Spec.ImageFilePoolRef != "files" {
+				if out.Spec.Role != volumev1.VolumeRoleRoot || out.Spec.ImageRef != "cirros" {
 					t.Fatalf("spec mismatch: %+v", out.Spec)
 				}
 				if out.Status.Phase != volumev1.VolumePhaseReady {
@@ -212,6 +236,9 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 						MemoryMiB:  512,
 						VolumeRefs: []string{"vol-root"},
 						NICRefs:    []string{"nic0"},
+						CDROMImageRefs: []vmv1.CDROMImageRef{
+							{ImageRef: "installer", BootIndexMode: vmv1.BootIndexModeIndex, BootIndex: intPtr(1)},
+						},
 						PowerState: vmv1.PowerStateOn,
 					},
 					Status: vmv1.VMStatus{
@@ -231,6 +258,13 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 				}
 				if out.Spec.VCPUs != 2 || len(out.Spec.VolumeRefs) != 1 || len(out.Spec.NICRefs) != 1 || out.Spec.PowerState != vmv1.PowerStateOn {
 					t.Fatalf("spec mismatch: %+v", out.Spec)
+				}
+				if len(out.Spec.CDROMImageRefs) != 1 {
+					t.Fatalf("cdrom image refs = %+v, want one ref", out.Spec.CDROMImageRefs)
+				}
+				cdrom := out.Spec.CDROMImageRefs[0]
+				if cdrom.ImageRef != "installer" || cdrom.BootIndexMode != vmv1.BootIndexModeIndex || cdrom.BootIndex == nil || *cdrom.BootIndex != 1 {
+					t.Fatalf("cdrom image ref mismatch: %+v", cdrom)
 				}
 				if out.Status.Phase != vmv1.VMPhaseRunning || out.Status.ObservedPowerState != vmv1.ObservedPowerStateOn || out.Status.PowerTransition != vmv1.PowerTransitionNone {
 					t.Fatalf("status mismatch: %+v", out.Status)

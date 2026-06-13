@@ -55,18 +55,16 @@ var ErrInvalidSpec = errors.New("volume: invalid spec")
 // ErrInvalidStatus is returned when a VolumeStatus is not internally valid.
 var ErrInvalidStatus = errors.New("volume: invalid status")
 
-// VolumeSpec is the desired state of a block volume. ImageRef + ImageFilePoolRef
-// are required for a root volume (the source image and the file pool holding it)
-// and must be empty for a data volume.
+// VolumeSpec is the desired state of a block volume. ImageRef is required for a
+// root volume and must be empty for a data volume.
 type VolumeSpec struct {
-	PoolRef          string     `json:"poolRef"` // block pool object name
-	VMRef            string     `json:"vmRef"`   // owning VM uid
-	VMName           string     `json:"vmName"`
-	DiskIndex        int        `json:"diskIndex"`
-	CapacityBytes    int64      `json:"capacityBytes"`
-	Role             VolumeRole `json:"role"`
-	ImageRef         string     `json:"imageRef,omitempty"`         // root only
-	ImageFilePoolRef string     `json:"imageFilePoolRef,omitempty"` // root only
+	PoolRef       string     `json:"poolRef"` // block pool object name
+	VMRef         string     `json:"vmRef"`   // owning VM uid
+	VMName        string     `json:"vmName"`
+	DiskIndex     int        `json:"diskIndex"`
+	CapacityBytes int64      `json:"capacityBytes"`
+	Role          VolumeRole `json:"role"`
+	ImageRef      string     `json:"imageRef,omitempty"` // root only
 }
 
 // Validate reports whether the spec carries explicit, internally consistent fields.
@@ -91,12 +89,9 @@ func (s VolumeSpec) Validate() error {
 		if s.ImageRef == "" {
 			return fmt.Errorf("%w: root volume requires imageRef", ErrInvalidSpec)
 		}
-		if s.ImageFilePoolRef == "" {
-			return fmt.Errorf("%w: root volume requires imageFilePoolRef", ErrInvalidSpec)
-		}
 	case VolumeRoleData:
-		if s.ImageRef != "" || s.ImageFilePoolRef != "" {
-			return fmt.Errorf("%w: data volume must not carry image refs", ErrInvalidSpec)
+		if s.ImageRef != "" {
+			return fmt.Errorf("%w: data volume must not carry imageRef", ErrInvalidSpec)
 		}
 	}
 	return nil

@@ -30,3 +30,12 @@ func TestObjectMetaValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestMetaDefinesImageCacheFinalizer(t *testing.T) {
+	if FinalizerImageCache != Finalizer("govirta.io/image-cache") {
+		t.Fatalf("FinalizerImageCache = %q, want govirta.io/image-cache", FinalizerImageCache)
+	}
+	if FinalizerImageCache == FinalizerNodeTeardown {
+		t.Fatal("FinalizerImageCache must not reuse FinalizerNodeTeardown")
+	}
+}

@@ -19,6 +19,10 @@ func validVMSpec() VMSpec {
 	}
 }
 
+func intPtr(value int) *int {
+	return &value
+}
+
 func TestVMSpecValidate(t *testing.T) {
 	if err := validVMSpec().Validate(); err != nil {
 		t.Fatalf("valid spec rejected: %v", err)
@@ -127,6 +131,72 @@ func TestVMSpecValidatePowerOffModeConditional(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestVMSpecValidateAcceptsCDROMImageRefs(t *testing.T) {
+	spec := validVMSpec()
+	spec.CDROMImageRefs = []CDROMImageRef{
+		{ImageRef: "installer", BootIndexMode: BootIndexModeIndex, BootIndex: intPtr(0)},
+		{ImageRef: "drivers", BootIndexMode: BootIndexModeUnset},
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestVMSpecValidateRejectsInvalidCDROMBootIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  CDROMImageRef
+	}{
+		{"empty image ref", CDROMImageRef{BootIndexMode: BootIndexModeUnset}},
+		{"empty mode with omitted index", CDROMImageRef{ImageRef: "installer"}},
+		{"unknown mode", CDROMImageRef{ImageRef: "installer", BootIndexMode: BootIndexMode("auto")}},
+		{"index without bootIndex", CDROMImageRef{ImageRef: "installer", BootIndexMode: BootIndexModeIndex}},
+		{"unset with index", CDROMImageRef{ImageRef: "installer", BootIndexMode: BootIndexModeUnset, BootIndex: intPtr(1)}},
+		{"index with negative value", CDROMImageRef{ImageRef: "installer", BootIndexMode: BootIndexModeIndex, BootIndex: intPtr(-1)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := validVMSpec()
+			spec.CDROMImageRefs = []CDROMImageRef{tt.ref}
+			if err := spec.Validate(); !errors.Is(err, ErrInvalidSpec) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
+			}
+		})
+	}
+}
+
+func TestVMSpecValidateRejectsDuplicateCDROMImageRefs(t *testing.T) {
+	spec := validVMSpec()
+	spec.CDROMImageRefs = []CDROMImageRef{
+		{ImageRef: "installer", BootIndexMode: BootIndexModeUnset},
+		{ImageRef: "installer", BootIndexMode: BootIndexModeIndex, BootIndex: intPtr(1)},
+	}
+	if err := spec.Validate(); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
+	}
+}
+
+func TestVMSpecCDROMBootIndexOmitEmpty(t *testing.T) {
+	ref := CDROMImageRef{ImageRef: "installer", BootIndexMode: BootIndexModeUnset}
+	data, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(`"bootIndex"`)) {
+		t.Fatalf("encoded ref %s includes zero bootIndex", data)
+	}
+
+	ref.BootIndexMode = BootIndexModeIndex
+	ref.BootIndex = intPtr(0)
+	data, err = json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"bootIndex":0`)) {
+		t.Fatalf("encoded ref %s does not include explicit zero bootIndex", data)
 	}
 }
 

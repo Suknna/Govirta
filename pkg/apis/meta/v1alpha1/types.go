@@ -42,6 +42,8 @@ const (
 	// FinalizerNodeTeardown 表示该对象有 node 侧 live 资源待拆除；
 	// node 拆净后通过 finalizers 端点摘除它，apiserver 见 finalizers 清空才真删。
 	FinalizerNodeTeardown Finalizer = "govirta.io/node-teardown"
+	// FinalizerImageCache 表示 Image 有节点缓存待清理；不能复用 node-teardown 语义。
+	FinalizerImageCache Finalizer = "govirta.io/image-cache"
 )
 
 // ErrInvalidObjectMeta is returned when required identity fields are missing.
