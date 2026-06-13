@@ -186,14 +186,13 @@ func snapVolumeObject(name, vmRef, poolRef string, diskIndex int) volumev1.Volum
 		TypeMeta:   metav1.TypeMeta{APIVersion: metav1.APIGroupVersion, Kind: metav1.KindVolume},
 		ObjectMeta: metav1.ObjectMeta{Name: name, UID: "uid-" + name},
 		Spec: volumev1.VolumeSpec{
-			PoolRef:          poolRef,
-			VMRef:            vmRef,
-			VMName:           "vm-name",
-			DiskIndex:        diskIndex,
-			CapacityBytes:    4 << 30,
-			Role:             volumev1.VolumeRoleRoot,
-			ImageRef:         "img-a",
-			ImageFilePoolRef: "file-pool",
+			PoolRef:       poolRef,
+			VMRef:         vmRef,
+			VMName:        "vm-name",
+			DiskIndex:     diskIndex,
+			CapacityBytes: 4 << 30,
+			Role:          volumev1.VolumeRoleRoot,
+			ImageRef:      "img-a",
 		},
 	}
 }

@@ -121,14 +121,27 @@ func TestDecodeDeleteCachedImageObservedAcceptsValidPayload(t *testing.T) {
 		NodeName:  "node0",
 		ImageName: "alpine",
 		Version:   "v1",
-		Deleted:   false,
+		Deleted:   true,
 	})
 	observed, err := DecodeDeleteCachedImageObserved(raw)
 	if err != nil {
 		t.Fatalf("DecodeDeleteCachedImageObserved() error = %v, want nil", err)
 	}
-	if observed.NodeName != "node0" || observed.Deleted {
+	if observed.NodeName != "node0" || !observed.Deleted {
 		t.Fatalf("observed mismatch: %+v", observed)
+	}
+}
+
+func TestDecodeDeleteCachedImageObservedRejectsDeletedFalse(t *testing.T) {
+	raw := mustMarshal(t, DeleteCachedImageObserved{
+		NodeName:  "node0",
+		ImageName: "alpine",
+		Version:   "v1",
+		Deleted:   false,
+	})
+	_, err := DecodeDeleteCachedImageObserved(raw)
+	if !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("DecodeDeleteCachedImageObserved() error = %v, want ErrInvalidTask", err)
 	}
 }
 
@@ -164,6 +177,15 @@ func TestTaskStatusValidateRequiresFailedClassification(t *testing.T) {
 	status = TaskStatus{Phase: TaskPhaseFailed, ErrorClass: TaskErrorClassExecutionFailed}
 	if err := status.Validate(); !errors.Is(err, ErrInvalidTask) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidTask", err)
+	}
+}
+
+func TestTaskStatusValidateAcceptsTypedFailureClasses(t *testing.T) {
+	for _, class := range []TaskErrorClass{TaskErrorClassInvalidInput, TaskErrorClassUnsupportedOperation, TaskErrorClassExecutionFailed, TaskErrorClassChecksumMismatch, TaskErrorClassTransientIO} {
+		status := TaskStatus{Phase: TaskPhaseFailed, ErrorClass: class, Message: "failed"}
+		if err := status.Validate(); err != nil {
+			t.Fatalf("Validate(%s) error = %v, want nil", class, err)
+		}
 	}
 }
 

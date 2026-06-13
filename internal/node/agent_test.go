@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -103,16 +104,22 @@ func TestAgentRunStartsManagerAndStopsOnCancel(t *testing.T) {
 // here, not run, so no network or kernel I/O happens.
 func TestNewAgentAssemblesControllerManager(t *testing.T) {
 	agent, err := NewAgent(Config{
-		MasterURL:       "http://127.0.0.1:0",
-		NodeName:        "node-test",
-		RuntimeRoot:     t.TempDir(),
-		ImageSourceRoot: t.TempDir(),
-		QEMUBinary:      "/usr/bin/qemu-system-aarch64",
+		MasterURL:      "http://127.0.0.1:0",
+		NodeName:       "node-test",
+		RuntimeRoot:    t.TempDir(),
+		ImageCacheRoot: t.TempDir(),
+		QEMUBinary:     "/usr/bin/qemu-system-aarch64",
 	})
 	if err != nil {
 		t.Fatalf("NewAgent() error = %v, want nil", err)
 	}
 	if agent == nil || agent.manager == nil {
 		t.Fatalf("NewAgent() returned an agent with no manager")
+	}
+	if !slices.Contains(agent.controllerKinds, "Task") {
+		t.Fatalf("controller kinds = %v, want Task registered", agent.controllerKinds)
+	}
+	if slices.Contains(agent.controllerKinds, "Image") {
+		t.Fatalf("controller kinds = %v, want old Image controller not registered", agent.controllerKinds)
 	}
 }

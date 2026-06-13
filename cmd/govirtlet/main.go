@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/rs/zerolog"
 
@@ -50,7 +51,7 @@ func parseConfig(args []string) (node.Config, error) {
 	masterURL := fs.String("master-url", "", "master apiserver root, e.g. http://10.0.0.1:8080 (required)")
 	nodeName := fs.String("node-name", "", "this node's identity; the master streams only objects bound to it (required)")
 	runtimeRoot := fs.String("runtime-root", "", "directory for per-VM runtime state (vm.json, pidfile, QMP socket) (required)")
-	imageSourceRoot := fs.String("image-source-root", "", "trusted root within which file:// image sources must resolve (required)")
+	imageCacheRoot := fs.String("image-cache-root", "", "directory for node-local image cache bytes; defaults to sibling <runtime-root-parent>/image-cache")
 	ownerUID := fs.Int("owner-uid", -1, "OS uid that owns guest TAP devices (the user QEMU runs as) (required)")
 	ownerGID := fs.Int("owner-gid", -1, "OS gid that owns guest TAP devices (required)")
 	guestCPU := fs.String("guest-cpu", "host", "QEMU CPU model the node runs guests with")
@@ -70,9 +71,6 @@ func parseConfig(args []string) (node.Config, error) {
 	if *runtimeRoot == "" {
 		return node.Config{}, fmt.Errorf("govirtlet: --runtime-root is required")
 	}
-	if *imageSourceRoot == "" {
-		return node.Config{}, fmt.Errorf("govirtlet: --image-source-root is required")
-	}
 	if *ownerUID < 0 {
 		return node.Config{}, fmt.Errorf("govirtlet: --owner-uid is required and must be non-negative")
 	}
@@ -83,15 +81,20 @@ func parseConfig(args []string) (node.Config, error) {
 		return node.Config{}, fmt.Errorf("govirtlet: --qemu-binary is required")
 	}
 
+	cacheRoot := *imageCacheRoot
+	if cacheRoot == "" {
+		cacheRoot = filepath.Join(filepath.Dir(*runtimeRoot), "image-cache")
+	}
+
 	return node.Config{
-		MasterURL:       *masterURL,
-		NodeName:        *nodeName,
-		RuntimeRoot:     *runtimeRoot,
-		ImageSourceRoot: *imageSourceRoot,
-		OwnerUID:        link.ExplicitUID(uint32(*ownerUID)),
-		OwnerGID:        link.ExplicitGID(uint32(*ownerGID)),
-		GuestCPU:        cpu.Model(*guestCPU),
-		QEMUBinary:      *qemuBinary,
-		Firmware:        *firmware,
+		MasterURL:      *masterURL,
+		NodeName:       *nodeName,
+		RuntimeRoot:    *runtimeRoot,
+		ImageCacheRoot: cacheRoot,
+		OwnerUID:       link.ExplicitUID(uint32(*ownerUID)),
+		OwnerGID:       link.ExplicitGID(uint32(*ownerGID)),
+		GuestCPU:       cpu.Model(*guestCPU),
+		QEMUBinary:     *qemuBinary,
+		Firmware:       *firmware,
 	}, nil
 }

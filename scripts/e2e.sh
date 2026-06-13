@@ -33,6 +33,8 @@ cache_dir="$repo_root/.lima/cache"
 generated_config="$cache_dir/govirta.e2e.generated.yaml"
 tmp_dir="$repo_root/.tmp/e2e"
 log_dir="$repo_root/test/log"
+image_store_root="$tmp_dir/image-store"
+host_image_cache_root="$tmp_dir/image-cache"
 
 cirros_base_url="https://download.cirros-cloud.net/0.6.2"
 cirros_md5_url="$cirros_base_url/MD5SUMS"
@@ -56,6 +58,7 @@ mac_suffix_end="65535"
 guest_state_root="/var/lib/govirta"
 guest_image_root="$guest_state_root/images"
 guest_runtime_root="$guest_state_root/runtime"
+guest_image_cache_root="$guest_state_root/image-cache"
 guest_cirros="$guest_image_root/cirros-aarch64.qcow2"
 govirtad_pidfile="$tmp_dir/govirtad.pid"
 govirtad_log="$tmp_dir/govirtad.log"
@@ -160,6 +163,8 @@ prepare_cache() {
 		"$cache_dir/toolchain" \
 		"$cache_dir/gocache" \
 		"$cache_dir/gomodcache" \
+		"$image_store_root" \
+		"$host_image_cache_root" \
 		"$tmp_dir"
 
 	sed \
@@ -224,6 +229,10 @@ start_govirtad() {
 		--mac-prefix "$mac_prefix" \
 		--mac-suffix-start "$mac_suffix_start" \
 		--mac-suffix-end "$mac_suffix_end" \
+		--image-store-root "$image_store_root" \
+		--image-store-public-url "http://host.lima.internal:$api_port" \
+		--image-cache-root "$guest_image_cache_root" \
+		--image-controller-sync-period "1s" \
 		--phase-one-node-task-name "phase-one-node-task-$node_name" \
 		--phase-one-node-task-node "$node_name" \
 		--phase-one-cluster-task-name "phase-one-cluster-task" \
@@ -262,6 +271,7 @@ start_lima_govirtlet() {
 		state_root="'"$guest_state_root"'"
 		image_root="'"$guest_image_root"'"
 		runtime_root="'"$guest_runtime_root"'"
+		image_cache_root="'"$guest_image_cache_root"'"
 		guest_cirros="'"$guest_cirros"'"
 
 		i=0
@@ -277,7 +287,7 @@ start_lima_govirtlet() {
 			command -v "$tool" >/dev/null 2>&1 || { printf "missing guest tool: %s\n" "$tool" >&2; exit 1; }
 		done
 
-		sudo mkdir -p "$state_root/block" "$state_root/file" "$image_root" "$runtime_root"
+		sudo mkdir -p "$state_root/block" "$state_root/file" "$image_root" "$runtime_root" "$image_cache_root"
 		sudo cp /govirta-cache/images/cirros-aarch64.qcow2 "$guest_cirros"
 
 		# route 原语要求 ip_forward；node-prep 责任（route 包只读不改）。
@@ -298,7 +308,7 @@ start_lima_govirtlet() {
 				--master-url http://host.lima.internal:$api_port \
 				--node-name $node_name \
 				--runtime-root $runtime_root \
-				--image-source-root $image_root \
+				--image-cache-root $image_cache_root \
 				--owner-uid $owner_uid \
 				--owner-gid $owner_gid \
 				--guest-cpu host \

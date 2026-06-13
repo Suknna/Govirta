@@ -48,9 +48,8 @@ type Config struct {
 	// RuntimeRoot is the directory under which the VM process manager keeps each
 	// guest's runtime state (vm.json, pidfile, QMP socket).
 	RuntimeRoot string
-	// ImageSourceRoot is the trusted root within which file:// image sources must
-	// resolve; the Image controller rejects sources outside it (path-safety).
-	ImageSourceRoot string
+	// ImageCacheRoot is the explicit node-local root for cached image bytes.
+	ImageCacheRoot string
 	// OwnerUID / OwnerGID is the OS user/group that owns the guest TAP devices
 	// (the user QEMU runs as); threaded to the NIC controller, never defaulted.
 	OwnerUID link.UID
@@ -84,7 +83,8 @@ type hostManagers struct {
 // Agent runs the node's controller-manager: it watches the master apiserver and
 // reconciles each first-class kind onto the local execution plane.
 type Agent struct {
-	manager *controller.Manager
+	manager         *controller.Manager
+	controllerKinds []string
 }
 
 // NewAgent assembles a production node agent from cfg. It builds the master
@@ -118,11 +118,14 @@ func NewAgent(cfg Config) (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node: build vmm service: %w", err)
 	}
+	imageCache, err := controllers.NewImageCache(cfg.ImageCacheRoot)
+	if err != nil {
+		return nil, fmt.Errorf("node: build image cache: %w", err)
+	}
 
 	list := []controller.Controller{
-		controllers.NewTaskController(cfg.NodeName, master),
+		controllers.NewTaskControllerWithImageCache(cfg.NodeName, master, imageCache, nil),
 		controllers.NewStoragePoolController(poolSvc, master),
-		controllers.NewImageController(imageSvc, master, nil, cfg.ImageSourceRoot),
 		controllers.NewVolumeController(volumeSvc, imageSvc, vmmSvc, master),
 		controllers.NewNetworkController(networkSvc, master),
 		controllers.NewNICController(nicSvc, master, cfg.OwnerUID, cfg.OwnerGID),
@@ -137,7 +140,11 @@ func NewAgent(cfg Config) (*Agent, error) {
 // already-built event source and controller set. It is the seam unit tests use
 // to inject a fake source + fake controllers without touching real services.
 func newAgentWithDeps(source controller.EventSource, list []controller.Controller) *Agent {
-	return &Agent{manager: controller.NewManager(source, list)}
+	kinds := make([]string, 0, len(list))
+	for _, c := range list {
+		kinds = append(kinds, c.Kind())
+	}
+	return &Agent{manager: controller.NewManager(source, list), controllerKinds: kinds}
 }
 
 // qmpFactory builds a per-socket QMP client on demand. It is cross-platform (a

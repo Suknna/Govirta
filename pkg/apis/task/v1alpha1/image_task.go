@@ -124,6 +124,9 @@ func (o DeleteCachedImageObserved) validate() error {
 	if o.NodeName == "" || o.ImageName == "" || o.Version == "" {
 		return fmt.Errorf("%w: observed nodeName, imageName, and version are required", ErrInvalidTask)
 	}
+	if !o.Deleted {
+		return fmt.Errorf("%w: observed deleted must be true", ErrInvalidTask)
+	}
 	return nil
 }
 

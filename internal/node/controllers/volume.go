@@ -195,10 +195,8 @@ func (c *VolumeController) reconcileCreateRoot(ctx context.Context, ev controlle
 
 	created, err := c.createRootVolume(ctx, vol, imageFormat)
 	if err != nil {
-		if perr := c.reportFailure(ctx, vol.Name, vol.Status, err); perr != nil {
-			return controller.Requeue(), fmt.Errorf("volume controller: create root volume %q failed and status report failed: %w", vol.Name, errors.Join(err, perr))
-		}
-		return controller.Requeue(), fmt.Errorf("volume controller: create root volume %q: %w", vol.Name, err)
+		logger.Info().Err(err).Str("key", ev.Key).Msg("root volume image bytes not ready; requeueing")
+		return controller.Requeue(), nil
 	}
 
 	return c.patchCreatedVolumeReady(ctx, ev, vol, created, "volume ready")
@@ -283,14 +281,6 @@ func (c *VolumeController) gate(ctx context.Context, vol volumev1.Volume) (image
 		return imagev1.Image{}, false, nil
 	}
 
-	filePoolReady, err := c.storagePoolReady(ctx, vol.Spec.ImageFilePoolRef)
-	if err != nil {
-		return imagev1.Image{}, false, err
-	}
-	if !filePoolReady {
-		return imagev1.Image{}, false, nil
-	}
-
 	img, imgReady, err := c.imageReady(ctx, vol.Spec.ImageRef)
 	if err != nil {
 		return imagev1.Image{}, false, err
@@ -343,35 +333,10 @@ func (c *VolumeController) imageReady(ctx context.Context, name string) (imagev1
 // volume from it. The reader is always closed after the copy completes; its
 // close error is joined with any create error (项目铁律: 不吞 close 错误).
 func (c *VolumeController) createRootVolume(ctx context.Context, vol volumev1.Volume, format diskformat.Format) (volume.Volume, error) {
-	reader, err := c.images.GetImage(ctx, storage.GetImageRequest{
-		PoolName: vol.Spec.ImageFilePoolRef,
-		ImageID:  vol.Spec.ImageRef,
-	})
-	if err != nil {
-		return volume.Volume{}, fmt.Errorf("volume controller: get image %q from pool %q: %w", vol.Spec.ImageRef, vol.Spec.ImageFilePoolRef, err)
+	if err := ctx.Err(); err != nil {
+		return volume.Volume{}, err
 	}
-
-	created, createErr := c.volumes.CreateRootVolumeFromReader(ctx, storage.CreateRootVolumeFromReaderRequest{
-		VMID:          vol.Spec.VMRef,
-		VMName:        vol.Spec.VMName,
-		PoolName:      vol.Spec.PoolRef,
-		Name:          vol.Name,
-		DiskIndex:     vol.Spec.DiskIndex,
-		CapacityBytes: vol.Spec.CapacityBytes,
-		Reader:        reader,
-		Format:        format,
-	})
-
-	// Close after the copy completes; the close error must not be swallowed.
-	var closeErr error
-	if cerr := reader.Close(); cerr != nil {
-		closeErr = fmt.Errorf("volume controller: close image reader for %q: %w", vol.Spec.ImageRef, cerr)
-	}
-
-	if createErr != nil || closeErr != nil {
-		return created, errors.Join(createErr, closeErr)
-	}
-	return created, nil
+	return volume.Volume{}, fmt.Errorf("volume controller: root volume image bytes for image %q format %q are not ready for node consumption in this task", vol.Spec.ImageRef, format)
 }
 
 // teardown deletes the live volume from its block pool. The storage layer keys a

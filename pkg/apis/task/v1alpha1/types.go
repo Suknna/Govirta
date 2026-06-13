@@ -89,11 +89,15 @@ const (
 	TaskErrorClassUnsupportedOperation TaskErrorClass = "UnsupportedOperation"
 	// TaskErrorClassExecutionFailed means the supported operation failed while running.
 	TaskErrorClassExecutionFailed TaskErrorClass = "ExecutionFailed"
+	// TaskErrorClassChecksumMismatch means observed bytes did not match declared content identity.
+	TaskErrorClassChecksumMismatch TaskErrorClass = "ChecksumMismatch"
+	// TaskErrorClassTransientIO means the executor hit a retryable I/O boundary failure.
+	TaskErrorClassTransientIO TaskErrorClass = "TransientIO"
 )
 
 // Valid reports whether c is a known bounded task error class.
 func (c TaskErrorClass) Valid() bool {
-	return c == "" || c == TaskErrorClassNone || c == TaskErrorClassInvalidInput || c == TaskErrorClassUnsupportedOperation || c == TaskErrorClassExecutionFailed
+	return c == "" || c == TaskErrorClassNone || c == TaskErrorClassInvalidInput || c == TaskErrorClassUnsupportedOperation || c == TaskErrorClassExecutionFailed || c == TaskErrorClassChecksumMismatch || c == TaskErrorClassTransientIO
 }
 
 // Task is an internal execution object persisted in the control-plane store.
