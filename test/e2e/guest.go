@@ -493,13 +493,17 @@ func (g *Guest) AssertPersistedQEMUArgvHasCDROM(ctx context.Context, vmUID strin
 	g.t.Helper()
 	stateFile := guestRuntimeDir(vmUID) + "/vm.json"
 	probe := "sudo test -r " + shellQuote(stateFile) + " || { echo PROBEERR; exit 0; }; " +
-		"line=$(sudo tr '\\n' ' ' < " + shellQuote(stateFile) + "); " +
+		"line=$(" + sudoReadStateFileOneLine(stateFile) + "); " +
 		cdromArgvProbe("$line")
 	stdout, stderr, code, err := g.Exec(ctx, probe)
 	if err != nil {
 		g.t.Fatalf("probe persisted QEMU argv for VM uid %q CD-ROM: %v\nstderr: %s", vmUID, err, stderr)
 	}
 	assertCDROMProbeResult(g.t, vmUID, "persisted QEMU argv", stdout, stderr, code)
+}
+
+func sudoReadStateFileOneLine(stateFile string) string {
+	return "sudo sh -c " + shellQuote("tr '\\n' ' ' < "+shellQuote(stateFile))
 }
 
 // AssertRunningQEMUArgvHasCDROM checks the live qemu-system argv. It proves the

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -151,5 +152,18 @@ func TestGuestExecCanceledCtxReturnsErr(t *testing.T) {
 		t.Fatal("Exec with a cancelled context returned err == nil; " +
 			"a cancelled/unreachable probe must surface as a connection-layer err, " +
 			"never be silently swallowed (I-1 regression)")
+	}
+}
+
+func TestSudoReadStateFileOneLineOpensStateInsideSudoShell(t *testing.T) {
+	cmd := sudoReadStateFileOneLine("/var/lib/govirta/runtime/vm-e2e-001/vm.json")
+	if !strings.HasPrefix(cmd, "sudo sh -c ") {
+		t.Fatalf("sudo state reader = %q, want sudo sh -c wrapper", cmd)
+	}
+	if strings.Contains(cmd, "sudo tr") {
+		t.Fatalf("sudo state reader = %q, must not use outer-shell redirection into sudo tr", cmd)
+	}
+	if !strings.Contains(cmd, "< '") {
+		t.Fatalf("sudo state reader = %q, want redirection inside the sudo shell command", cmd)
 	}
 }
