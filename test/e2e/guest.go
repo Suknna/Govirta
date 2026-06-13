@@ -220,6 +220,27 @@ func (g *Guest) assertGuestPathAbsent(ctx context.Context, path, label, presentM
 	g.assertGuestAbsent(ctx, probe, label, presentMsg)
 }
 
+// AssertPathExists fails unless path exists inside the Lima guest. Image-cache
+// E2E uses this as live proof that Image.status.nodeCaches[].cachedPath names a
+// real node-local file, not just a control-plane projection.
+func (g *Guest) AssertPathExists(ctx context.Context, path string) {
+	g.t.Helper()
+	probe := "sudo test -e " + shellQuote(path) +
+		"; case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("probe guest path %q existence: %v\nstderr: %s", path, err, stderr)
+	}
+	switch strings.TrimSpace(stdout) {
+	case "PRESENT":
+		return
+	case "ABSENT":
+		g.t.Fatalf("guest path %q does not exist (image cache status points to a missing file); exit=%d", path, code)
+	default:
+		g.t.Fatalf("probe guest path %q existence was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", path, stdout, code, stderr)
+	}
+}
+
 // AssertNoQEMUProcess fails if a QEMU process keyed by the VM uid's runtime path
 // is still running. 早先版本用「空 stdout = absent」判定，但 pgrep/grep 缺失（127）
 // 或管道左侧失败经 `|| true` 归 0 后 stdout 同样为空 → 把「探针没跑成」误判为「无残留」
@@ -462,6 +483,67 @@ func (g *Guest) AssertRunningQEMUArgvDiskCount(ctx context.Context, vmUID string
 	}
 	if n != want {
 		g.t.Fatalf("running QEMU for VM uid %q has %d virtio-blk disk(s) in argv, want %d (cold volumeRefs change not threaded into qemu argv)", vmUID, n, want)
+	}
+}
+
+// AssertPersistedQEMUArgvHasCDROM checks vm.json before the VM is started. This
+// proves VM.spec.cdromImageRefs has already been resolved into the persisted VMM
+// argv model during Create/Redefine, not only in a later running process view.
+func (g *Guest) AssertPersistedQEMUArgvHasCDROM(ctx context.Context, vmUID string) {
+	g.t.Helper()
+	stateFile := guestRuntimeDir(vmUID) + "/vm.json"
+	probe := "sudo test -r " + shellQuote(stateFile) + " || { echo PROBEERR; exit 0; }; " +
+		"line=$(sudo tr '\\n' ' ' < " + shellQuote(stateFile) + "); " +
+		cdromArgvProbe("$line")
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("probe persisted QEMU argv for VM uid %q CD-ROM: %v\nstderr: %s", vmUID, err, stderr)
+	}
+	assertCDROMProbeResult(g.t, vmUID, "persisted QEMU argv", stdout, stderr, code)
+}
+
+// AssertRunningQEMUArgvHasCDROM checks the live qemu-system argv. It proves the
+// persisted CD-ROM model is actually executed through typed QEMU arguments.
+func (g *Guest) AssertRunningQEMUArgvHasCDROM(ctx context.Context, vmUID string) {
+	g.t.Helper()
+	runtimeDir := guestRuntimeDir(vmUID)
+	probe := "command -v pgrep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"command -v grep >/dev/null 2>&1 || { echo PROBEERR; exit 0; }; " +
+		"line=$(pgrep -a qemu-system | grep -F " + shellQuote(runtimeDir) + " 2>/dev/null); " +
+		"if [ -z \"$line\" ]; then echo PROBEERR; exit 0; fi; " +
+		cdromArgvProbe("$line")
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("probe running QEMU argv for VM uid %q CD-ROM: %v\nstderr: %s", vmUID, err, stderr)
+	}
+	assertCDROMProbeResult(g.t, vmUID, "running QEMU argv", stdout, stderr, code)
+}
+
+func cdromArgvProbe(lineExpr string) string {
+	checks := []string{
+		"read-only=on",
+		"file.filename=/var/lib/govirta/image-cache/",
+		"virtio-scsi-pci",
+		"scsi-cd",
+		"drive=cdrom0-",
+	}
+	parts := make([]string, 0, len(checks)+1)
+	for _, token := range checks {
+		parts = append(parts, "printf '%s' \""+lineExpr+"\" | grep -F "+shellQuote(token)+" >/dev/null 2>&1")
+	}
+	parts = append(parts, "! printf '%s' \""+lineExpr+"\" | grep -F -- '-cdrom' >/dev/null 2>&1")
+	return strings.Join(parts, " && ") + "; case $? in 0) echo PRESENT;; 1) echo ABSENT;; *) echo PROBEERR;; esac"
+}
+
+func assertCDROMProbeResult(t *testing.T, vmUID, label, stdout, stderr string, code int) {
+	t.Helper()
+	switch strings.TrimSpace(stdout) {
+	case "PRESENT":
+		return
+	case "ABSENT":
+		t.Fatalf("%s for VM uid %q does not carry typed CD-ROM blockdev/device argv with read-only cache path, or contains forbidden -cdrom; exit=%d", label, vmUID, code)
+	default:
+		t.Fatalf("probe for VM uid %q %s CD-ROM was inconclusive (got %q, want PRESENT/ABSENT); exit=%d stderr=%s", vmUID, label, stdout, code, stderr)
 	}
 }
 

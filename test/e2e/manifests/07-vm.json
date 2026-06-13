@@ -7,6 +7,9 @@
     "vcpus": 1,
     "memoryMiB": 256,
     "volumeRefs": ["vol-e2e-root"],
+    "cdromImageRefs": [
+      { "imageRef": "image-cdrom", "bootIndexMode": "unset" }
+    ],
     "nicRefs": ["nic-e2e"],
     "powerState": "Off",
     "powerOffMode": "Acpi"

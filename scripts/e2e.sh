@@ -35,6 +35,7 @@ tmp_dir="$repo_root/.tmp/e2e"
 log_dir="$repo_root/test/log"
 image_store_root="$tmp_dir/image-store"
 host_image_cache_root="$tmp_dir/image-cache"
+cdrom_image="$tmp_dir/cdrom.iso"
 
 cirros_base_url="https://download.cirros-cloud.net/0.6.2"
 cirros_md5_url="$cirros_base_url/MD5SUMS"
@@ -59,7 +60,6 @@ guest_state_root="/var/lib/govirta"
 guest_image_root="$guest_state_root/images"
 guest_runtime_root="$guest_state_root/runtime"
 guest_image_cache_root="$guest_state_root/image-cache"
-guest_cirros="$guest_image_root/cirros-aarch64.qcow2"
 govirtad_pidfile="$tmp_dir/govirtad.pid"
 govirtad_log="$tmp_dir/govirtad.log"
 govirtctl_bin="$tmp_dir/govirtctl"
@@ -175,6 +175,7 @@ prepare_cache() {
 	ensure_md5sums
 	download_file "$cirros_url" "$cirros_image"
 	verify_md5 "$cirros_image" "cirros-0.6.2-aarch64-disk.img"
+	printf 'Govirta e2e deterministic ISO fixture\n' >"$cdrom_image"
 }
 
 cleanup() {
@@ -272,7 +273,6 @@ start_lima_govirtlet() {
 		image_root="'"$guest_image_root"'"
 		runtime_root="'"$guest_runtime_root"'"
 		image_cache_root="'"$guest_image_cache_root"'"
-		guest_cirros="'"$guest_cirros"'"
 
 		i=0
 		while [ "$i" -lt 180 ] && [ ! -x "$HOME/.local/go/bin/go" ]; do
@@ -288,7 +288,6 @@ start_lima_govirtlet() {
 		done
 
 		sudo mkdir -p "$state_root/block" "$state_root/file" "$image_root" "$runtime_root" "$image_cache_root"
-		sudo cp /govirta-cache/images/cirros-aarch64.qcow2 "$guest_cirros"
 
 		# route 原语要求 ip_forward；node-prep 责任（route 包只读不改）。
 		sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -327,6 +326,8 @@ run_closure() {
 	GOVIRTA_E2E_SERVER="http://127.0.0.1:$api_port" \
 	GOVIRTA_E2E_GOVIRTCTL="$govirtctl_bin" \
 	GOVIRTA_E2E_MANIFESTS="$repo_root/test/e2e/manifests" \
+	GOVIRTA_E2E_CIRROS_IMAGE="$cirros_image" \
+	GOVIRTA_E2E_CDROM_IMAGE="$cdrom_image" \
 	GOVIRTA_E2E_NODE="$node_name" \
 	GOVIRTA_E2E_LIMA_INSTANCE="$instance_name" \
 	GOVIRTA_E2E_LIMA_HOME="$lima_home" \

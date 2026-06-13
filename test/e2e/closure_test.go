@@ -20,6 +20,8 @@ const (
 	e2eCtlEnv      = "GOVIRTA_E2E_GOVIRTCTL"
 	e2eManifestEnv = "GOVIRTA_E2E_MANIFESTS"
 	e2eNodeEnv     = "GOVIRTA_E2E_NODE"
+	e2eCirrosEnv   = "GOVIRTA_E2E_CIRROS_IMAGE"
+	e2eCDROMEnv    = "GOVIRTA_E2E_CDROM_IMAGE"
 )
 
 // Object names the spine is built from. They MUST match metadata.name in the
@@ -30,7 +32,8 @@ const (
 	nicName   = "nic-e2e"      // 06-nic.json
 	netName   = "net-e2e"      // 05-network.json
 	volName   = "vol-e2e-root" // 04-volume.json
-	imageName = "image-cirros" // 03-image.json
+	imageName = "image-cirros" // uploaded before Volume apply
+	cdromName = "image-cdrom"  // uploaded before VM apply
 	poolBlock = "pool-block"   // 01-storagepool-block.json
 	poolFile  = "pool-file"    // 02-storagepool-file.json
 	snapName  = "snap-e2e"     // 08-snapshot.json metadata.name
@@ -79,13 +82,12 @@ const (
 )
 
 // applyOrder is the dependency order the controllers gate on: pools first, then
-// image (needs file pool), volume (needs block pool + image), network, and NIC
-// (needs network). The VM is applied separately so the test can drive explicit
+// volume (needs block pool + uploaded cached image), network, and NIC (needs
+// network). The VM is applied separately so the test can drive explicit
 // powerState variants across one committed topology.
 var dependencyApplyOrder = []string{
 	"01-storagepool-block.json",
 	"02-storagepool-file.json",
-	"03-image.json",
 	"04-volume.json",
 	"05-network.json",
 	"06-nic.json",
@@ -99,6 +101,15 @@ const snapshotManifestName = "08-snapshot.json"
 // 它之上改 spec.capacityBytes 渲染到 tmpDir，基线文件本身保持不变（与
 // writeVMManifestVariant 同款：测试侧渲染变体，不污染受测 manifest）。
 const volumeManifestName = "04-volume.json"
+
+const (
+	imageCirrosUID     = "image-cirros-001"
+	imageCDROMUID      = "image-cdrom-001"
+	imageVersion       = "v1"
+	imageFormatQCOW2   = "qcow2"
+	imageFormatISO     = "iso"
+	imageCacheWaitTime = 3 * time.Minute
+)
 
 // TestDistributedSpineClosure drives the full lifecycle against the real
 // three-node topology: apply the spine in dependency order, wait for the VM to
@@ -119,6 +130,8 @@ func TestDistributedSpineClosure(t *testing.T) {
 	server := requireEnv(t, e2eServerEnv)
 	ctl := requireEnv(t, e2eCtlEnv)
 	manifests := requireEnv(t, e2eManifestEnv)
+	cirrosImage := requireEnv(t, e2eCirrosEnv)
+	cdromImage := requireEnv(t, e2eCDROMEnv)
 	nodeName := os.Getenv(e2eNodeEnv)
 	if nodeName == "" {
 		nodeName = "node0"
@@ -141,9 +154,11 @@ func TestDistributedSpineClosure(t *testing.T) {
 	waitTaskSucceeded(ctx, t, ctl, server, "phase-one-cluster-task", 2*time.Minute)
 	waitTaskSucceeded(ctx, t, ctl, server, "phase-one-node-task-"+nodeName, 2*time.Minute)
 
-	// Forward segment: apply dependencies first, define the VM while powered Off,
+	// Forward segment: upload ImageStore-backed images first, apply dependencies,
+	// define the VM while powered Off,
 	// then drive declared power intent through the two-dimensional power model:
 	// On, Off+Acpi (graceful ACPI), On again, Off+Force (forced power-off).
+	uploadSpineImages(ctx, t, ctl, server, nodeName, g, cirrosImage, cdromImage)
 	applySpineDependencies(ctx, t, ctl, server, manifests)
 	waitObjectPhase(ctx, t, ctl, server, "NIC", nicName, "ready", 3*time.Minute)
 
@@ -151,6 +166,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// Scenario 1: create powerState=Off + powerOffMode=Acpi → defined, Off/None.
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "Off", "Acpi")
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+	g.AssertPersistedQEMUArgvHasCDROM(ctx, vmUID)
 	replaceCycle(ctx, t, ctl, server, tmpDir)
 
 	// Scenario 2: update powerState=On (powerOffMode empty) → running, On/None.
@@ -165,6 +181,7 @@ func TestDistributedSpineClosure(t *testing.T) {
 	// 嵌套 guest 网卡不在 Lima VM（读 /sys/class/net 只会读到 Lima VM 自己的网卡）。
 	assignedMAC := readNICMAC(ctx, t, ctl, server, nicName)
 	g.AssertRunningQEMUArgvHasMAC(ctx, vmUID, assignedMAC)
+	g.AssertRunningQEMUArgvHasCDROM(ctx, vmUID)
 
 	// Scenario 3: update powerState=Off + powerOffMode=Acpi → graceful ACPI
 	// shutdown. CirrOS 0.6.2 supports ACPI shutdown (≥0.3.1), so this verifies
@@ -220,6 +237,82 @@ func applySpineDependencies(ctx context.Context, t *testing.T, ctl, server, mani
 		}
 		t.Logf("applied %s: %s", name, strings.TrimSpace(out))
 	}
+}
+
+func uploadSpineImages(ctx context.Context, t *testing.T, ctl, server, nodeName string, g *Guest, cirrosImage, cdromImage string) {
+	t.Helper()
+	uploadImage(ctx, t, ctl, server, imageName, imageCirrosUID, imageVersion, imageFormatQCOW2, cirrosImage)
+	cirrosCache := waitImageCacheReady(ctx, t, ctl, server, imageName, nodeName, imageCacheWaitTime)
+	g.AssertPathExists(ctx, cirrosCache.CachedPath)
+
+	uploadImage(ctx, t, ctl, server, cdromName, imageCDROMUID, imageVersion, imageFormatISO, cdromImage)
+	cdromCache := waitImageCacheReady(ctx, t, ctl, server, cdromName, nodeName, imageCacheWaitTime)
+	g.AssertPathExists(ctx, cdromCache.CachedPath)
+}
+
+func uploadImage(ctx context.Context, t *testing.T, ctl, server, name, uid, version, format, file string) {
+	t.Helper()
+	out, err := runCtl(ctx, ctl, "image", "upload", "--server", server, "--name", name, "--uid", uid, "--version", version, "--format", format, "--file", file)
+	if err != nil {
+		t.Fatalf("upload Image/%s version %s format %s from %q failed: %v\noutput:\n%s", name, version, format, file, err, out)
+	}
+	t.Logf("uploaded Image/%s version %s format %s: %s", name, version, format, strings.TrimSpace(out))
+}
+
+type imageCacheSnapshot struct {
+	Phase      string `json:"phase"`
+	CachedPath string `json:"cachedPath"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	SHA256     string `json:"sha256"`
+	TaskRef    struct {
+		Name string `json:"name"`
+		UID  string `json:"uid"`
+	} `json:"taskRef"`
+}
+
+func waitImageCacheReady(ctx context.Context, t *testing.T, ctl, server, name, nodeName string, timeout time.Duration) imageCacheSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("context ended before Image/%s cache on node %s became ready: %v\nlast get:\n%s", name, nodeName, err, last)
+		}
+		out, err := runCtl(ctx, ctl, "get", "--server", server, "Image", name)
+		last = out
+		if err == nil {
+			imagePhase, cache, ok := decodeImageCache(t, out, nodeName)
+			if imagePhase == "ready" && ok && cache.Phase == "ready" && cache.CachedPath != "" && cache.SHA256 != "" && cache.SizeBytes > 0 && cache.TaskRef.Name != "" && cache.TaskRef.UID != "" {
+				t.Logf("Image/%s cache on node %s reached ready: path=%s sha256=%s size=%d task=%s", name, nodeName, cache.CachedPath, cache.SHA256, cache.SizeBytes, cache.TaskRef.Name)
+				return cache
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("Image/%s cache on node %s did not become ready before deadline\nlast get:\n%s", name, nodeName, last)
+	return imageCacheSnapshot{}
+}
+
+func decodeImageCache(t *testing.T, out, nodeName string) (string, imageCacheSnapshot, bool) {
+	t.Helper()
+	var obj struct {
+		Status struct {
+			Phase      string `json:"phase"`
+			NodeCaches []struct {
+				NodeName string `json:"nodeName"`
+				imageCacheSnapshot
+			} `json:"nodeCaches"`
+		} `json:"status"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out)).Decode(&obj); err != nil {
+		return "", imageCacheSnapshot{}, false
+	}
+	for _, cache := range obj.Status.NodeCaches {
+		if cache.NodeName == nodeName {
+			return obj.Status.Phase, cache.imageCacheSnapshot, true
+		}
+	}
+	return obj.Status.Phase, imageCacheSnapshot{}, false
 }
 
 func applyVMVariant(ctx context.Context, t *testing.T, ctl, server, manifests, tmpDir, name, uid, powerState, powerOffMode string) {
@@ -823,6 +916,7 @@ func teardownSpine(ctx context.Context, t *testing.T, ctl, server string, g *Gue
 	deleteAndWaitGone(ctx, t, ctl, server, "NIC", nicName, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "Volume", volName, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "Network", netName, 2*time.Minute)
+	deleteAndWaitGone(ctx, t, ctl, server, "Image", cdromName, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "Image", imageName, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "StoragePool", poolBlock, 2*time.Minute)
 	deleteAndWaitGone(ctx, t, ctl, server, "StoragePool", poolFile, 2*time.Minute)

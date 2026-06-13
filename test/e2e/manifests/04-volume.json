@@ -9,7 +9,6 @@
     "diskIndex": 0,
     "capacityBytes": 1073741824,
     "role": "root",
-    "imageRef": "image-cirros",
-    "imageFilePoolRef": "pool-file"
+    "imageRef": "image-cirros"
   }
 }
