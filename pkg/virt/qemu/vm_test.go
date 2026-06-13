@@ -156,6 +156,81 @@ func TestVMArgvRendersDirectKernelBoot(t *testing.T) {
 	}
 }
 
+func TestVMArgvRendersCDROMWithoutBootIndex(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddCDROM(qemu.CDROM{
+			ID:   "cdrom0",
+			Path: "/var/lib/vm/install.iso",
+			Cache: blockdev.Cache{
+				Direct: qemu.Off,
+			},
+			AIO: blockdev.AIOThreads,
+		}).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{
+		"qemu-system-x86_64",
+		"-blockdev", "driver=raw,node-name=cdrom0,read-only=on,file.driver=file,file.filename=/var/lib/vm/install.iso,file.cache.direct=off,file.aio=threads",
+		"-device", "virtio-scsi-pci,id=cdrom0-scsi",
+		"-device", "scsi-cd,drive=cdrom0,bus=cdrom0-scsi.0,scsi-id=0,id=cdrom0-device",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
+	}
+}
+
+func TestVMArgvRendersCDROMExplicitBootIndexZero(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddCDROM(qemu.CDROM{
+			ID:        "cdrom0",
+			Path:      "/var/lib/vm/install.iso",
+			BootIndex: qemu.Int(0),
+		}).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{
+		"qemu-system-x86_64",
+		"-blockdev", "driver=raw,node-name=cdrom0,read-only=on,file.driver=file,file.filename=/var/lib/vm/install.iso",
+		"-device", "virtio-scsi-pci,id=cdrom0-scsi",
+		"-device", "scsi-cd,drive=cdrom0,bus=cdrom0-scsi.0,scsi-id=0,bootindex=0,id=cdrom0-device",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
+	}
+}
+
+func TestVMArgvRendersMultipleCDROMsInCallOrder(t *testing.T) {
+	vm, err := qemu.NewVM(qemu.ArchX86_64).
+		AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/a.iso"}).
+		AddCDROM(qemu.CDROM{ID: "cdrom1", Path: "/var/lib/vm/b.iso"}).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	argv := vm.Argv()
+	want := []string{
+		"qemu-system-x86_64",
+		"-blockdev", "driver=raw,node-name=cdrom0,read-only=on,file.driver=file,file.filename=/var/lib/vm/a.iso",
+		"-device", "virtio-scsi-pci,id=cdrom0-scsi",
+		"-device", "scsi-cd,drive=cdrom0,bus=cdrom0-scsi.0,scsi-id=0,id=cdrom0-device",
+		"-blockdev", "driver=raw,node-name=cdrom1,read-only=on,file.driver=file,file.filename=/var/lib/vm/b.iso",
+		"-device", "virtio-scsi-pci,id=cdrom1-scsi",
+		"-device", "scsi-cd,drive=cdrom1,bus=cdrom1-scsi.0,scsi-id=0,id=cdrom1-device",
+	}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("Argv() = %#v, want %#v", argv, want)
+	}
+}
+
 func TestBuildRejectsInitrdOrAppendWithoutKernel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -485,6 +560,47 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 					Build()
 			},
 		},
+		{
+			name: "empty_cdrom_id",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{Path: "/var/lib/vm/install.iso"}).
+					Build()
+			},
+		},
+		{
+			name: "empty_cdrom_path",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{ID: "cdrom0"}).
+					Build()
+			},
+		},
+		{
+			name: "cdrom_path_injection_value",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso,read-only=off"}).
+					Build()
+			},
+		},
+		{
+			name: "invalid_cdrom_aio",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso", AIO: blockdev.AIO("native")}).
+					Build()
+			},
+		},
+		{
+			name: "duplicate_cdrom_id",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/a.iso"}).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/b.iso"}).
+					Build()
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -495,6 +611,80 @@ func TestBuildRejectsInvalidConfig(t *testing.T) {
 			}
 			if !errors.Is(err, qemu.ErrInvalidVM) {
 				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+		})
+	}
+}
+
+func TestBuildRejectsCDROMIDCollisions(t *testing.T) {
+	cases := []struct {
+		name string
+		make func() (qemu.VM, error)
+	}{
+		{
+			name: "existing_blockdev_node_name_matches_cdrom_media_node",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddBlockdev(blockdev.Qcow2{
+						NodeName: "cdrom0",
+						File:     blockdev.FileProtocol{Filename: "/var/lib/vm/root.qcow2"},
+					}).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso"}).
+					Build()
+			},
+		},
+		{
+			name: "existing_device_id_matches_cdrom_scsi_controller_id",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddDevice(device.VirtioSCSIPCI{ID: "cdrom0-scsi"}).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso"}).
+					Build()
+			},
+		},
+		{
+			name: "existing_device_id_matches_cdrom_device_id",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddDevice(device.SCSICD{ID: "cdrom0-device", Drive: blockdev.Ref("root"), Bus: "scsi0.0", SCSIID: device.NewSCSIID(0)}).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso"}).
+					Build()
+			},
+		},
+		{
+			name: "later_blockdev_node_name_matches_cdrom_media_node",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso"}).
+					AddBlockdev(blockdev.Qcow2{
+						NodeName: "cdrom0",
+						File:     blockdev.FileProtocol{Filename: "/var/lib/vm/root.qcow2"},
+					}).
+					Build()
+			},
+		},
+		{
+			name: "later_device_id_matches_cdrom_controller_id",
+			make: func() (qemu.VM, error) {
+				return qemu.NewVM(qemu.ArchX86_64).
+					AddCDROM(qemu.CDROM{ID: "cdrom0", Path: "/var/lib/vm/install.iso"}).
+					AddDevice(device.VirtioSCSIPCI{ID: "cdrom0-scsi"}).
+					Build()
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.make()
+			if err == nil {
+				t.Fatalf("Build() error = nil, want error")
+			}
+			if !errors.Is(err, qemu.ErrInvalidVM) {
+				t.Fatalf("Build() error = %v, want errors.Is(err, qemu.ErrInvalidVM)", err)
+			}
+			if !strings.Contains(err.Error(), "duplicate qemu id") {
+				t.Fatalf("Build() error = %q, want duplicate qemu id", err.Error())
 			}
 		})
 	}
@@ -643,6 +833,8 @@ func TestBuildRejectsGenericTypedArgumentBypass(t *testing.T) {
 		{name: "bios", arg: qemu.Arg("-bios", "/usr/share/OVMF/OVMF_CODE.fd")},
 		{name: "blockdev", arg: qemu.Arg("-blockdev", "driver=qcow2")},
 		{name: "device", arg: qemu.Arg("-device", "virtio-net-pci")},
+		{name: "cdrom_shortcut", arg: qemu.Arg("-cdrom", "/var/lib/vm/install.iso")},
+		{name: "drive_shortcut", arg: qemu.Arg("-drive", "file=/var/lib/vm/root.qcow2")},
 		{name: "netdev", arg: qemu.Arg("-netdev", "tap,id=net0,ifname=tap0")},
 		{name: "chardev", arg: qemu.Arg("-chardev", "socket,id=qmp0")},
 		{name: "monitor", arg: qemu.Arg("-mon", "chardev=qmp0,mode=control")},

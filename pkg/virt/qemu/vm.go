@@ -56,6 +56,14 @@ type Msg struct {
 	GuestName OnOff
 }
 
+type CDROM struct {
+	ID        string
+	Path      string
+	Cache     blockdev.Cache
+	AIO       blockdev.AIO
+	BootIndex OptionalInt
+}
+
 type NameOption func(*nameConfig)
 
 type nameConfig struct {
@@ -175,6 +183,7 @@ type Builder struct {
 	pidFile    string
 	vnc        *display.VNCUnix
 	daemonize  bool
+	cdromIDs   map[string]struct{}
 	// 直接内核引导（direct-kernel boot）：cirros aarch64 等无 EFI bootloader
 	// 的镜像无法从磁盘独立启动，必须经 -kernel/-initrd/-append 引导。空串视为未设。
 	kernel        string
@@ -244,8 +253,45 @@ func (b *Builder) SMP(v SMP) *Builder { b.smp = &v; return b }
 
 func (b *Builder) Memory(v Memory) *Builder { b.memory = &v; return b }
 
-func (b *Builder) AddBlockdev(v blockdev.Qcow2) *Builder {
+func (b *Builder) AddBlockdev(v blockdev.Blockdev) *Builder {
+	if isNilBlockdev(v) {
+		b.ordered = append(b.ordered, typedArg("-blockdev", func() (string, error) { return "", errors.New("blockdev is required") }))
+		return b
+	}
 	b.ordered = append(b.ordered, typedArg("-blockdev", v.Arg))
+	return b
+}
+
+func (b *Builder) AddCDROM(v CDROM) *Builder {
+	if b.cdromIDs == nil {
+		b.cdromIDs = make(map[string]struct{})
+	}
+	if v.ID == "" {
+		b.err = errors.Join(b.err, errors.New("cdrom id is required"))
+	} else if _, exists := b.cdromIDs[v.ID]; exists {
+		b.err = errors.Join(b.err, fmt.Errorf("duplicate cdrom id %q", v.ID))
+	} else {
+		b.cdromIDs[v.ID] = struct{}{}
+	}
+	deviceID := v.ID + "-device"
+	controllerID := v.ID + "-scsi"
+	mediaNodeID := v.ID
+	b.ordered = append(b.ordered,
+		typedArg("-blockdev", blockdev.ISO{
+			NodeName: mediaNodeID,
+			File:     blockdev.FileProtocol{Filename: v.Path},
+			Cache:    v.Cache,
+			AIO:      v.AIO,
+		}.Arg),
+		typedArg("-device", device.VirtioSCSIPCI{ID: controllerID}.Arg),
+		typedArg("-device", device.SCSICD{
+			ID:        deviceID,
+			Drive:     blockdev.Ref(mediaNodeID),
+			Bus:       controllerID + ".0",
+			SCSIID:    device.NewSCSIID(0),
+			BootIndex: v.BootIndex,
+		}.Arg),
+	)
 	return b
 }
 
@@ -381,8 +427,12 @@ func (b *Builder) Build() (VM, error) {
 			return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, err)
 		}
 	}
+	if err := validateInternalIDCollisions(b.ordered); err != nil {
+		return VM{}, fmt.Errorf("%w: %v", ErrInvalidVM, err)
+	}
 	built := *b
 	built.ordered = append([]Argument(nil), b.ordered...)
+	built.cdromIDs = cloneStringSet(b.cdromIDs)
 	return VM{builder: built}, nil
 }
 
@@ -519,6 +569,65 @@ func genericArgumentShape(v Argument) (string, argumentShape, bool) {
 	return "", argumentShapeUnknown, false
 }
 
+func validateInternalIDCollisions(entries []Argument) error {
+	ids := make(map[string]string)
+	for _, entry := range entries {
+		flag, value, ok := renderedArgument(entry)
+		if !ok {
+			continue
+		}
+		switch flag {
+		case "-blockdev":
+			nodeName := qemuOptionValue(value, "node-name")
+			if nodeName == "" {
+				continue
+			}
+			if existingKind, exists := ids[nodeName]; exists {
+				return fmt.Errorf("duplicate qemu id %q used by %s and blockdev node-name", nodeName, existingKind)
+			}
+			ids[nodeName] = "blockdev node-name"
+		case "-device":
+			id := qemuOptionValue(value, "id")
+			if id == "" {
+				continue
+			}
+			if existingKind, exists := ids[id]; exists {
+				return fmt.Errorf("duplicate qemu id %q used by %s and device id", id, existingKind)
+			}
+			ids[id] = "device id"
+		}
+	}
+	return nil
+}
+
+func renderedArgument(v Argument) (string, string, bool) {
+	switch a := v.(type) {
+	case argvArg:
+		return a.flag, a.value, true
+	case *typedArgument:
+		if a == nil {
+			return "", "", false
+		}
+		a.prepare()
+		if a.err != nil {
+			return "", "", false
+		}
+		return a.flag, a.value, true
+	default:
+		return "", "", false
+	}
+}
+
+func qemuOptionValue(arg string, key string) string {
+	for _, part := range strings.Split(arg, ",") {
+		name, value, ok := strings.Cut(part, "=")
+		if ok && name == key {
+			return value
+		}
+	}
+	return ""
+}
+
 func isRejectedTypedArgument(flag string) bool {
 	switch flag {
 	case "-machine", "-M", "-name", "-cpu", "-smp", "-m", "-bios", "-blockdev", "-device", "-netdev", "-chardev", "-mon", "-serial", "-display", "-msg", "-pidfile", "-no-reboot", "-no-shutdown":
@@ -539,6 +648,30 @@ func isNilDevice(v Device) bool {
 	default:
 		return false
 	}
+}
+
+func isNilBlockdev(v blockdev.Blockdev) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+func cloneStringSet(in map[string]struct{}) map[string]struct{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(in))
+	for key := range in {
+		out[key] = struct{}{}
+	}
+	return out
 }
 
 func (c nameConfig) arg() string {

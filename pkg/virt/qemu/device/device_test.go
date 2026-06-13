@@ -1,8 +1,11 @@
 package device_test
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/suknna/govirta/pkg/virt/qemu"
+	"github.com/suknna/govirta/pkg/virt/qemu/blockdev"
 	"github.com/suknna/govirta/pkg/virt/qemu/device"
 	"github.com/suknna/govirta/pkg/virt/qemu/netdev"
 	"github.com/suknna/govirta/pkg/virt/qemu/qflag"
@@ -57,6 +60,49 @@ func TestVirtioNetPCIRomFileRendering(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("Arg() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSCSICDArgRendersExplicitSCSIID(t *testing.T) {
+	arg, err := device.SCSICD{
+		ID:        "cdrom0-device",
+		Drive:     blockdev.Ref("cdrom0"),
+		Bus:       "cdrom0-scsi.0",
+		SCSIID:    device.NewSCSIID(0),
+		BootIndex: qemu.Int(0),
+	}.Arg()
+	if err != nil {
+		t.Fatalf("Arg() error = %v", err)
+	}
+
+	want := "scsi-cd,drive=cdrom0,bus=cdrom0-scsi.0,scsi-id=0,bootindex=0,id=cdrom0-device"
+	if arg != want {
+		t.Fatalf("Arg() = %q, want %q", arg, want)
+	}
+}
+
+func TestSCSICDArgRejectsInvalidConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		dev  device.SCSICD
+	}{
+		{name: "empty_drive", dev: device.SCSICD{Bus: "scsi0.0", SCSIID: device.NewSCSIID(0)}},
+		{name: "empty_bus", dev: device.SCSICD{Drive: blockdev.Ref("cdrom0"), SCSIID: device.NewSCSIID(0)}},
+		{name: "missing_scsi_id", dev: device.SCSICD{Drive: blockdev.Ref("cdrom0"), Bus: "scsi0.0"}},
+		{name: "negative_scsi_id", dev: device.SCSICD{Drive: blockdev.Ref("cdrom0"), Bus: "scsi0.0", SCSIID: device.NewSCSIID(-1)}},
+		{name: "unsafe_id", dev: device.SCSICD{ID: "cdrom0,bad", Drive: blockdev.Ref("cdrom0"), Bus: "scsi0.0", SCSIID: device.NewSCSIID(0)}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.dev.Arg()
+			if err == nil {
+				t.Fatalf("Arg() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), "scsi-cd device") {
+				t.Fatalf("Arg() error = %q, want scsi-cd device context", err.Error())
 			}
 		})
 	}
