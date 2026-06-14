@@ -519,6 +519,7 @@ func TestVolumeControllerCreatesRootFromNodeImageCache(t *testing.T) {
 	creator.created = volume.Volume{ID: "vm-uid-root-0", Name: vol.Name, PoolName: vol.Spec.PoolRef, Context: map[string]string{"path": wantPath}}
 	dep := readyDepsWithImage(t, vol, img)
 	c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
+	c.openCachedFile = testOpenCachedFile
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -555,6 +556,7 @@ func TestVolumeControllerRawImageCachePassesRawFormat(t *testing.T) {
 	creator := &fakeRootVolumeCreator{created: volume.Volume{Context: map[string]string{"path": "/volume/raw"}}}
 	dep := readyDepsWithImage(t, vol, img)
 	c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
+	c.openCachedFile = testOpenCachedFile
 
 	result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 	if err != nil {
@@ -761,6 +763,11 @@ func TestVolumeControllerRejectsUnsafeCachedPath(t *testing.T) {
 			creator := &fakeRootVolumeCreator{}
 			dep := readyDepsWithImage(t, vol, img)
 			c := NewVolumeController(creator, cacheRoot, &fakeVMStatusReader{}, dep)
+			if tc.name == "symlink-leaf" {
+				c.openCachedFile = func(_, _ string) (cachedFile, error) {
+					return nil, fmt.Errorf("symlink")
+				}
+			}
 
 			result, err := c.Reconcile(context.Background(), newVolumeEvent(t, controller.EventAdded, vol))
 			if err == nil {
@@ -777,6 +784,10 @@ func TestVolumeControllerRejectsUnsafeCachedPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testOpenCachedFile(_, path string) (cachedFile, error) {
+	return os.Open(path)
 }
 
 func TestVolumeReconcileImageNotReadyRequeues(t *testing.T) {
