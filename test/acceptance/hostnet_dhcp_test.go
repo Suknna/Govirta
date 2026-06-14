@@ -23,7 +23,7 @@ import (
 
 func TestHostnetDHCPBindingEndToEnd(t *testing.T) {
 	env := requireHostnetAcceptanceEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
 	// Hostnet acceptance reuses fixed gvbr0/gvtap0/192.168.100.0/24

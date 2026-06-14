@@ -50,7 +50,8 @@ Lima 嵌套虚拟化 PR #2530 <https://github.com/lima-vm/lima/pull/2530>。
    使用父目录 `.l/<repo_key>` 下的短路径 `LIMA_HOME` 避开 Lima socket 路径长度限制,同时把
    cirros guest 镜像、Go 工具链与生成配置缓存在项目根 `.lima/cache/` 下,摊薄冷启成本。
 4. 通过本地 `.githooks/pre-push` hook 自动触发:**推 `main` → 无条件全量验收（必过门禁）**;
-   推特性分支 → 仅当 diff 触及 Linux 相关包时跑验收（早反馈）。
+   特性分支的 Linux 验收不再由 hook 按 diff 路径隐式推断，已由
+   `2026-06-14-push-gated-linux-testing-design.md` 改为显式手动入口。
 5. 验收测试验证 **Govirta 自己的代码**对真实二进制的契约（用 `internal/virt/qemu` 渲染 argv、
    `internal/virt/qemuimg` 调 qemu-img、`internal/virt/qmp` 连 socket），而非裸 qemu 烟测。
 6. 把远程主机（`192.168.139.206`）交叉编译验收工作流**完整迁移到 Lima**,移除 AGENTS.md 中的
@@ -342,7 +343,7 @@ AGENTS.md                 # [改] 见下节
 | 风险 | 缓解 |
 | --- | --- |
 | Lima 嵌套虚拟化在某次 macOS/Lima 升级后回归失效 | smoke test 步骤文档化;`scripts/acceptance.sh` 在 provision 后校验 guest 内 `/dev/kvm` 与 `dmesg KVM` 标记,失败早报 |
-| 冷启 + provision 单次耗时偏高拖慢推 main | 镜像/Go 工具链/cirros 全缓存在 `.lima/cache`;特性分支按路径检测避免无谓冷启;只有推 main 才付全量成本 |
+| 冷启 + provision 单次耗时偏高拖慢推 main | 镜像/Go 工具链/cirros 全缓存在 `.lima/cache`;当前策略只在推 `main` 时自动付全量成本,特性分支需要时显式手动运行 |
 | `--no-verify` 绕过门禁 | AGENTS.md 明令禁止;依赖项目纪律（本地 hook 固有局限,已在非目标声明） |
 | 源码递归挂载暴露 diffdisk | 源码只读挂载 + `go test` 限定路径 + 缓存目录在源码树外,三重缓解 |
 | `.lima/` 误入 git（VM 磁盘体积大） | `.gitignore` 追加 `.lima/`,与 `.tmp/` 并列 |
@@ -351,9 +352,8 @@ AGENTS.md                 # [改] 见下节
 
 本框架自身的"验收":
 
-1. `git config core.hooksPath .githooks` 后,在特性分支推送不触及 Linux 包的改动 → 仅跑 mac
-   单测,不启动 Lima。
-2. 推送触及 `internal/virt/qemu` 的改动到特性分支 → 自动冷启 Lima 跑验收。
+1. `git config core.hooksPath .githooks` 后,特性分支 push → 仅跑 mac 单测,不按路径隐式启动 Lima。
+2. 需要验证 Linux/QEMU/guest 行为时 → 开发者显式运行 `scripts/acceptance.sh full`。
 3. 推 `main` → 无条件全量验收;`boot_test.go` 真起 cirros 且 QMP `query-status` == `running`,
    `qemuimg_test.go` 全生命周期通过 → 允许 push;任一失败 → exit 1 阻断。
 4. 验收跑完 `limactl delete` 回收实例,`.lima/cache` 保留。

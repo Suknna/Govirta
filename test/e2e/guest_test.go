@@ -168,6 +168,28 @@ func TestSudoReadStateFileOneLineOpensStateInsideSudoShell(t *testing.T) {
 	}
 }
 
+func TestSudoReadFileSizeOpensFileInsideSudoShell(t *testing.T) {
+	cmd := sudoReadFileSize("/var/lib/govirta/runtime/vm-e2e-001/console.log")
+	if !strings.HasPrefix(cmd, "sudo sh -c ") {
+		t.Fatalf("sudo file sizer = %q, want sudo sh -c wrapper", cmd)
+	}
+	if strings.Contains(cmd, "sudo wc") {
+		t.Fatalf("sudo file sizer = %q, must not use outer-shell redirection into sudo wc", cmd)
+	}
+	if !strings.Contains(cmd, "< '") {
+		t.Fatalf("sudo file sizer = %q, want redirection inside the sudo shell command", cmd)
+	}
+}
+
+func TestCirrosGuestReadyMarkersIncludeACPIDAndLogin(t *testing.T) {
+	markers := strings.Join(cirrosGuestReadyMarkers, "\n")
+	for _, marker := range []string{"Starting acpid: OK", "login:"} {
+		if !strings.Contains(markers, marker) {
+			t.Fatalf("cirros guest ready markers = %v, want %q", cirrosGuestReadyMarkers, marker)
+		}
+	}
+}
+
 func TestCDROMArgvProbeDoesNotRejectImageNamesContainingCDROM(t *testing.T) {
 	line := "driver=raw,node-name=cdrom0-abc,read-only=on,file.driver=file,file.filename=/var/lib/govirta/image-cache/image-cdrom/v1/image " +
 		"virtio-scsi-pci scsi-cd drive=cdrom0-abc"

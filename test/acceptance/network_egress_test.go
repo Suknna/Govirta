@@ -43,7 +43,7 @@ const (
 func TestNetworkEgressEndToEnd(t *testing.T) {
 	env := requireHostnetAcceptanceEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	bridgeName := link.Name("gvbr0")

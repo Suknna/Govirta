@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -486,6 +487,73 @@ func (g *Guest) AssertRunningQEMUArgvDiskCount(ctx context.Context, vmUID string
 	}
 }
 
+// ConsoleLogSizeIfExists returns the current byte size of the VM's persisted
+// serial console log, or 0 before the first QEMU start creates it. e2e records
+// this before a power-on transition, then waits for a later marker so a previous
+// boot's acpid line cannot satisfy a new boot check.
+func (g *Guest) ConsoleLogSizeIfExists(ctx context.Context, vmUID string) int64 {
+	g.t.Helper()
+	consoleLog := guestRuntimeDir(vmUID) + "/console.log"
+	probe := "sudo test -e " + shellQuote(consoleLog) + " || { echo ABSENT; exit 0; }; " +
+		"sudo test -r " + shellQuote(consoleLog) + " || { echo PROBEERR; exit 0; }; " +
+		sudoReadFileSize(consoleLog)
+	stdout, stderr, code, err := g.Exec(ctx, probe)
+	if err != nil {
+		g.t.Fatalf("read console log size for VM uid %q: %v\nstderr: %s", vmUID, err, stderr)
+	}
+	got := strings.TrimSpace(stdout)
+	if got == "ABSENT" {
+		return 0
+	}
+	if code != 0 || got == "PROBEERR" {
+		g.t.Fatalf("console log for VM uid %q is not readable (exit=%d stdout=%q stderr=%q)", vmUID, code, stdout, stderr)
+	}
+	size, err := strconv.ParseInt(got, 10, 64)
+	if err != nil {
+		g.t.Fatalf("console log size for VM uid %q is not an integer: %q", vmUID, got)
+	}
+	return size
+}
+
+// WaitConsoleAnyMarkerAfter waits until the VM's serial console log contains at
+// least one marker after offset. QMP `running` only proves the process and
+// monitor are ready; ACPI shutdown needs guest userspace readiness, so e2e waits
+// on a lower-layer console fact from this boot before issuing Off+Acpi.
+func (g *Guest) WaitConsoleAnyMarkerAfter(ctx context.Context, vmUID string, markers []string, offset int64, timeout time.Duration) {
+	g.t.Helper()
+	consoleLog := guestRuntimeDir(vmUID) + "/console.log"
+	deadline := time.Now().Add(timeout)
+	var lastTail string
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			g.t.Fatalf("context ended before any console marker %v appeared for VM uid %q: %v\nconsole tail:\n%s", markers, vmUID, err, lastTail)
+		}
+		probe := "sudo test -r " + shellQuote(consoleLog) + " || { echo PROBEERR; exit 0; }; " +
+			"sudo tail -c +" + strconv.FormatInt(offset+1, 10) + " " + shellQuote(consoleLog) + " 2>/dev/null | tail -c 8192"
+		stdout, stderr, code, err := g.Exec(ctx, probe)
+		if err != nil {
+			g.t.Fatalf("read console log for VM uid %q markers %v: %v\nstderr: %s", vmUID, markers, err, stderr)
+		}
+		lastTail = stdout
+		if code == 0 {
+			for _, marker := range markers {
+				if strings.Contains(stdout, marker) {
+					return
+				}
+			}
+		}
+		if strings.TrimSpace(stdout) == "PROBEERR" {
+			lastTail = "(console log unavailable: " + strings.TrimSpace(stderr) + ")"
+		}
+		select {
+		case <-ctx.Done():
+			g.t.Fatalf("context ended before any console marker %v appeared for VM uid %q: %v\nconsole tail:\n%s", markers, vmUID, ctx.Err(), lastTail)
+		case <-time.After(1 * time.Second):
+		}
+	}
+	g.t.Fatalf("timed out waiting for any console marker %v for VM uid %q\nconsole tail:\n%s", markers, vmUID, lastTail)
+}
+
 // AssertPersistedQEMUArgvHasCDROM checks vm.json before the VM is started. This
 // proves VM.spec.cdromImageRefs has already been resolved into the persisted VMM
 // argv model during Create/Redefine, not only in a later running process view.
@@ -504,6 +572,10 @@ func (g *Guest) AssertPersistedQEMUArgvHasCDROM(ctx context.Context, vmUID strin
 
 func sudoReadStateFileOneLine(stateFile string) string {
 	return "sudo sh -c " + shellQuote("tr '\\n' ' ' < "+shellQuote(stateFile))
+}
+
+func sudoReadFileSize(path string) string {
+	return "sudo sh -c " + shellQuote("wc -c < "+shellQuote(path))
 }
 
 // AssertRunningQEMUArgvHasCDROM checks the live qemu-system argv. It proves the

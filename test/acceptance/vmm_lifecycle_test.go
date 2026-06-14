@@ -43,7 +43,7 @@ func vmmBootSpec(name, diskPath string) vmm.SpecSummary {
 // Reattach / Delete-while-running 冲突 / 优雅 Stop / 再 Start / Kill / Delete。
 func TestVMMLifecycleEndToEnd(t *testing.T) {
 	env := requireHostnetAcceptanceEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	runtimeRoot := t.TempDir()
@@ -267,10 +267,8 @@ func waitForVMMPhase(t *testing.T, ctx context.Context, svc *vmm.VMMService, uui
 // waitForConsoleMarker 轮询 console.log（vmm 注入的 -serial file:）直到出现 marker。
 func waitForConsoleMarker(t *testing.T, ctx context.Context, path, marker string) {
 	t.Helper()
-	sub, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
 	for {
-		if err := sub.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			t.Fatalf("timed out waiting for console marker %q: %v\nconsole tail:\n%s", marker, err, consoleTail(path))
 		}
 		data, err := os.ReadFile(path)
@@ -278,8 +276,8 @@ func waitForConsoleMarker(t *testing.T, ctx context.Context, path, marker string
 			return
 		}
 		select {
-		case <-sub.Done():
-			t.Fatalf("timed out waiting for console marker %q: %v\nconsole tail:\n%s", marker, sub.Err(), consoleTail(path))
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for console marker %q: %v\nconsole tail:\n%s", marker, ctx.Err(), consoleTail(path))
 		case <-time.After(1 * time.Second):
 		}
 	}

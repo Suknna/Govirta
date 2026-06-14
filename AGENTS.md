@@ -1040,7 +1040,7 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 
 ## ACCEPTANCE TESTS
 
-- Fast macOS verification: run `scripts/verify.sh` for the local CI-equivalent loop before broader acceptance.
+- Fast macOS verification: run `scripts/verify.sh` for the local CI-equivalent loop before broader acceptance; it must remain `gofmt` + ordinary `go test ./...` + main service builds, with no `acceptance` or `e2e` tags.
 - Linux-only acceptance: run `scripts/acceptance.sh full`; it executes acceptance tests with `go test -v -tags acceptance -count=1 ./test/acceptance/...` inside the Lima guest and archives stdout/stderr under `test/log/<timestamp>-acceptance-full.log`.
 - Lima acceptance uses a short generated `LIMA_HOME` under the parent `.l/<repo_key>` to avoid Lima socket path limits, boots an ephemeral Ubuntu arm64 VM with nested KVM, runs the acceptance suite, deletes the VM, and preserves the gitignored persistent repo cache under project `.lima/cache/`.
 - `lima/govirta.yaml` must keep `vmType: "vz"` and `nestedVirtualization: true`; this path is verified on Apple M3 + macOS 26.5 + Lima 2.1.1.
@@ -1050,9 +1050,11 @@ Notes: no `.github/workflows` CI exists currently. `scripts/verify.sh` does not 
 - Full acceptance includes the hostnet DHCP path: `TestHostnetDHCPBindingEndToEnd` starts the CoreDHCP-backed manager on a real bridge/TAP, applies an explicit CirrOS MAC/IP binding, boots the guest without static IP commands, and verifies the lease reaches `LeaseStateBound`. The test disables the Router option to avoid CirrOS metadata-delay behavior; Router option rendering is covered by unit tests.
 - Full acceptance includes the network orchestration egress closure: `TestNetworkEgressEndToEnd` (`test/acceptance/network_egress_test.go`) registers and ensures a network + NIC through `internal/network` (`NetworkService`/`NICService` over `netpool.Service` with real `pkg/hostnet/{link,route,firewall,dhcp}/linux` managers), boots CirrOS, lets the guest obtain IP + default route + DNS from the static DHCP binding, then verifies `ping 8.8.8.8` (NAT + forward-accept + route) and `ping one.one.one.one` (DNS delivery). This is the end-to-end guest internet-access proof the hostnet primitive tests alone do not provide.
 - Distributed spine E2E: run `scripts/e2e.sh full`; it starts Docker etcd + host `govirtad` + Lima `govirtlet`, then executes `go test -v -tags e2e -count=1 ./test/e2e/...` for apply/replace/delete/finalizers/watch plus cold snapshot/resize/config checks.
+- Linux/Lima acceptance and distributed E2E are explicit heavy gates during development: run `scripts/acceptance.sh full` and `scripts/e2e.sh full` manually when validating Linux/QEMU/guest behavior.
 - `test/log/*.log` is gitignored; keep `test/log/.gitkeep` tracked and do not commit generated acceptance logs.
 - Setup required before pushing: `git config core.hooksPath .githooks`.
-- Pushing `main` must pass full Lima acceptance; do not use `git push --no-verify` to bypass the main gate.
+- Pushing `main` must pass `scripts/verify.sh`, `scripts/acceptance.sh full`, and `scripts/e2e.sh full`; do not use `git push --no-verify` to bypass the main gate.
+- Feature-branch pushes do not infer Linux relevance from changed paths; if a feature needs Linux validation before merging, run the heavy scripts explicitly.
 
 ## NOTES
 

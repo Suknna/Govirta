@@ -73,6 +73,8 @@ const (
 	vmRejectMemoryMiB = 1024 // 512×2，场景 3 On 态改内存（期望被拒，不落地）
 )
 
+var cirrosGuestReadyMarkers = []string{"Starting acpid: OK", "login:"}
+
 // 场景 2 加的第二块 data 盘。name/uid 与现有 vol-e2e-root 不同以避免冲突；
 // diskIndexData 必须与 09-volume-data.json 的 spec.diskIndex 一致（qcow2 文件后缀）。
 const (
@@ -170,8 +172,9 @@ func TestDistributedSpineClosure(t *testing.T) {
 	replaceCycle(ctx, t, ctl, server, tmpDir)
 
 	// Scenario 2: update powerState=On (powerOffMode empty) → running, On/None.
+	consoleOffset := g.ConsoleLogSizeIfExists(ctx, vmUID)
 	applyVMVariant(ctx, t, ctl, server, manifests, tmpDir, vmName, vmUID, "On", "")
-	waitVMOnRunning(ctx, t, ctl, server)
+	waitVMOnRunningAndACPID(ctx, t, ctl, server, g, consoleOffset)
 
 	// MAC 透传 live 铁证：正在运行的 QEMU 进程 argv 必须携带控制面分配的 NIC.spec.MAC，
 	// 证明 MAC 真正贯穿到 qemu argv（整顿前 device.VirtioNetPCI.Mac 从不设置）。MAC 由
@@ -461,11 +464,12 @@ func coldConfigChange(ctx context.Context, t *testing.T, ctl, server, manifests,
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
 
 	// On 起来：内存不变（512==512，非 cold 变更，纯电源变更，门禁放行），等 Running。
+	consoleOffset := g.ConsoleLogSizeIfExists(ctx, vmUID)
 	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
 		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootOnly, powerState: "On",
 	})
 	applyVMManifest(ctx, t, ctl, server, p, "scenario1 power On")
-	waitVMOnRunning(ctx, t, ctl, server)
+	waitVMOnRunningAndACPID(ctx, t, ctl, server, g, consoleOffset)
 
 	// live 铁证：正在运行的 QEMU argv 携带新内存 token `-m size=512`（Redefine 重派生）。
 	g.AssertRunningQEMUArgvHasMemory(ctx, vmUID, vmGrownMemoryMiB)
@@ -493,16 +497,24 @@ func coldConfigChange(ctx context.Context, t *testing.T, ctl, server, manifests,
 	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
 
 	// On 起来（纯电源变更），等 Running。
+	consoleOffset = g.ConsoleLogSizeIfExists(ctx, vmUID)
 	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
 		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootAndData, powerState: "On",
 	})
 	applyVMManifest(ctx, t, ctl, server, p, "scenario2 power On with two disks")
-	waitVMOnRunning(ctx, t, ctl, server)
+	waitVMOnRunningAndACPID(ctx, t, ctl, server, g, consoleOffset)
 
 	// live 铁证：QEMU argv 恰含两块 virtio-blk 盘（Redefine 重派生加盘）。
 	g.AssertRunningQEMUArgvDiskCount(ctx, vmUID, 2)
 
-	// 选项 A 收尾「删硬件 = 先从 refs 移除再删独立资源」：冷态把 volumeRefs 移除第二块盘，
+	// 先纯电源关机，避免把 ACPI 关机请求和冷态 volumeRefs 变更塞进同一个 apply。
+	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
+		memoryMiB: vmGrownMemoryMiB, volumeRefs: rootAndData, powerState: "Off", powerOffMode: "Acpi",
+	})
+	applyVMManifest(ctx, t, ctl, server, p, "scenario2 power Off before remove disk")
+	waitVMOffConverged(ctx, t, ctl, server, 3*time.Minute)
+
+	// 选项 A 收尾「删硬件 = 先从 refs 移除再删独立资源」：已冷态后把 volumeRefs 移除第二块盘，
 	// 等收敛，再删第二块 Volume 到 404（VM 已不引用 → 刀 1 反向引用守卫放行删除），并断言
 	// 其 guest qcow2 真消失。这让随后只删 vol-e2e-root 的 teardownSpine 不留 orphan。
 	p = writeVMManifestColdVariant(t, base, tmpDir, vmColdVariant{
@@ -798,6 +810,12 @@ func waitVMOnRunning(ctx context.Context, t *testing.T, ctl, server string) {
 		time.Sleep(3 * time.Second)
 	}
 	t.Fatalf("VM %s did not reach Running/On/None before deadline\nlast get:\n%s", vmName, last)
+}
+
+func waitVMOnRunningAndACPID(ctx context.Context, t *testing.T, ctl, server string, g *Guest, consoleOffset int64) {
+	t.Helper()
+	waitVMOnRunning(ctx, t, ctl, server)
+	g.WaitConsoleAnyMarkerAfter(ctx, vmUID, cirrosGuestReadyMarkers, consoleOffset, 2*time.Minute)
 }
 
 func waitVMOffConverged(ctx context.Context, t *testing.T, ctl, server string, timeout time.Duration) {

@@ -1,49 +1,12 @@
 #!/bin/sh
 set -eu
 
-remote_name=${1:-origin}
 zero_sha=0000000000000000000000000000000000000000
-empty_tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904
-acceptance_mode=
+run_full_gate=0
 saw_non_delete=0
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
-
-# Path prefixes whose changes need Linux acceptance (acceptance.sh linux) on a
-# feature-branch push. Uses package roots (pkg/hostnet/, pkg/virt/) so new
-# subpackages are covered automatically. Kept in sync with the real tree after
-# the internal/virt + internal/network/bridge -> pkg/virt + pkg/hostnet refactor;
-# internal/vmm/proc holds the real daemonized-QEMU spawn (_linux.go). The e2e
-# closure (scripts/e2e.sh) is intentionally absent: it runs in the full tier on
-# main pushes, not this per-path linux tier.
-linux_relevant_pattern='^(pkg/hostnet/|pkg/virt/|internal/vmm/proc/|internal/storage/local/|internal/storage/localfile/|test/acceptance/|lima/|scripts/acceptance\.sh$|\.githooks/pre-push$)'
-
-remote_main_exists() {
-	git rev-parse --verify --quiet "$remote_name/main" >/dev/null
-}
-
-has_linux_relevant_changes() {
-	local_sha=$1
-	remote_sha=$2
-
-	if [ "$remote_sha" = "$zero_sha" ]; then
-		if remote_main_exists; then
-			base=$remote_name/main
-		else
-			base=$empty_tree
-		fi
-	else
-		base=$remote_sha
-	fi
-
-	if ! paths=$(git diff --name-only "$base" "$local_sha"); then
-		printf '%s\n' "failed to diff pushed ref against base $base" >&2
-		exit 1
-	fi
-
-	printf '%s\n' "$paths" | grep -E "$linux_relevant_pattern" >/dev/null
-}
 
 while read -r local_ref local_sha remote_ref remote_sha; do
 	[ -n "${local_ref:-}" ] || continue
@@ -51,14 +14,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 	saw_non_delete=1
 
 	if [ "$remote_ref" = refs/heads/main ]; then
-		acceptance_mode=full
-		continue
-	fi
-
-	if [ -z "$acceptance_mode" ]; then
-		if has_linux_relevant_changes "$local_sha" "$remote_sha"; then
-			acceptance_mode=linux
-		fi
+		run_full_gate=1
 	fi
 done
 
@@ -69,23 +25,13 @@ fi
 
 scripts/verify.sh
 
-case "$acceptance_mode" in
-	full)
-		# Pushing main is the authority gate: run both the hostnet/egress Lima
-		# acceptance suite and the distributed-spine e2e closure. They use
-		# distinct Lima instances and LIMA_HOME paths (govirta-acceptance vs
-		# govirta-e2e), so running both in one push does not collide.
-		scripts/acceptance.sh full
-		scripts/e2e.sh full
-		;;
-	linux)
-		scripts/acceptance.sh linux
-		;;
-	'')
-		printf '%s\n' 'No Linux acceptance trigger for this push.'
-		;;
-	*)
-		printf '%s\n' "unknown acceptance mode: $acceptance_mode" >&2
-		exit 1
-		;;
-esac
+if [ "$run_full_gate" -eq 1 ]; then
+	# Pushing main is the authority gate: run both the hostnet/egress Lima
+	# acceptance suite and the distributed-spine e2e closure. They use
+	# distinct Lima instances and LIMA_HOME paths (govirta-acceptance vs
+	# govirta-e2e), so running both in one push does not collide.
+	scripts/acceptance.sh full
+	scripts/e2e.sh full
+else
+	printf '%s\n' 'No Linux acceptance trigger for this push.'
+fi
