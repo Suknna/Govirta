@@ -20,6 +20,25 @@ ctx7 docs /digitalocean/go-libvirt "How pure Go applications should call libvirt
 - `/gitlab_libvirt/libvirt-go-module`：libvirt 官方 Go module 绑定，Source Reputation 为 High。
 - `/digitalocean/go-libvirt`：纯 Go libvirt RPC 客户端，Source Reputation 为 High；仅作为后续候选参考，不在初始化阶段采用。
 
+## 资料快照
+
+查询日期：2026-06-25。
+
+| 来源 | 类型 | 版本、release 或状态快照 | 用途 |
+| --- | --- | --- | --- |
+| `/libvirt/libvirt` | Context7 / libvirt 官方项目镜像 | Source Reputation: High；Code Snippets: 5525 | libvirt API、连接、daemon、domain、storage、network 证据 |
+| `/gitlab_libvirt/libvirt-go-module` | Context7 / libvirt 官方 Go module | Source Reputation: High；Code Snippets: 754 | 后续 Go binding 候选，不在初始化阶段采用 |
+| `/digitalocean/go-libvirt` | Context7 / 纯 Go RPC 客户端 | Source Reputation: High；Code Snippets: 509 | 后续 Go binding 候选，不在初始化阶段采用 |
+| Kubernetes 官方文档 | 官方文档 | 2026-06-25 检索；架构页、节点页和 kubelet sync loop 页可访问 | 长期控制面、控制循环、node agent 参考 |
+| Cockpit / cockpit-machines | 项目站点 / GitHub | 2026-06-25 检索；Cockpit 项目显示 2026 年持续发布，cockpit-machines 仓库显示 2026 年仍有 release | 单机 Web 运维体验与 libvirt UI 参考 |
+| Kimchi | GitHub 仓库 | 2026-06-25 检索；README 说明其为 HTML5 KVM/libvirt Web 管理工具；最新 GitHub release 显示为 2020 年，维护状态待复核 | 产品历史参考，不作为现代架构模板 |
+| oVirt / oVirt Engine | 项目站点 / GitHub / API 文档 | 2026-06-25 检索；ovirt-engine 仓库和 API 文档可访问；release 状态需后续复核 | 数据中心级虚拟化管理资源模型参考 |
+| Proxmox VE | 官方文档 | 2026-06-25 检索；文档索引显示 Proxmox VE 9.2.2，日期为 2026-05-21 | 单机到集群 Web 运维体验参考 |
+| Harvester | 官方站点 / 文档 | 2026-06-25 检索；v1.8 文档为 latest，v1.9 为 dev | Kubernetes/HCI 虚拟化平台参考 |
+| OpenNebula | 官方站点 / 文档 | 2026-06-25 检索；官方文档显示 OpenNebula 7.2 | 云与边缘虚拟化编排参考 |
+
+维护状态未在上表明确标为“持续发布”的项目，后续进入依赖或架构复用前必须重新验证；初始化阶段只把它们作为产品或架构参考。
+
 ## MVP：单机 libvirt Web 管理端
 
 [已验证] MVP 聚焦单机 libvirt 管理。核心问题是如何把 libvirt 的连接、domain、storage pool、volume、network、interface、权限和错误状态显式呈现给浏览器用户。

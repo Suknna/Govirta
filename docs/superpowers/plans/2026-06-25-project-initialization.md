@@ -1,5 +1,7 @@
 # Govirta Project Initialization Implementation Plan
 
+> **Status:** Executed by commits `ac84d8e` and `84e8cf8` on 2026-06-25. Checkboxes preserve the original implementation plan and are not current pending tasks.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Explicitly invoke/load superpowers:goal-driven-development before implementation tasks. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Initialize Govirta as a public Go-based GitHub project with explicit project documentation, Apache-2.0 licensing, a fixed Go module path, and an evidence-backed technical analysis framework for the single-node libvirt MVP and long-term orchestration direction.
@@ -499,11 +501,23 @@ Expected: `origin` remote is added and the repository is public.
 Run only when Step 3 proves the repository exists and `defaultBranchRef` is `null`:
 
 ```bash
-git remote remove origin 2>/dev/null || true
-git remote add origin git@github.com:Suknna/Govirta.git
+if git remote get-url origin >/dev/null 2>&1; then
+  CURRENT_ORIGIN=$(git remote get-url origin)
+  case "$CURRENT_ORIGIN" in
+    https://github.com/Suknna/Govirta.git|git@github.com:Suknna/Govirta.git)
+      git remote set-url origin https://github.com/Suknna/Govirta.git
+      ;;
+    *)
+      printf 'unexpected origin remote: %s\n' "$CURRENT_ORIGIN" >&2
+      exit 2
+      ;;
+  esac
+else
+  git remote add origin https://github.com/Suknna/Govirta.git
+fi
 ```
 
-Expected: `git remote -v` shows `origin` pointing to `Suknna/Govirta`.
+Expected: `git remote -v` shows `origin` pointing to `Suknna/Govirta`; any unexpected existing remote fails closed with an explicit error.
 
 - [ ] **Step 6: Push main branch**
 
