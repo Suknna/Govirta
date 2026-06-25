@@ -1,0 +1,32 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Go build and test artifacts
+/bin/
+/build/
+/dist/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local runtime and agent artifacts
+.tmp/
+*.pid
+*.log
+
+# Dependency and tool caches
+.gocache/
