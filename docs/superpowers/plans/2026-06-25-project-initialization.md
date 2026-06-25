@@ -501,23 +501,28 @@ Expected: `origin` remote is added and the repository is public.
 Run only when Step 3 proves the repository exists and `defaultBranchRef` is `null`:
 
 ```bash
+EXPECTED_HTTPS="https://github.com/Suknna/Govirta.git"
+EXPECTED_SSH="git@github.com:Suknna/Govirta.git"
+
 if git remote get-url origin >/dev/null 2>&1; then
-  CURRENT_ORIGIN=$(git remote get-url origin)
-  case "$CURRENT_ORIGIN" in
-    https://github.com/Suknna/Govirta.git|git@github.com:Suknna/Govirta.git)
-      git remote set-url origin https://github.com/Suknna/Govirta.git
-      ;;
-    *)
-      printf 'unexpected origin remote: %s\n' "$CURRENT_ORIGIN" >&2
-      exit 2
-      ;;
-  esac
+  ORIGIN_LINES=$(git remote -v | awk '$1 == "origin" {print}')
+  BAD_ORIGIN=$(printf '%s\n' "$ORIGIN_LINES" | awk -v https="$EXPECTED_HTTPS" -v ssh="$EXPECTED_SSH" '$2 != https && $2 != ssh {print}')
+  if [ -n "$BAD_ORIGIN" ]; then
+    printf 'unexpected origin remote:\n%s\n' "$BAD_ORIGIN" >&2
+    exit 2
+  fi
+
+  git remote set-url origin "$EXPECTED_HTTPS"
+  if git config --get-all remote.origin.pushurl >/dev/null; then
+    git config --unset-all remote.origin.pushurl
+  fi
+  git remote set-url --push origin "$EXPECTED_HTTPS"
 else
-  git remote add origin https://github.com/Suknna/Govirta.git
+  git remote add origin "$EXPECTED_HTTPS"
 fi
 ```
 
-Expected: `git remote -v` shows `origin` pointing to `Suknna/Govirta`; any unexpected existing remote fails closed with an explicit error.
+Expected: `git remote -v` shows both fetch and push URLs for `origin` pointing to `Suknna/Govirta`; any unexpected existing fetch or push URL fails closed with an explicit error.
 
 - [ ] **Step 6: Push main branch**
 
